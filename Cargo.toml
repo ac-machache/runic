@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "runic",
+    "crates/runic-message-types",
+    "crates/runic-provider-core",
+    "crates/runic-provider-anthropic",
+    "crates/runic-provider-gemini",
+    "crates/runic-storage-backend",
+    "crates/runic-context-engine",
+    "crates/runic-agent-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["machache <machache@eittel.com>"]
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+eventsource-stream = "0.2"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tempfile = "3"
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
+tokio-stream = "0.1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+runic-message-types = { path = "crates/runic-message-types" }
+runic-provider-core = { path = "crates/runic-provider-core" }
+runic-provider-anthropic = { path = "crates/runic-provider-anthropic" }
+runic-provider-gemini = { path = "crates/runic-provider-gemini" }
+runic-storage-backend = { path = "crates/runic-storage-backend" }
+runic-context-engine = { path = "crates/runic-context-engine" }
+runic-agent-core = { path = "crates/runic-agent-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

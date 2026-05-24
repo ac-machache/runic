@@ -23,6 +23,7 @@ use runic_message_types::ToolCall;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
+use runic_skills::{SkillRegistry, SkillViewTool, SkillsIndexLayer};
 use runic_storage_backend::{LocalFsBackend, StorageBackend};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::StreamExt;
@@ -100,11 +101,27 @@ async fn main() -> Result<()> {
 
     let storage: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(runic_home.clone()));
 
+    // ── Skills: scan ~/.runic/skills/ for {dir}/SKILL.md entries ───────
+    // Each parsed skill becomes an entry in the trigger table the model
+    // sees in the system prompt. The model loads bodies on demand via
+    // the `skill_view` tool.
+    let skill_registry = Arc::new(
+        SkillRegistry::load(storage.clone(), "skills")
+            .await
+            .context("loading skills from ~/.runic/skills/")?,
+    );
+    eprintln!(
+        "[skills] loaded {} skill(s): {:?}",
+        skill_registry.len(),
+        skill_registry.list().iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>()
+    );
+
     let context_engine = CompositeEngine::new()
         .with_layer(BasePromptLayer::new(DEFAULT_SYSTEM_PROMPT))
         .with_layer(PersonaLayer::new(storage.clone(), "SOUL.md"))
         .with_layer(UserFactsLayer::new(storage.clone(), "memory/USER.md"))
-        .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md"));
+        .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md"))
+        .with_layer(SkillsIndexLayer::new(skill_registry.clone()));
 
     // Helper closure-factory builder for any subagent kind we want.
     // Generic over the trait object so the same factory works for any provider.
@@ -148,10 +165,13 @@ async fn main() -> Result<()> {
         ),
     );
 
+    let skill_view_tool = SkillViewTool::new(skill_registry.clone(), storage.clone(), "skills");
+
     let mut agent = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .context_engine(context_engine)
         .tool(Arc::new(EchoTool))
+        .tool(Arc::new(skill_view_tool))
         .tool(Arc::new(research_subagent))
         .hitl_tool(Arc::new(EmailTool))
         .background_tool(Arc::new(SlowCountTool))

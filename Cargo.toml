@@ -10,6 +10,7 @@ members = [
     "crates/runic-context-engine",
     "crates/runic-tool-core",
     "crates/runic-agent-core",
+    "crates/runic-skills",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+serde_yml = "0.0.12"
 
 runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
@@ -43,6 +45,7 @@ runic-storage-backend = { path = "crates/runic-storage-backend" }
 runic-context-engine = { path = "crates/runic-context-engine" }
 runic-tool-core = { path = "crates/runic-tool-core" }
 runic-agent-core = { path = "crates/runic-agent-core" }
+runic-skills = { path = "crates/runic-skills" }
 
 [profile.release]
 opt-level = 3

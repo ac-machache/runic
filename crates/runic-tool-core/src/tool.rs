@@ -4,8 +4,6 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::AgentError;
-
 /// Output of a tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -27,6 +25,14 @@ impl ToolResult {
             is_error: true,
         }
     }
+}
+
+/// Errors that can be surfaced by [`ToolRegistry::dispatch`]. Kept tiny and
+/// crate-local so this crate does not depend on the agent-core error type.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolDispatchError {
+    #[error("tool '{tool}' not found")]
+    UnknownTool { tool: String },
 }
 
 /// Read-only context passed into tool executions.
@@ -242,10 +248,10 @@ impl ToolRegistry {
         &self,
         call: &ToolCall,
         ctx: &ToolContext,
-    ) -> Result<ToolResult, AgentError> {
+    ) -> Result<ToolResult, ToolDispatchError> {
         let tool = self
             .get(&call.name)
-            .ok_or_else(|| AgentError::UnknownTool {
+            .ok_or_else(|| ToolDispatchError::UnknownTool {
                 tool: call.name.clone(),
             })?;
         Ok(tool.dispatch(call, ctx).await)
@@ -335,8 +341,7 @@ mod tests {
         let err = reg.dispatch(&call, &ctx).await.unwrap_err();
 
         match err {
-            AgentError::UnknownTool { tool } => assert_eq!(tool, "missing"),
-            other => panic!("unexpected error: {other:?}"),
+            ToolDispatchError::UnknownTool { tool } => assert_eq!(tool, "missing"),
         }
     }
 

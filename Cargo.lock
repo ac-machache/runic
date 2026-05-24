@@ -895,10 +895,12 @@ dependencies = [
  "dotenvy",
  "futures",
  "runic-agent-core",
+ "runic-context-engine",
  "runic-message-types",
  "runic-provider-anthropic",
  "runic-provider-core",
  "runic-provider-gemini",
+ "runic-storage-backend",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -916,6 +918,7 @@ dependencies = [
  "runic-context-engine",
  "runic-message-types",
  "runic-provider-core",
+ "runic-tool-core",
  "serde",
  "serde_json",
  "thiserror",
@@ -1005,6 +1008,19 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "runic-tool-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "runic-message-types",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

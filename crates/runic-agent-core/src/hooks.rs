@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use runic_message_types::ToolCall;
 
 use crate::state::AgentState;
-use crate::tool::ToolResult;
+use runic_tool_core::ToolResult;
 
 /// What a hook tells the loop to do next.
 #[derive(Debug, Clone)]

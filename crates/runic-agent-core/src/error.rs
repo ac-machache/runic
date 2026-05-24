@@ -1,4 +1,5 @@
 use runic_provider_core::ProviderError;
+use runic_tool_core::ToolDispatchError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
@@ -25,4 +26,12 @@ pub enum AgentError {
 
     #[error("no Approval registred in runtime context (required by HitlTool '{tool}')")]
     ApproverMissing { tool: String },
+}
+
+impl From<ToolDispatchError> for AgentError {
+    fn from(err: ToolDispatchError) -> Self {
+        match err {
+            ToolDispatchError::UnknownTool { tool } => AgentError::UnknownTool { tool },
+        }
+    }
 }

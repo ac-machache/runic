@@ -1,7 +1,11 @@
 //! Runic agent kernel.
 //!
-//! Headless runtime: agent loop, tool dispatch, hook system, conversation
-//! state. No TUI, no CLI, no UI — callers build their own surface on top.
+//! Headless runtime: agent loop, hook system, conversation state. No TUI,
+//! no CLI, no UI — callers build their own surface on top.
+//!
+//! Tool primitives (`Tool`, `HitlTool`, `BackgroundTool`, the dispatch
+//! registry, etc.) live in the sibling crate [`runic_tool_core`] and are
+//! re-exported here for convenience.
 //!
 //! ```ignore
 //! use runic_agent_core::{Agent, AgentConfig};
@@ -15,24 +19,26 @@
 //! ```
 
 pub mod agent;
-pub mod approval;
-pub mod background;
 pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod state;
 pub mod subagent;
-pub mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, RunOutcome};
-pub use approval::{ApprovalRequest, Approver, ApproverHandle, Draft, HitlTool, UserDecision};
-pub use background::{
-    AbortOutcome, BackgroundAdapter, BackgroundCancelTool, BackgroundManager,
-    BackgroundStatusTool, BackgroundTool, TaskStatusView,
-};
 pub use error::AgentError;
 pub use event::{AgentEvent, TokenUsage};
 pub use hooks::{Hook, HookOutcome};
 pub use state::AgentState;
 pub use subagent::{AsyncSubagentTool, SubagentTool};
-pub use tool::{Tool, ToolContext, ToolRegistry, ToolResult};
+
+// Re-export tool primitives from the sibling crate so existing call sites
+// (`runic_agent_core::Tool`, `runic_agent_core::BackgroundTool`, etc.) keep
+// working. New code can depend on `runic-tool-core` directly to avoid pulling
+// in the agent kernel.
+pub use runic_tool_core::{
+    AbortOutcome, ApprovalRequest, Approver, ApproverHandle, BackgroundAdapter,
+    BackgroundCancelTool, BackgroundManager, BackgroundStatusTool, BackgroundTool, Draft,
+    HitlAdapter, HitlTool, PlainAdapter, TaskStatusView, Tool, ToolContext, ToolDispatch,
+    ToolDispatchError, ToolRegistry, ToolResult, UserDecision,
+};

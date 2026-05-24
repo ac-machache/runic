@@ -1,7 +1,7 @@
 use runic_message_types::ToolCall;
 use serde::{Deserialize, Serialize};
 
-use crate::tool::ToolResult;
+use runic_tool_core::ToolResult;
 
 /// Token-usage snapshot reported by the provider.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

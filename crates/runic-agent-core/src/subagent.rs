@@ -28,8 +28,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::agent::Agent;
-use crate::background::BackgroundTool;
-use crate::tool::{Tool, ToolContext, ToolResult};
+use runic_tool_core::{BackgroundTool, Tool, ToolContext, ToolResult};
 
 /// A subagent tool. Construct one per "kind" of subagent with a factory
 /// closure that knows how to build a fresh child `Agent` per invocation.

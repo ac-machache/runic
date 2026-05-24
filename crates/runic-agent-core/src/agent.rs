@@ -13,7 +13,7 @@ use crate::error::AgentError;
 use crate::event::{AgentEvent, TokenUsage};
 use crate::hooks::{Hook, HookOutcome};
 use crate::state::{AgentState, HookLifecycle, RunTimeContext, SessionEvent};
-use crate::tool::{ToolContext, ToolRegistry, ToolResult};
+use runic_tool_core::{ToolContext, ToolDispatchError, ToolRegistry, ToolResult};
 
 /// Tunable knobs for the agent run loop.
 #[derive(Debug, Clone)]
@@ -540,10 +540,9 @@ impl Agent {
                     let started = Instant::now();
                     let result = match tools_ref.dispatch(&call, ctx_ref).await {
                         Ok(r) => r,
-                        Err(AgentError::UnknownTool { tool }) => {
+                        Err(ToolDispatchError::UnknownTool { tool }) => {
                             ToolResult::error(format!("unknown tool: {tool}"))
                         }
-                        Err(err) => ToolResult::error(format!("tool dispatch failed: {err}")),
                     };
                     let duration_ms = started.elapsed().as_millis() as u64;
                     let _ = events
@@ -579,10 +578,9 @@ impl Agent {
             let started = Instant::now();
             let result = match self.tools.dispatch(&call, &ctx).await {
                 Ok(r) => r,
-                Err(AgentError::UnknownTool { tool }) => {
+                Err(ToolDispatchError::UnknownTool { tool }) => {
                     ToolResult::error(format!("unknown tool: {tool}"))
                 }
-                Err(err) => ToolResult::error(format!("tool dispatch failed: {err}")),
             };
             let duration_ms = started.elapsed().as_millis() as u64;
             let _ = events
@@ -827,12 +825,12 @@ impl AgentBuilder {
         self
     }
 
-    pub fn tool<T: crate::tool::Tool + 'static>(mut self, tool: Arc<T>) -> Self {
+    pub fn tool<T: runic_tool_core::Tool + 'static>(mut self, tool: Arc<T>) -> Self {
         self.tools.register(tool);
         self
     }
 
-    pub fn hitl_tool<T: crate::approval::HitlTool + 'static>(mut self, tool: Arc<T>) -> Self {
+    pub fn hitl_tool<T: runic_tool_core::HitlTool + 'static>(mut self, tool: Arc<T>) -> Self {
         self.tools.register_hitl(tool);
         self
     }
@@ -840,21 +838,21 @@ impl AgentBuilder {
     /// Register a long-running tool. On first use this also auto-installs the
     /// `BackgroundManager` in runtime context and registers the generic
     /// `background_status` tool so the model can poll task ids.
-    pub fn background_tool<T: crate::background::BackgroundTool + 'static>(
+    pub fn background_tool<T: runic_tool_core::BackgroundTool + 'static>(
         mut self,
         tool: Arc<T>,
     ) -> Self {
         if self
             .runtime
-            .get::<crate::background::BackgroundManager>()
+            .get::<runic_tool_core::BackgroundManager>()
             .is_none()
         {
             self.runtime
-                .insert(crate::background::BackgroundManager::new());
+                .insert(runic_tool_core::BackgroundManager::new());
             self.tools
-                .register(Arc::new(crate::background::BackgroundStatusTool));
+                .register(Arc::new(runic_tool_core::BackgroundStatusTool));
             self.tools
-                .register(Arc::new(crate::background::BackgroundCancelTool));
+                .register(Arc::new(runic_tool_core::BackgroundCancelTool));
         }
         self.tools.register_background(tool);
         self

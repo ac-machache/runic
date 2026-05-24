@@ -16,10 +16,14 @@ use runic_agent_core::{
     AsyncSubagentTool, BackgroundTool, Draft, HitlTool, Hook, HookOutcome, SubagentTool, Tool,
     ToolContext, ToolResult, UserDecision,
 };
+use runic_context_engine::{
+    BasePromptLayer, CompositeEngine, MemoryLayer, PersonaLayer, UserFactsLayer,
+};
 use runic_message_types::ToolCall;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
+use runic_storage_backend::{LocalFsBackend, StorageBackend};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -83,6 +87,25 @@ async fn main() -> Result<()> {
     let session_uuid_for_print = session_uuid.0;
     let approver: ApproverHandle = Arc::new(StdinApprover);
 
+    // ── Context engine: file-backed SOUL / USER / MEMORY ────────────────
+    // RUNIC_HOME overrides the default ~/.runic/ if set.
+    let runic_home: std::path::PathBuf = std::env::var("RUNIC_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let mut p = dirs_home_or_cwd();
+            p.push(".runic");
+            p
+        });
+    eprintln!("[runic-home] {}", runic_home.display());
+
+    let storage: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(runic_home.clone()));
+
+    let context_engine = CompositeEngine::new()
+        .with_layer(BasePromptLayer::new(DEFAULT_SYSTEM_PROMPT))
+        .with_layer(PersonaLayer::new(storage.clone(), "SOUL.md"))
+        .with_layer(UserFactsLayer::new(storage.clone(), "memory/USER.md"))
+        .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md"));
+
     // Helper closure-factory builder for any subagent kind we want.
     // Generic over the trait object so the same factory works for any provider.
     let make_subagent_factory =
@@ -127,6 +150,7 @@ async fn main() -> Result<()> {
 
     let mut agent = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
+        .context_engine(context_engine)
         .tool(Arc::new(EchoTool))
         .tool(Arc::new(research_subagent))
         .hitl_tool(Arc::new(EmailTool))
@@ -591,4 +615,19 @@ impl BackgroundTool for SlowCountTool {
         tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
         ToolResult::ok(format!("counted to {seconds}"))
     }
+}
+
+// ─── Home directory helper ──────────────────────────────────────────────────
+
+/// Resolve the user's home directory (HOME on Unix, USERPROFILE on Windows).
+/// Falls back to the current working directory if none can be found —
+/// guarantees we never crash for missing env vars.
+fn dirs_home_or_cwd() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return std::path::PathBuf::from(home);
+    }
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        return std::path::PathBuf::from(home);
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }

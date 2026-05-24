@@ -8,6 +8,7 @@ members = [
     "crates/runic-provider-gemini",
     "crates/runic-storage-backend",
     "crates/runic-context-engine",
+    "crates/runic-tool-core",
     "crates/runic-agent-core",
 ]
 
@@ -40,6 +41,7 @@ runic-provider-anthropic = { path = "crates/runic-provider-anthropic" }
 runic-provider-gemini = { path = "crates/runic-provider-gemini" }
 runic-storage-backend = { path = "crates/runic-storage-backend" }
 runic-context-engine = { path = "crates/runic-context-engine" }
+runic-tool-core = { path = "crates/runic-tool-core" }
 runic-agent-core = { path = "crates/runic-agent-core" }
 
 [profile.release]

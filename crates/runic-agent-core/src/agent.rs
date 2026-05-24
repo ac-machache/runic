@@ -886,6 +886,32 @@ impl AgentBuilder {
         self
     }
 
+    /// Same as [`Self::runtime`] but accepts an already-shared `Arc<T>`.
+    /// Lets callers keep their own clone alive after handing one to the
+    /// agent — e.g. sharing a `BackgroundManager` with a reminder.
+    pub fn runtime_arc<T: 'static + Send + Sync>(mut self, value: Arc<T>) -> Self {
+        self.runtime.insert_arc(value);
+        self
+    }
+
+    /// Convenience: register an externally-constructed `BackgroundManager`
+    /// AND the `background_status` / `background_cancel` helper tools that
+    /// usually get auto-installed by the first [`Self::background_tool`]
+    /// call. Use this when something outside the agent (a
+    /// `BackgroundTaskReminder`, monitoring code) needs to share the
+    /// manager.
+    pub fn background_manager(
+        mut self,
+        manager: Arc<runic_tool_core::BackgroundManager>,
+    ) -> Self {
+        self.runtime.insert_arc(manager);
+        self.tools
+            .register(Arc::new(runic_tool_core::BackgroundStatusTool));
+        self.tools
+            .register(Arc::new(runic_tool_core::BackgroundCancelTool));
+        self
+    }
+
     pub fn build(self) -> Agent {
         let session_id = self
             .session_id

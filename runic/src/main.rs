@@ -13,12 +13,12 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use runic_agent_core::{
     Agent, AgentConfig, AgentEvent, AgentState, ApprovalRequest, Approver, ApproverHandle,
-    AsyncSubagentTool, BackgroundTool, Draft, HitlTool, Hook, HookOutcome, SubagentTool, Tool,
-    ToolContext, ToolResult, UserDecision,
+    AsyncSubagentTool, BackgroundManager, BackgroundTool, Draft, HitlTool, Hook, HookOutcome,
+    SubagentTool, Tool, ToolContext, ToolResult, UserDecision,
 };
 use runic_context_engine::{
-    BasePromptLayer, CompactorEngine, CompositeEngine, ContextEngine, MemoryLayer, PersonaLayer,
-    SpilloverEngine, UserFactsLayer,
+    BackgroundTaskReminder, BasePromptLayer, CompactorEngine, CompositeEngine, ContextEngine,
+    MemoryLayer, PersonaLayer, ReminderEngine, SpilloverEngine, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
@@ -166,18 +166,28 @@ async fn main() -> Result<()> {
         "[context] compact_threshold={compact_threshold} tokens, spillover_threshold={spill_threshold} bytes"
     );
 
+    // BackgroundManager constructed up front so it can be shared by both
+    // the agent (via runtime context) and the reminder (read-only access).
+    let background_manager = Arc::new(BackgroundManager::new());
+
     let context_engine: Arc<dyn ContextEngine> = {
         let inner: Arc<dyn ContextEngine> = Arc::new(composite);
         let compacted: Arc<dyn ContextEngine> = Arc::new(
             CompactorEngine::new(inner, provider.clone()).with_token_threshold(compact_threshold),
         );
-        Arc::new(SpilloverEngine::with_settings(
+        let spilled: Arc<dyn ContextEngine> = Arc::new(SpilloverEngine::with_settings(
             compacted,
             storage.clone(),
             "spillover",
             spill_threshold,
             runic_context_engine::DEFAULT_PREVIEW_CHARS,
-        ))
+        ));
+        // ReminderEngine is OUTERMOST so its ambient notes layer on top of
+        // anything the inner engines produce.
+        Arc::new(
+            ReminderEngine::new(spilled)
+                .with_reminder(BackgroundTaskReminder::new(background_manager.clone())),
+        )
     };
 
     // Helper closure-factory builder for any subagent kind we want.
@@ -282,6 +292,9 @@ async fn main() -> Result<()> {
     let mut builder = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .context_engine_arc(context_engine)
+        // Share the externally-built BackgroundManager so the reminder sees
+        // the same task ids the agent's background tools register against.
+        .background_manager(background_manager.clone())
         .tool(Arc::new(EchoTool))
         .tool(Arc::new(skill_view_tool))
         .tool(Arc::new(research_subagent))

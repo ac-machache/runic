@@ -244,6 +244,15 @@ impl BackgroundManager {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// All known task ids, sorted. Used by reminder sources that want to
+    /// scan for newly-completed tasks each turn.
+    pub fn task_ids(&self) -> Vec<String> {
+        let tasks = self.tasks.lock().expect("tasks lock poisoned");
+        let mut ids: Vec<String> = tasks.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
 }
 
 impl std::fmt::Debug for BackgroundManager {

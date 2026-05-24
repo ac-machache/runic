@@ -19,6 +19,15 @@ impl RunTimeContext {
         self.ctx.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
+    /// Like [`Self::insert`] but accepts an already-shared `Arc<T>` so
+    /// callers can keep a clone for themselves. Useful when a single
+    /// instance must be shared with something outside the agent (e.g.
+    /// a `BackgroundTaskReminder` that needs the same `BackgroundManager`
+    /// the agent uses).
+    pub fn insert_arc<T: 'static + Send + Sync>(&mut self, value: Arc<T>) {
+        self.ctx.insert(TypeId::of::<T>(), value);
+    }
+
     pub fn get<T: 'static + Send + Sync>(&self) -> Option<Arc<T>> {
         self.ctx
             .get(&TypeId::of::<T>())

@@ -12,12 +12,14 @@ pub mod compactor;
 pub mod composite;
 pub mod layer;
 pub mod layers;
+pub mod reminder;
 pub mod spillover;
 
 pub use compactor::{CompactorEngine, DEFAULT_KEEP_RECENT, DEFAULT_TOKEN_THRESHOLD};
 pub use composite::CompositeEngine;
 pub use layer::ContextLayer;
 pub use layers::{BasePromptLayer, FileLayer, MemoryLayer, PersonaLayer, UserFactsLayer};
+pub use reminder::{BackgroundTaskReminder, Reminder, ReminderEngine};
 pub use spillover::{SpilloverEngine, DEFAULT_PREVIEW_CHARS, DEFAULT_THRESHOLD_BYTES};
 
 use async_trait::async_trait;

@@ -967,6 +967,7 @@ dependencies = [
  "runic-message-types",
  "runic-provider-core",
  "runic-storage-backend",
+ "runic-tool-core",
  "serde",
  "serde_json",
  "tokio",

@@ -8,13 +8,17 @@
 //! and `CompositeEngine` (configurable, composed of `ContextLayer`s plus
 //! policies for spillover and compaction).
 
+pub mod compactor;
 pub mod composite;
 pub mod layer;
 pub mod layers;
+pub mod spillover;
 
+pub use compactor::{CompactorEngine, DEFAULT_KEEP_RECENT, DEFAULT_TOKEN_THRESHOLD};
 pub use composite::CompositeEngine;
 pub use layer::ContextLayer;
 pub use layers::{BasePromptLayer, FileLayer, MemoryLayer, PersonaLayer, UserFactsLayer};
+pub use spillover::{SpilloverEngine, DEFAULT_PREVIEW_CHARS, DEFAULT_THRESHOLD_BYTES};
 
 use async_trait::async_trait;
 use runic_message_types::Message;
@@ -45,7 +49,7 @@ pub trait ContextEngine: Send + Sync {
     async fn process_user_input(&self, _ctx: &TurnContext<'_>, msg: Message) -> Message {
         msg
     }
-    async fn maybe_compact(&self, _ctx: &TurnContext, _messages: &mut Vec<Message>) -> () {}
+    async fn maybe_compact(&self, _ctx: &TurnContext<'_>, _messages: &mut Vec<Message>) {}
 }
 
 #[derive(Debug, Clone, Default)]

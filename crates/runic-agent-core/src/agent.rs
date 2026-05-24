@@ -810,6 +810,17 @@ impl AgentBuilder {
         self
     }
 
+    /// Same as [`Self::context_engine`] but accepts an already-shared
+    /// engine. Useful when the engine is a chain of decorators built up
+    /// behind `Arc<dyn ContextEngine>` (e.g. `Spillover -> Compactor ->
+    /// Composite`) — that shape doesn't fit the generic-impl bound on
+    /// [`Self::context_engine`] but is exactly what wrapping engines
+    /// produce.
+    pub fn context_engine_arc(mut self, engine: Arc<dyn ContextEngine>) -> Self {
+        self.context_engine = engine;
+        self
+    }
+
     pub fn system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self

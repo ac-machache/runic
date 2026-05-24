@@ -963,7 +963,9 @@ name = "runic-context-engine"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "runic-message-types",
+ "runic-provider-core",
  "runic-storage-backend",
  "serde",
  "serde_json",

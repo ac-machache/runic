@@ -17,7 +17,8 @@ use runic_agent_core::{
     ToolContext, ToolResult, UserDecision,
 };
 use runic_context_engine::{
-    BasePromptLayer, CompositeEngine, MemoryLayer, PersonaLayer, UserFactsLayer,
+    BasePromptLayer, CompactorEngine, CompositeEngine, ContextEngine, MemoryLayer, PersonaLayer,
+    SpilloverEngine, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
@@ -139,12 +140,45 @@ async fn main() -> Result<()> {
         skill_registry.list().iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>()
     );
 
-    let context_engine = CompositeEngine::new()
+    let composite = CompositeEngine::new()
         .with_layer(BasePromptLayer::new(DEFAULT_SYSTEM_PROMPT))
         .with_layer(PersonaLayer::new(storage.clone(), "SOUL.md"))
         .with_layer(UserFactsLayer::new(storage.clone(), "memory/USER.md"))
         .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md"))
         .with_layer(SkillsIndexLayer::new(skill_registry.clone()));
+
+    // Wrap the composite in two decorator engines:
+    //   1. CompactorEngine — when total tokens > threshold, summarize old
+    //      messages via the provider. Inner-most so the summary itself
+    //      gets passed to spillover (if huge).
+    //   2. SpilloverEngine — large tool results get written to disk under
+    //      ~/.runic/spillover/{run_id}/{call_id}.txt; the in-context
+    //      content is replaced with a path + preview.
+    let compact_threshold: usize = std::env::var("RUNIC_COMPACT_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(runic_context_engine::DEFAULT_TOKEN_THRESHOLD);
+    let spill_threshold: usize = std::env::var("RUNIC_SPILLOVER_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(runic_context_engine::DEFAULT_THRESHOLD_BYTES);
+    eprintln!(
+        "[context] compact_threshold={compact_threshold} tokens, spillover_threshold={spill_threshold} bytes"
+    );
+
+    let context_engine: Arc<dyn ContextEngine> = {
+        let inner: Arc<dyn ContextEngine> = Arc::new(composite);
+        let compacted: Arc<dyn ContextEngine> = Arc::new(
+            CompactorEngine::new(inner, provider.clone()).with_token_threshold(compact_threshold),
+        );
+        Arc::new(SpilloverEngine::with_settings(
+            compacted,
+            storage.clone(),
+            "spillover",
+            spill_threshold,
+            runic_context_engine::DEFAULT_PREVIEW_CHARS,
+        ))
+    };
 
     // Helper closure-factory builder for any subagent kind we want.
     // Generic over the trait object so the same factory works for any provider.
@@ -247,7 +281,7 @@ async fn main() -> Result<()> {
 
     let mut builder = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
-        .context_engine(context_engine)
+        .context_engine_arc(context_engine)
         .tool(Arc::new(EchoTool))
         .tool(Arc::new(skill_view_tool))
         .tool(Arc::new(research_subagent))

@@ -303,12 +303,12 @@ mod tests {
     #[tokio::test]
     async fn acquire_missing_binary_returns_error_and_records_cooldown() {
         let pool = SharedMcpPool::new();
-        let cfg = McpServerConfig {
+        let cfg = McpServerConfig::Stdio(crate::config::StdioServerConfig {
             command: "/definitely/not/here".into(),
             args: vec![],
             env: Default::default(),
             shared: true,
-        };
+        });
         let first = pool.acquire("ghost", &cfg).await;
         assert!(first.is_err());
 

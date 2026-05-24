@@ -145,21 +145,21 @@ mod tests {
         let mut cfg = McpConfig::default();
         cfg.mcp_servers.insert(
             "ghost".into(),
-            McpServerConfig {
+            McpServerConfig::Stdio(crate::config::StdioServerConfig {
                 command: "/does/not/exist".into(),
                 args: vec![],
                 env: Default::default(),
                 shared: true,
-            },
+            }),
         );
         cfg.mcp_servers.insert(
             "phantom".into(),
-            McpServerConfig {
+            McpServerConfig::Stdio(crate::config::StdioServerConfig {
                 command: "/also/does/not/exist".into(),
                 args: vec![],
                 env: Default::default(),
                 shared: true,
-            },
+            }),
         );
 
         let m = McpManager::connect_all(&cfg).await;

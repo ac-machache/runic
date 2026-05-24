@@ -959,7 +959,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "eventsource-stream",
  "futures",
+ "reqwest",
  "runic-message-types",
  "runic-tool-core",
  "serde",

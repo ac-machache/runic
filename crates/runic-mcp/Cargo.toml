@@ -9,7 +9,9 @@ publish.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+eventsource-stream = { workspace = true }
 futures = { workspace = true }
+reqwest = { workspace = true }
 runic-message-types = { workspace = true }
 runic-tool-core = { workspace = true }
 serde = { workspace = true }

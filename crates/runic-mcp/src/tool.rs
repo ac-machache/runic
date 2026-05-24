@@ -86,14 +86,40 @@ impl Tool for McpTool {
 mod tests {
     use super::*;
     use crate::protocol::{ContentBlock, ResourceContent};
-    use std::collections::HashMap;
-    use std::sync::atomic::AtomicU64;
+    use crate::transport::Transport;
+    use async_trait::async_trait;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Mutex};
+
+    /// Minimal Transport that doesn't talk to anything — just enough to
+    /// build an McpHandle for the assertions below that only check the
+    /// adapter's metadata methods (name, description, schema).
+    #[derive(Debug)]
+    struct DummyTransport(String);
+
+    #[async_trait]
+    impl Transport for DummyTransport {
+        fn server_name(&self) -> &str {
+            &self.0
+        }
+        async fn request(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, crate::error::McpError> {
+            Err(crate::error::McpError::Disconnected(self.0.clone()))
+        }
+        async fn notify(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<(), crate::error::McpError> {
+            Ok(())
+        }
+        async fn close(&self) {}
+    }
 
     fn make_handle(server: &str) -> McpHandle {
-        let (tx, _rx) = mpsc::channel::<String>(8);
-        McpHandle::__test_only(server.to_string(), tx)
+        McpHandle::from_transport(Arc::new(DummyTransport(server.to_string())))
     }
 
     fn make_def(name: &str) -> McpToolDef {
@@ -159,16 +185,4 @@ mod tests {
         assert!(out.contains("file:///x"));
     }
 
-    // Construction helpers gated behind cfg(test) so tests can build
-    // a McpHandle without going through `McpClient::connect`.
-    impl McpHandle {
-        pub(crate) fn __test_only(server_name: String, tx: mpsc::Sender<String>) -> Self {
-            McpHandle {
-                server_name: Arc::new(server_name),
-                writer_tx: tx,
-                pending: Arc::new(Mutex::new(HashMap::new())),
-                request_id: Arc::new(AtomicU64::new(1)),
-            }
-        }
-    }
 }

@@ -22,6 +22,7 @@ use runic_context_engine::{
 use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
 use runic_mcp::{McpConfig, McpManager};
+use runic_plugins::PluginManager;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
@@ -103,17 +104,37 @@ async fn main() -> Result<()> {
 
     let storage: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(runic_home.clone()));
 
+    // ── Plugins: discover ~/.runic/plugins/{name}/{skills,agents}/ ─────
+    // Each plugin contributes skills and/or markdown agents that get
+    // merged into the flat registries below. Missing dir is fine.
+    let plugin_manager = PluginManager::load(storage.clone(), "plugins")
+        .await
+        .context("loading plugins from ~/.runic/plugins/")?;
+    if !plugin_manager.is_empty() {
+        eprintln!(
+            "[plugins] loaded {} plugin(s): {:?} ({} skill(s), {} agent(s) total)",
+            plugin_manager.len(),
+            plugin_manager.names(),
+            plugin_manager.total_skills(),
+            plugin_manager.total_agents()
+        );
+    }
+
     // ── Skills: scan ~/.runic/skills/ for {dir}/SKILL.md entries ───────
-    // Each parsed skill becomes an entry in the trigger table the model
-    // sees in the system prompt. The model loads bodies on demand via
-    // the `skill_view` tool.
-    let skill_registry = Arc::new(
-        SkillRegistry::load(storage.clone(), "skills")
+    // Then merge in any skills contributed by plugins. Plugin skills with
+    // the same name as a top-level skill OVERWRITE the top-level entry
+    // (plugins are loaded last for collision resolution).
+    let skill_registry = Arc::new({
+        let mut reg = SkillRegistry::load(storage.clone(), "skills")
             .await
-            .context("loading skills from ~/.runic/skills/")?,
-    );
+            .context("loading skills from ~/.runic/skills/")?;
+        for s in plugin_manager.aggregate_skills().list() {
+            reg.insert(s.clone());
+        }
+        reg
+    });
     eprintln!(
-        "[skills] loaded {} skill(s): {:?}",
+        "[skills] {} total skill(s) registered: {:?}",
         skill_registry.len(),
         skill_registry.list().iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>()
     );
@@ -171,11 +192,19 @@ async fn main() -> Result<()> {
 
     // ── Markdown-defined sub-agents: scan ~/.runic/agents/ ──────────────
     // Each {dir}/AGENT.md becomes a SubagentTool the parent agent can call.
-    let agent_registry = AgentRegistry::load(storage.clone(), "agents")
-        .await
-        .context("loading agents from ~/.runic/agents/")?;
+    // Then merge in any agents contributed by plugins (same collision
+    // policy as skills above).
+    let agent_registry = {
+        let mut reg = AgentRegistry::load(storage.clone(), "agents")
+            .await
+            .context("loading agents from ~/.runic/agents/")?;
+        for a in plugin_manager.aggregate_agents().list() {
+            reg.insert(a.clone());
+        }
+        reg
+    };
     eprintln!(
-        "[agents] loaded {} markdown agent(s): {:?}",
+        "[agents] {} total markdown agent(s) registered: {:?}",
         agent_registry.len(),
         agent_registry
             .list()

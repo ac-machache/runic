@@ -909,6 +909,7 @@ dependencies = [
  "runic-context-engine",
  "runic-mcp",
  "runic-message-types",
+ "runic-plugins",
  "runic-provider-anthropic",
  "runic-provider-core",
  "runic-provider-gemini",
@@ -996,6 +997,19 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "runic-plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "runic-agents",
+ "runic-skills",
+ "runic-storage-backend",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

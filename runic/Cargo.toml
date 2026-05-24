@@ -19,6 +19,7 @@ runic-agent-core = { workspace = true }
 runic-agents = { workspace = true }
 runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
+runic-plugins = { workspace = true }
 runic-message-types = { workspace = true }
 runic-provider-anthropic = { workspace = true }
 runic-provider-core = { workspace = true }

@@ -906,6 +906,7 @@ dependencies = [
  "futures",
  "runic-agent-core",
  "runic-context-engine",
+ "runic-mcp",
  "runic-message-types",
  "runic-provider-anthropic",
  "runic-provider-core",
@@ -948,6 +949,23 @@ dependencies = [
  "runic-storage-backend",
  "serde",
  "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "runic-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "runic-message-types",
+ "runic-tool-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
 ]

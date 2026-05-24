@@ -20,6 +20,7 @@ use runic_context_engine::{
     BasePromptLayer, CompositeEngine, MemoryLayer, PersonaLayer, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
+use runic_mcp::{McpConfig, McpManager};
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
@@ -167,7 +168,39 @@ async fn main() -> Result<()> {
 
     let skill_view_tool = SkillViewTool::new(skill_registry.clone(), storage.clone(), "skills");
 
-    let mut agent = Agent::builder(provider.clone())
+    // ── MCP: connect to any servers configured in ~/.runic/mcp.json ────
+    // Missing config file is fine; per-server connect failures are logged
+    // and don't abort the agent.
+    let mcp_config_path = runic_home.join("mcp.json");
+    let mcp_manager = match McpConfig::try_load_from_path(&mcp_config_path).await {
+        Ok(Some(cfg)) if !cfg.is_empty() => {
+            eprintln!(
+                "[mcp] connecting to {} server(s) from {}",
+                cfg.len(),
+                mcp_config_path.display()
+            );
+            let mgr = McpManager::connect_all(&cfg).await;
+            eprintln!(
+                "[mcp] {} server(s) connected, {} tool(s) total: {:?}",
+                mgr.len(),
+                mgr.total_tool_count(),
+                mgr.server_names()
+            );
+            mgr
+        }
+        Ok(_) => {
+            eprintln!("[mcp] no mcp.json (or empty) — skipping");
+            McpManager::new()
+        }
+        Err(err) => {
+            eprintln!("[mcp] could not load {}: {err}", mcp_config_path.display());
+            McpManager::new()
+        }
+    };
+
+    let mcp_tools = mcp_manager.all_tools();
+
+    let mut builder = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .context_engine(context_engine)
         .tool(Arc::new(EchoTool))
@@ -178,8 +211,14 @@ async fn main() -> Result<()> {
         .background_tool(Arc::new(deep_research_subagent))
         .hook(Arc::new(LoggingHook))
         .runtime(session_uuid)
-        .runtime(approver)
-        .build();
+        .runtime(approver);
+
+    // Register every MCP tool alongside the native ones. Same dispatch path.
+    for tool in mcp_tools {
+        builder = builder.tool(tool);
+    }
+
+    let mut agent = builder.build();
 
     eprintln!(
         "runic — model={}, tools={:?}, runtime SessionUuid={}",

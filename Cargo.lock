@@ -905,6 +905,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "runic-agent-core",
+ "runic-agents",
  "runic-context-engine",
  "runic-mcp",
  "runic-message-types",
@@ -938,6 +939,22 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "runic-agents"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "runic-agent-core",
+ "runic-provider-core",
+ "runic-storage-backend",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

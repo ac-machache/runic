@@ -16,6 +16,7 @@ async-trait = { workspace = true }
 dotenvy = "0.15"
 futures = { workspace = true }
 runic-agent-core = { workspace = true }
+runic-agents = { workspace = true }
 runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
 runic-message-types = { workspace = true }

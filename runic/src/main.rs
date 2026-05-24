@@ -20,6 +20,7 @@ use runic_context_engine::{
     BasePromptLayer, CompositeEngine, MemoryLayer, PersonaLayer, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
+use runic_agents::AgentRegistry;
 use runic_mcp::{McpConfig, McpManager};
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
@@ -168,6 +169,21 @@ async fn main() -> Result<()> {
 
     let skill_view_tool = SkillViewTool::new(skill_registry.clone(), storage.clone(), "skills");
 
+    // ── Markdown-defined sub-agents: scan ~/.runic/agents/ ──────────────
+    // Each {dir}/AGENT.md becomes a SubagentTool the parent agent can call.
+    let agent_registry = AgentRegistry::load(storage.clone(), "agents")
+        .await
+        .context("loading agents from ~/.runic/agents/")?;
+    eprintln!(
+        "[agents] loaded {} markdown agent(s): {:?}",
+        agent_registry.len(),
+        agent_registry
+            .list()
+            .iter()
+            .map(|a| a.def.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
     // ── MCP: connect to any servers configured in ~/.runic/mcp.json ────
     // Missing config file is fine; per-server connect failures are logged
     // and don't abort the agent.
@@ -216,6 +232,12 @@ async fn main() -> Result<()> {
     // Register every MCP tool alongside the native ones. Same dispatch path.
     for tool in mcp_tools {
         builder = builder.tool(tool);
+    }
+
+    // Register each markdown agent as a SubagentTool. Same dispatch path.
+    for md_agent in agent_registry.list() {
+        let tool = md_agent.make_subagent_tool(provider.clone());
+        builder = builder.tool(Arc::new(tool));
     }
 
     let mut agent = builder.build();

@@ -12,6 +12,7 @@ members = [
     "crates/runic-agent-core",
     "crates/runic-skills",
     "crates/runic-mcp",
+    "crates/runic-agents",
 ]
 
 [workspace.package]
@@ -48,6 +49,7 @@ runic-tool-core = { path = "crates/runic-tool-core" }
 runic-agent-core = { path = "crates/runic-agent-core" }
 runic-skills = { path = "crates/runic-skills" }
 runic-mcp = { path = "crates/runic-mcp" }
+runic-agents = { path = "crates/runic-agents" }
 
 [profile.release]
 opt-level = 3

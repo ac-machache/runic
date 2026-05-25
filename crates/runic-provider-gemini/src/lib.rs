@@ -524,6 +524,9 @@ fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
         })),
         // Gemini's thinking format differs and isn't required for replay.
         ContentBlock::Reasoning { .. } => None,
+        // Blobs must be materialized to inline data before reaching the
+        // provider — see note in the Anthropic adapter.
+        ContentBlock::Blob(_) => None,
     }
 }
 

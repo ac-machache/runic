@@ -204,6 +204,14 @@ fn content_block_char_count(block: &ContentBlock) -> usize {
         }
         ContentBlock::ToolResult { content, .. } => content.len(),
         ContentBlock::Image { .. } => 1024, // rough — images are expensive but we don't know exact tokens
+        ContentBlock::Blob(b) => {
+            // Token cost depends on whether the provider will end up
+            // inlining the bytes. Use the declared size as a proxy —
+            // overestimate is safer than underestimate for compaction.
+            // Bytes / 4 to roughly translate to tokens (same ratio we use
+            // for text).
+            (b.size as usize) / 4
+        }
     }
 }
 
@@ -233,6 +241,13 @@ fn render_messages_as_transcript(messages: &[Message]) -> String {
                 }
                 ContentBlock::Image { .. } => {
                     out.push_str(&format!("[{role} image attachment]\n\n"));
+                }
+                ContentBlock::Blob(b) => {
+                    let name = b.name.as_deref().unwrap_or("(no name)");
+                    out.push_str(&format!(
+                        "[{role} blob attachment: {name} ({}, {}B)]\n\n",
+                        b.mime, b.size
+                    ));
                 }
             }
         }

@@ -496,6 +496,13 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value>
         // Replaying a thinking block requires a signature we don't carry yet.
         // Drop on send; the in-memory transcript still keeps it.
         ContentBlock::Reasoning { .. } => None,
+        // Blob references are by-id placeholders — they MUST be materialized
+        // (fetched from the BlobStore, base64-encoded, rewritten to Image
+        // content blocks) BEFORE reaching here. The materialization happens
+        // in the agent loop / a Provider decorator. If we see one here, it
+        // means materialization was skipped — surface that as a dropped
+        // block rather than silently sending nothing.
+        ContentBlock::Blob(_) => None,
     }
 }
 

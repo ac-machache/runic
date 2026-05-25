@@ -15,6 +15,7 @@ members = [
     "crates/runic-agents",
     "crates/runic-plugins",
     "crates/runic-sessions",
+    "crates/runic-blobs",
     "crates/runic-examples",
 ]
 
@@ -41,6 +42,9 @@ tokio-stream = "0.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 serde_yml = "0.0.12"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
 
 runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
@@ -55,6 +59,7 @@ runic-mcp = { path = "crates/runic-mcp" }
 runic-agents = { path = "crates/runic-agents" }
 runic-plugins = { path = "crates/runic-plugins" }
 runic-sessions = { path = "crates/runic-sessions" }
+runic-blobs = { path = "crates/runic-blobs" }
 runic-examples = { path = "crates/runic-examples" }
 
 [profile.release]

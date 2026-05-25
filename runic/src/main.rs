@@ -22,6 +22,7 @@ use runic_context_engine::{
 };
 use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
+use runic_blobs::{BlobMaterializingProvider, BlobStore, BlobStoreResolver, FileBlobStore};
 use runic_mcp::{McpConfig, McpManager};
 use runic_sessions::{spawn_persister, FileSessionStore, SessionStore};
 use runic_plugins::PluginManager;
@@ -93,6 +94,12 @@ async fn main() -> Result<()> {
     let session_uuid_for_print = session_uuid.0;
     let approver: ApproverHandle = Arc::new(StdinApprover);
 
+    // ── Blobs: wrap the raw provider so ContentBlock::Blob refs in
+    //    outgoing messages get materialized to inline image blocks
+    //    automatically. The store is keyed by tenant — for the REPL
+    //    we use RUNIC_TENANT (defaults to "default").
+    let blob_tenant: String = std::env::var("RUNIC_TENANT").unwrap_or_else(|_| "default".into());
+
     // ── Context engine: file-backed SOUL / USER / MEMORY ────────────────
     // RUNIC_HOME overrides the default ~/.runic/ if set.
     let runic_home: std::path::PathBuf = std::env::var("RUNIC_HOME")
@@ -105,6 +112,19 @@ async fn main() -> Result<()> {
     eprintln!("[runic-home] {}", runic_home.display());
 
     let storage: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(runic_home.clone()));
+
+    // Wrap the raw provider in BlobMaterializingProvider before anything
+    // else (sub-agents, persistence wiring, etc.) takes a clone — so
+    // every clone is automatically blob-aware. Resolution failures get
+    // logged + the blob is dropped (see runic-blobs/src/provider.rs).
+    let blob_store: Arc<dyn BlobStore> = Arc::new(FileBlobStore::new(storage.clone()));
+    let provider: Arc<dyn Provider> = Arc::new(BlobMaterializingProvider::new(
+        provider,
+        Arc::new(BlobStoreResolver::new(blob_store.clone(), blob_tenant.clone())),
+    ));
+    eprintln!(
+        "[blobs] materializing blob references via tenant '{blob_tenant}'"
+    );
 
     // ── Plugins: discover ~/.runic/plugins/{name}/{skills,agents}/ ─────
     // Each plugin contributes skills and/or markdown agents that get

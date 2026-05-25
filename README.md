@@ -83,6 +83,7 @@ hello! how can I help today?
 | [docs/context-engine.md](./docs/context-engine.md) | The context pipeline (layers, compactor, spillover, reminder) |
 | [docs/extending.md](./docs/extending.md) | Writing your own Tool / Hook / Reminder / ContextLayer |
 | [docs/persistence.md](./docs/persistence.md) | Multi-tenant session persistence; pluggable `SessionStore`; replay |
+| [docs/blobs.md](./docs/blobs.md) | Content-addressed blob storage; provider materialization |
 
 ## Runnable examples
 
@@ -92,6 +93,7 @@ cargo run --example with_tools          # custom Tool impl
 cargo run --example with_hooks          # custom Hook impl
 cargo run --example custom_reminder     # write your own Reminder
 cargo run --example with_mcp            # connect to a local MCP server
+cargo run --example with_blob -- IMG    # upload a file as a blob + ask the model about it
 ```
 
 Each example is self-contained and commented. See `crates/runic-examples/`.
@@ -112,6 +114,7 @@ runic-agents              AGENT.md parser, registry, conversion to SubagentTool
 runic-plugins             ~/.runic/plugins/{name}/ discovery, aggregate registries
 runic-mcp                 MCP client (stdio + Streamable HTTP transports)
 runic-sessions            SessionStore trait + FileSessionStore + spawn_persister + replay
+runic-blobs               BlobStore trait + FileBlobStore (sha256, dedup) + materializing provider
 runic                     REPL binary that wires everything together
 runic-examples            runnable examples
 ```
@@ -135,7 +138,6 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 ## What's not built yet
 
 - Serve mode (HTTP/socket daemon)
-- Blob / file uploads
 - Slash commands
 - MemoryStore (cross-session memory; separate from `SessionStore`)
 

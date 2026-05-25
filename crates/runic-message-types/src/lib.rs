@@ -131,6 +131,38 @@ pub enum ContentBlock {
         media_type: String,
         data: String,
     },
+    /// Reference to a binary blob in a [`BlobStore`]. Unlike `Image` (which
+    /// inlines base64 data into the message), `Blob` only carries the
+    /// content-addressed id + metadata. Provider adapters resolve the id
+    /// to bytes via a `BlobResolver` and encode appropriately for the
+    /// wire (Anthropic base64 image block, Gemini inlineData, etc).
+    ///
+    /// Use this for any user-uploaded file — images, PDFs, audio, video,
+    /// CSV uploads — anything that's too big or persistent to inline.
+    Blob(BlobRef),
+}
+
+/// A reference to a blob stored in a [`crate::BlobStore`]-style backend.
+///
+/// `id` is a content hash (sha256, lowercase hex) — uploading the same
+/// bytes always produces the same id, so identical uploads are deduped
+/// automatically.
+///
+/// The conversation log carries only this reference; the bytes live in
+/// storage and are fetched on demand by the provider adapter when
+/// materializing messages for the wire.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BlobRef {
+    /// Content hash. Lowercase hex sha256 of the bytes.
+    pub id: String,
+    /// MIME type the uploader declared (e.g. "image/png", "application/pdf").
+    pub mime: String,
+    /// Size in bytes. Useful for previews / quota accounting.
+    pub size: u64,
+    /// Optional original filename. Purely informational — never used for
+    /// addressing or lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Message {

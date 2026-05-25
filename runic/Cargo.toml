@@ -17,6 +17,7 @@ dotenvy = "0.15"
 futures = { workspace = true }
 runic-agent-core = { workspace = true }
 runic-agents = { workspace = true }
+runic-blobs = { workspace = true }
 runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
 runic-plugins = { workspace = true }

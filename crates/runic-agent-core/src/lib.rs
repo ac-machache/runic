@@ -29,7 +29,7 @@ pub use agent::{Agent, AgentBuilder, AgentConfig, RunOutcome};
 pub use error::AgentError;
 pub use event::{AgentEvent, TokenUsage};
 pub use hooks::{Hook, HookOutcome};
-pub use state::AgentState;
+pub use state::{AgentState, HookLifecycle, RunTimeContext, SessionEvent, EVENT_BROADCAST_CAPACITY};
 pub use subagent::{AsyncSubagentTool, SubagentTool};
 
 // Re-export tool primitives from the sibling crate so existing call sites

@@ -72,6 +72,27 @@ impl StorageBackend for LocalFsBackend {
             .map_err(|err| map_io_err(key, err))
     }
 
+    async fn append(&self, key: &str, content: &[u8]) -> Result<(), StorageError> {
+        use tokio::io::AsyncWriteExt;
+        let path = self.resolve(key)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|err| map_io_err(key, err))?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .map_err(|err| map_io_err(key, err))?;
+        file.write_all(content)
+            .await
+            .map_err(|err| map_io_err(key, err))?;
+        file.flush().await.map_err(|err| map_io_err(key, err))?;
+        Ok(())
+    }
+
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
         let path = self.resolve(key)?;
         fs::remove_file(&path)

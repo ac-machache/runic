@@ -4,8 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use crate::agent::RunOutcome;
+
+/// Capacity of the internal `broadcast` channel that fans out
+/// `SessionEvent`s to subscribers (persisters, observers, etc.). If a
+/// subscriber falls behind by more than this many events, it receives
+/// `RecvError::Lagged(n)` and can decide how to recover.
+pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 
 // ─── Runtime context ─────────────────────────────────────────────────────────
 
@@ -108,6 +115,16 @@ pub struct AgentState {
 
     #[serde(skip, default)]
     pub runtime: RunTimeContext,
+
+    /// Broadcast sender for `SessionEvent`s. Populated by `AgentBuilder`
+    /// at construction. `push_event` fans events out to every subscriber
+    /// in addition to appending them to `events`.
+    ///
+    /// Stored as `Option` so a deserialized state (no live channel) still
+    /// works for replay/inspection; in that case `push_event` just skips
+    /// the broadcast.
+    #[serde(skip, default)]
+    events_tx: Option<broadcast::Sender<SessionEvent>>,
 }
 
 impl AgentState {
@@ -117,10 +134,30 @@ impl AgentState {
             system_prompt: system_prompt.into(),
             events: Vec::new(),
             runtime: RunTimeContext::default(),
+            events_tx: None,
         }
     }
 
+    /// Install a broadcast sender so `push_event` will fan out to
+    /// subscribers. Replaces any previously-installed sender.
+    pub fn set_events_tx(&mut self, tx: broadcast::Sender<SessionEvent>) {
+        self.events_tx = Some(tx);
+    }
+
+    /// Subscribe to future events. Returns `None` if no broadcast channel
+    /// has been installed (e.g. on a deserialized state used purely for
+    /// inspection). For live agents, prefer [`crate::Agent::subscribe_events`].
+    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<SessionEvent>> {
+        self.events_tx.as_ref().map(|tx| tx.subscribe())
+    }
+
     pub fn push_event(&mut self, ev: SessionEvent) {
+        // Broadcast first. If no subscribers, send returns Err — ignore.
+        // If the channel is full, the slowest subscriber's oldest event
+        // gets dropped, and that subscriber sees Lagged(n) on next recv.
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.send(ev.clone());
+        }
         self.events.push(ev);
     }
 

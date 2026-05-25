@@ -58,6 +58,21 @@ impl StorageBackend for MemoryBackend {
         Ok(())
     }
 
+    async fn append(&self, key: &str, content: &[u8]) -> Result<(), StorageError> {
+        let mut entries = self.entries.lock().expect("memory backend lock poisoned");
+        entries
+            .entry(key.to_string())
+            .and_modify(|e| {
+                e.bytes.extend_from_slice(content);
+                e.modified = Utc::now();
+            })
+            .or_insert_with(|| MemoryEntry {
+                bytes: content.to_vec(),
+                modified: Utc::now(),
+            });
+        Ok(())
+    }
+
     async fn delete(&self, key: &str) -> Result<(), StorageError> {
         let mut entries = self.entries.lock().expect("memory backend lock poisoned");
         entries

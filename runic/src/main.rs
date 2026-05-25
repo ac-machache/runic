@@ -23,6 +23,7 @@ use runic_context_engine::{
 use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
 use runic_mcp::{McpConfig, McpManager};
+use runic_sessions::{spawn_persister, FileSessionStore, SessionStore};
 use runic_plugins::PluginManager;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
@@ -317,6 +318,29 @@ async fn main() -> Result<()> {
     }
 
     let mut agent = builder.build();
+
+    // ── Persistence (opt-in via RUNIC_PERSIST=1) ────────────────────────
+    // When enabled, every SessionEvent the agent emits gets streamed to a
+    // FileSessionStore under sessions/{tenant}/{session_id}/events.jsonl.
+    // Tenant defaults to "default" (single-user); a real server would pass
+    // the authenticated user id.
+    let _persister_handle = if std::env::var("RUNIC_PERSIST").as_deref() == Ok("1") {
+        let tenant = std::env::var("RUNIC_TENANT").unwrap_or_else(|_| "default".into());
+        let session_id = agent.state().session_id.clone();
+        let store: Arc<dyn SessionStore> =
+            Arc::new(FileSessionStore::new(storage.clone()));
+        eprintln!(
+            "[persist] writing session events to sessions/{tenant}/{session_id}/events.jsonl"
+        );
+        Some(spawn_persister(
+            agent.subscribe_events(),
+            store,
+            tenant,
+            session_id,
+        ))
+    } else {
+        None
+    };
 
     eprintln!(
         "runic — model={}, tools={:?}, runtime SessionUuid={}",

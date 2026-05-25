@@ -21,6 +21,7 @@ runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
 runic-plugins = { workspace = true }
 runic-message-types = { workspace = true }
+runic-sessions = { workspace = true }
 runic-provider-anthropic = { workspace = true }
 runic-provider-core = { workspace = true }
 runic-provider-gemini = { workspace = true }

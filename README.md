@@ -35,6 +35,7 @@ hello! how can I help today?
 | Spillover (huge tool outputs → disk) | ✅ |
 | Compactor (summarize old messages when context fills) | ✅ |
 | Reminder (peripheral vision via pluggable sources) | ✅ |
+| Persistence (pluggable `SessionStore` trait, multi-tenant) | ✅ |
 
 ## 60-second quickstart
 
@@ -81,6 +82,7 @@ hello! how can I help today?
 | [docs/mcp.md](./docs/mcp.md) | Configuring MCP servers (stdio + HTTP) |
 | [docs/context-engine.md](./docs/context-engine.md) | The context pipeline (layers, compactor, spillover, reminder) |
 | [docs/extending.md](./docs/extending.md) | Writing your own Tool / Hook / Reminder / ContextLayer |
+| [docs/persistence.md](./docs/persistence.md) | Multi-tenant session persistence; pluggable `SessionStore`; replay |
 
 ## Runnable examples
 
@@ -109,8 +111,9 @@ runic-skills              SKILL.md parser, registry, layer, view tool
 runic-agents              AGENT.md parser, registry, conversion to SubagentTool
 runic-plugins             ~/.runic/plugins/{name}/ discovery, aggregate registries
 runic-mcp                 MCP client (stdio + Streamable HTTP transports)
+runic-sessions            SessionStore trait + FileSessionStore + spawn_persister + replay
 runic                     REPL binary that wires everything together
-runic-examples            runnable examples (this is the new one)
+runic-examples            runnable examples
 ```
 
 The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-dependency-graph).
@@ -126,12 +129,14 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 | `GEMINI_API_KEY` | Required when provider is Gemini | — |
 | `RUNIC_SPILLOVER_THRESHOLD` | Bytes above which a tool result gets spilled | `8192` |
 | `RUNIC_COMPACT_THRESHOLD` | Token count above which to compact | `100000` |
+| `RUNIC_PERSIST` | Set to `1` to persist session events under `sessions/{tenant}/{session_id}/events.jsonl` | unset |
+| `RUNIC_TENANT` | Tenant id used when persistence is enabled | `default` |
 
 ## What's not built yet
 
-- Persistence (event log writer/replayer)
 - Serve mode (HTTP/socket daemon)
 - Blob / file uploads
 - Slash commands
+- MemoryStore (cross-session memory; separate from `SessionStore`)
 
 See the roadmap section of [ARCHITECTURE.md](./ARCHITECTURE.md#whats-not-built).

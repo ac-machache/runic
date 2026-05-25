@@ -1,0 +1,22 @@
+[package]
+name = "runic-sessions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+runic-agent-core = { workspace = true }
+runic-message-types = { workspace = true }
+runic-storage-backend = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

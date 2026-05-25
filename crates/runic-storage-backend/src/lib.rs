@@ -247,6 +247,33 @@ macro_rules! conformance_suite {
                 let err = b.read_to_string("bad").await.unwrap_err();
                 assert!(matches!(err, $crate::StorageError::Decode(_)));
             }
+
+            #[tokio::test]
+            async fn append_to_missing_key_creates_with_content() {
+                let (b, _g) = fresh();
+                b.append("fresh", b"hello").await.unwrap();
+                assert_eq!(b.read("fresh").await.unwrap(), b"hello");
+            }
+
+            #[tokio::test]
+            async fn append_extends_existing_key() {
+                let (b, _g) = fresh();
+                b.write("log", b"line1\n").await.unwrap();
+                b.append("log", b"line2\n").await.unwrap();
+                b.append("log", b"line3\n").await.unwrap();
+                assert_eq!(
+                    b.read_to_string("log").await.unwrap(),
+                    "line1\nline2\nline3\n"
+                );
+            }
+
+            #[tokio::test]
+            async fn append_empty_content_is_a_noop() {
+                let (b, _g) = fresh();
+                b.write("k", b"before").await.unwrap();
+                b.append("k", b"").await.unwrap();
+                assert_eq!(b.read("k").await.unwrap(), b"before");
+            }
         }
     };
 }

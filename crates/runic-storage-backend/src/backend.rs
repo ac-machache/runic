@@ -42,4 +42,21 @@ pub trait StorageBackend: Send + Sync {
         let bytes = self.read(key).await?;
         String::from_utf8(bytes).map_err(|err| StorageError::Decode(err.to_string()))
     }
+
+    /// Append `content` to `key`, creating it (with just `content`) if it
+    /// doesn't exist yet. Used by append-only consumers like the session
+    /// event log.
+    ///
+    /// Default impl is read-modify-write — correct but slow for large
+    /// values. Backends that can do real atomic appends (LocalFs via
+    /// `OpenOptions::append`, BTreeMap by extending the vec) override this.
+    async fn append(&self, key: &str, content: &[u8]) -> Result<(), StorageError> {
+        let mut combined = match self.read(key).await {
+            Ok(b) => b,
+            Err(StorageError::NotFound { .. }) => Vec::new(),
+            Err(err) => return Err(err),
+        };
+        combined.extend_from_slice(content);
+        self.write(key, &combined).await
+    }
 }

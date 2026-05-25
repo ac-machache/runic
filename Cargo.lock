@@ -913,6 +913,7 @@ dependencies = [
  "runic-provider-anthropic",
  "runic-provider-core",
  "runic-provider-gemini",
+ "runic-sessions",
  "runic-skills",
  "runic-storage-backend",
  "serde_json",
@@ -1081,6 +1082,23 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "runic-sessions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "runic-agent-core",
+ "runic-message-types",
+ "runic-storage-backend",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 

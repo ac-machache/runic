@@ -89,6 +89,25 @@ impl Agent {
         &self.tools
     }
 
+    /// Subscribe to the agent's [`crate::state::SessionEvent`] stream.
+    ///
+    /// Every event pushed to state (run start/end, message, tool call,
+    /// hook fired, state snapshot, …) is broadcast to every subscriber.
+    /// External consumers — a persister writing to a SessionStore, an
+    /// observability sink, a UI mirror — can each hold their own
+    /// `Receiver` without coordinating.
+    ///
+    /// Channel capacity is [`crate::state::EVENT_BROADCAST_CAPACITY`].
+    /// If a subscriber falls behind, it sees `RecvError::Lagged(n)` on
+    /// the next `recv` — explicit, never silent.
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::state::SessionEvent> {
+        self.state
+            .subscribe_events()
+            .expect("AgentBuilder must install events_tx in build()")
+    }
+
     /// Drive a user input to completion, streaming events.
     pub fn run_streaming(mut self, user_input: impl Into<String>) -> RunStreamingHandle {
         let (tx, rx) = mpsc::channel::<AgentEvent>(128);
@@ -918,6 +937,16 @@ impl AgentBuilder {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let mut state = AgentState::new(session_id, self.system_prompt);
         state.runtime = self.runtime;
+
+        // Install the broadcast channel. Every Agent has one from birth,
+        // regardless of whether anyone subscribes — sends with no
+        // subscribers cost a single Err that we ignore.
+        let (events_tx, _initial_rx) =
+            tokio::sync::broadcast::channel::<crate::state::SessionEvent>(
+                crate::state::EVENT_BROADCAST_CAPACITY,
+            );
+        state.set_events_tx(events_tx);
+
         Agent {
             provider: self.provider,
             tools: self.tools,

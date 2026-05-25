@@ -14,6 +14,7 @@ members = [
     "crates/runic-mcp",
     "crates/runic-agents",
     "crates/runic-plugins",
+    "crates/runic-sessions",
     "crates/runic-examples",
 ]
 
@@ -53,6 +54,7 @@ runic-skills = { path = "crates/runic-skills" }
 runic-mcp = { path = "crates/runic-mcp" }
 runic-agents = { path = "crates/runic-agents" }
 runic-plugins = { path = "crates/runic-plugins" }
+runic-sessions = { path = "crates/runic-sessions" }
 runic-examples = { path = "crates/runic-examples" }
 
 [profile.release]

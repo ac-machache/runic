@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,6 +905,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e10754a14b9137dd7b1e3e5b0493cc9171fdd105e0ab477f51b72e7f3ac0e276"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
 name = "reqwest"
 version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -963,6 +1001,7 @@ dependencies = [
  "runic-blobs",
  "runic-context-engine",
  "runic-mcp",
+ "runic-memory",
  "runic-message-types",
  "runic-plugins",
  "runic-provider-anthropic",
@@ -971,6 +1010,7 @@ dependencies = [
  "runic-sessions",
  "runic-skills",
  "runic-storage-backend",
+ "runic-tool-core",
  "serde_json",
  "tokio",
  "tokio-stream",
@@ -1005,7 +1045,9 @@ dependencies = [
  "async-trait",
  "runic-agent-core",
  "runic-provider-core",
+ "runic-skills",
  "runic-storage-backend",
+ "runic-tool-core",
  "serde",
  "serde_json",
  "serde_yml",
@@ -1085,6 +1127,23 @@ dependencies = [
  "futures",
  "reqwest",
  "runic-message-types",
+ "runic-tool-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "runic-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "regex",
+ "runic-storage-backend",
  "runic-tool-core",
  "serde",
  "serde_json",

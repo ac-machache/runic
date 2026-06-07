@@ -124,6 +124,24 @@ impl SkillRegistry {
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
+
+    /// Build a new registry containing only the skills whose names appear
+    /// in `allowed`. Names that don't exist in this registry are silently
+    /// dropped — callers can detect them with `len()` before/after if
+    /// they care.
+    ///
+    /// Used by sub-agents that declare a `skills:` allowlist in their
+    /// `AGENT.md` frontmatter — they get a scoped view of the parent's
+    /// skill registry, not the full one.
+    pub fn scope<S: AsRef<str>>(&self, allowed: &[S]) -> Self {
+        let mut scoped = HashMap::new();
+        for name in allowed {
+            if let Some(skill) = self.skills.get(name.as_ref()) {
+                scoped.insert(skill.meta.name.clone(), skill.clone());
+            }
+        }
+        Self { skills: scoped }
+    }
 }
 
 #[cfg(test)]

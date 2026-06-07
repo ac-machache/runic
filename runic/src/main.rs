@@ -24,6 +24,7 @@ use runic_message_types::ToolCall;
 use runic_agents::AgentRegistry;
 use runic_blobs::{BlobMaterializingProvider, BlobStore, BlobStoreResolver, FileBlobStore};
 use runic_mcp::{McpConfig, McpManager};
+use runic_memory::{BoundedMemoryStore, MemoryTool};
 use runic_sessions::{spawn_persister, FileSessionStore, SessionStore};
 use runic_plugins::PluginManager;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
@@ -161,11 +162,17 @@ async fn main() -> Result<()> {
         skill_registry.list().iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>()
     );
 
+    // PersonaLayer stays hot-reload — tweaking SOUL.md between turns is
+    // a deliberate feature. UserFactsLayer and MemoryLayer are FROZEN —
+    // they snap content on first render and serve the same value all
+    // session, keeping the system prompt prefix-cache stable. Mid-session
+    // writes via the `memory` tool still land on disk; next session
+    // picks them up.
     let composite = CompositeEngine::new()
         .with_layer(BasePromptLayer::new(DEFAULT_SYSTEM_PROMPT))
         .with_layer(PersonaLayer::new(storage.clone(), "SOUL.md"))
-        .with_layer(UserFactsLayer::new(storage.clone(), "memory/USER.md"))
-        .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md"))
+        .with_layer(UserFactsLayer::new(storage.clone(), "memory/USER.md").frozen())
+        .with_layer(MemoryLayer::new(storage.clone(), "memory/MEMORY.md").frozen())
         .with_layer(SkillsIndexLayer::new(skill_registry.clone()));
 
     // Wrap the composite in two decorator engines:
@@ -310,19 +317,89 @@ async fn main() -> Result<()> {
 
     let mcp_tools = mcp_manager.all_tools();
 
+    // ── Coral / toolbox context binding ─────────────────────────────────
+    // The genai-toolbox `coral` toolset declares `user_id` as a schema
+    // param on every tool, and `org_id` on the create_* tools. Coral's
+    // Python client hides those from the LLM and injects them from
+    // Aegra auth. We do the equivalent here with a `before_tool` hook
+    // that stamps RUNIC_USER_ID / RUNIC_ORG_ID into every MCP toolbox
+    // call. Without this the model would invent UUIDs and the FK
+    // constraints would fail (`farms.org_id_fkey`).
+    let runic_user_id = std::env::var("RUNIC_USER_ID").unwrap_or_default();
+    let runic_org_id = std::env::var("RUNIC_ORG_ID").unwrap_or_default();
+    if runic_user_id.is_empty() {
+        eprintln!(
+            "[bind-context] WARNING: RUNIC_USER_ID not set — every toolbox call will be sent with an empty user_id and the SQL will return zero rows."
+        );
+    } else {
+        eprintln!(
+            "[bind-context] user_id={runic_user_id}, org_id={}",
+            if runic_org_id.is_empty() { "(unset — create_farm/create_farmer will fail)" } else { runic_org_id.as_str() }
+        );
+    }
+
+    // ── Memory tool ─────────────────────────────────────────────────────
+    // Char-capped writable memory backed by ~/.runic/memory/MEMORY.md
+    // and ~/.runic/memory/USER.md. Cross-process safe (sidecar .lock
+    // files via fcntl::flock on Unix, in-process Mutex everywhere),
+    // drift-aware (refuses to overwrite externally-edited files —
+    // saves a .bak.<ts> first), threat-scanned (rejects prompt-injection
+    // / exfil patterns / invisible Unicode before they hit disk).
+    //
+    // Pair with frozen layers above: writes here update disk; the
+    // current session's system prompt stays at its boot snapshot, the
+    // next session boots into the updated content.
+    let memory_store = Arc::new(
+        BoundedMemoryStore::new(storage.clone()).with_lock_dir(runic_home.clone()),
+    );
+    let memory_tool = Arc::new(MemoryTool::new(memory_store));
+
+    // Hoist Arcs so every tool can be registered with BOTH the parent
+    // builder AND the sub-agent pool. Sub-agents declare an
+    // `allowed-tools:` list in their AGENT.md frontmatter and pull
+    // matching dispatches out of the pool at spawn time. (Markdown
+    // sub-agent tools themselves stay parent-only — no nested
+    // delegation today.)
+    let echo_tool = Arc::new(EchoTool);
+    let skill_view_tool = Arc::new(skill_view_tool);
+    let research_subagent = Arc::new(research_subagent);
+    let email_tool = Arc::new(EmailTool);
+    let slow_count_tool = Arc::new(SlowCountTool);
+    let deep_research_subagent = Arc::new(deep_research_subagent);
+
+    let mut subagent_pool = runic_tool_core::ToolRegistry::new();
+    subagent_pool.register(echo_tool.clone());
+    subagent_pool.register(memory_tool.clone());
+    subagent_pool.register_hitl(email_tool.clone());
+    subagent_pool.register_background(slow_count_tool.clone());
+    for tool in &mcp_tools {
+        subagent_pool.register(tool.clone());
+    }
+    let subagent_pool = Arc::new(subagent_pool);
+    eprintln!(
+        "[subagent-pool] {} tool(s) reachable via allowed-tools: {:?}",
+        subagent_pool.len(),
+        subagent_pool.names()
+    );
+
     let mut builder = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .context_engine_arc(context_engine)
         // Share the externally-built BackgroundManager so the reminder sees
         // the same task ids the agent's background tools register against.
         .background_manager(background_manager.clone())
-        .tool(Arc::new(EchoTool))
-        .tool(Arc::new(skill_view_tool))
-        .tool(Arc::new(research_subagent))
-        .hitl_tool(Arc::new(EmailTool))
-        .background_tool(Arc::new(SlowCountTool))
-        .background_tool(Arc::new(deep_research_subagent))
+        .tool(echo_tool)
+        .tool(memory_tool)
+        .tool(skill_view_tool)
+        .tool(research_subagent)
+        .hitl_tool(email_tool)
+        .background_tool(slow_count_tool)
+        .background_tool(deep_research_subagent)
         .hook(Arc::new(LoggingHook))
+        .hook(Arc::new(BindUserContextHook {
+            user_id: runic_user_id,
+            org_id: runic_org_id,
+        }))
         .runtime(session_uuid)
         .runtime(approver);
 
@@ -331,9 +408,17 @@ async fn main() -> Result<()> {
         builder = builder.tool(tool);
     }
 
-    // Register each markdown agent as a SubagentTool. Same dispatch path.
+    // Register each markdown agent as a SubagentTool with the pool +
+    // scoped skill view. Per-agent allowed-tools and skills lists in
+    // the AGENT.md frontmatter dictate exactly what the child sees.
     for md_agent in agent_registry.list() {
-        let tool = md_agent.make_subagent_tool(provider.clone());
+        let tool = md_agent.make_subagent_tool_with_context(
+            provider.clone(),
+            subagent_pool.clone(),
+            skill_registry.clone(),
+            storage.clone(),
+            "skills",
+        );
         builder = builder.tool(Arc::new(tool));
     }
 
@@ -551,6 +636,54 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let head: String = s.chars().take(max).collect();
         format!("{head}… [+{} chars]", s.chars().count() - max)
+    }
+}
+
+/// Binds `user_id` (and `org_id` for create_* tools) into every MCP
+/// toolbox call. Models the coral `bound_params` pattern from Python
+/// (`agents/coral/tools.py::build_coral_tools`). The agent never sees
+/// these values — they're stamped into `call.input` right before
+/// dispatch, so the LLM can't invent or leak them.
+struct BindUserContextHook {
+    user_id: String,
+    org_id: String,
+}
+
+/// Tools from the `coral` toolset that take `org_id` in addition to
+/// `user_id`. Kept in one place so adding a new create_* mutator is
+/// a single-line change.
+const TOOLS_NEEDING_ORG_ID: &[&str] = &[
+    "mcp__toolbox__create_farm",
+    "mcp__toolbox__create_farmer",
+];
+
+#[async_trait::async_trait]
+impl Hook for BindUserContextHook {
+    fn name(&self) -> &'static str {
+        "bind_user_context"
+    }
+
+    async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        // Only mutate toolbox-prefixed MCP calls — leave native tools alone.
+        if !call.name.starts_with("mcp__toolbox__") {
+            return HookOutcome::Continue;
+        }
+        let Some(obj) = call.input.as_object_mut() else {
+            return HookOutcome::Continue;
+        };
+        if !self.user_id.is_empty() {
+            obj.insert(
+                "user_id".to_string(),
+                serde_json::Value::String(self.user_id.clone()),
+            );
+        }
+        if TOOLS_NEEDING_ORG_ID.contains(&call.name.as_str()) && !self.org_id.is_empty() {
+            obj.insert(
+                "org_id".to_string(),
+                serde_json::Value::String(self.org_id.clone()),
+            );
+        }
+        HookOutcome::Continue
     }
 }
 

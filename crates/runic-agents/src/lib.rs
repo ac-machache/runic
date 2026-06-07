@@ -38,6 +38,9 @@ use std::sync::Arc;
 
 use runic_agent_core::{Agent, AgentConfig, SubagentTool};
 use runic_provider_core::Provider;
+use runic_skills::{SkillRegistry, SkillViewTool};
+use runic_storage_backend::StorageBackend;
+use runic_tool_core::ToolRegistry;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -83,31 +86,119 @@ impl MdAgent {
     }
 
     /// Turn this markdown agent into a runnable [`SubagentTool`] bound to
-    /// the given provider.
+    /// the given provider, with NO tools and NO skills.
     ///
-    /// The returned tool spawns a fresh child [`Agent`] on every invocation
-    /// (matching `SubagentTool`'s factory pattern). The child uses:
-    ///   - the markdown body as its system prompt
-    ///   - the `max-turns` field as `AgentConfig::max_turns` (default 16
-    ///     for sub-agents, smaller than the parent's 64)
+    /// Convenience wrapper around [`make_subagent_tool_with_context`] for
+    /// the simple case (the prompt is purely textual; no DB / tool surface
+    /// is needed). For coral-style sub-agents that need scoped tools and
+    /// skills, call [`make_subagent_tool_with_context`] directly.
     pub fn make_subagent_tool(&self, provider: Arc<dyn Provider>) -> SubagentTool {
-        let system_prompt = self.system_prompt.clone();
-        let max_turns = self.def.max_turns.unwrap_or(16);
-        let name = self.def.name.clone();
-        let description = self.def.description.clone();
+        self.make_subagent_tool_with_context(
+            provider,
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SkillRegistry::new()),
+            Arc::new(runic_storage_backend::MemoryBackend::new()),
+            "skills",
+        )
+    }
 
+    /// Turn this markdown agent into a runnable [`SubagentTool`] with a
+    /// scoped tool surface AND a scoped skill registry, both filtered
+    /// from what the parent has set up.
+    ///
+    /// What the child sees:
+    ///   - **System prompt**: the markdown body, prefixed with a small
+    ///     `<skills>` block listing the allowlisted skills (so the child
+    ///     model knows what `skill_view` will return).
+    ///   - **Tools**: only those whose names appear in
+    ///     `self.def.allowed_tools` and exist in `parent_pool`. Names that
+    ///     don't resolve are logged and dropped — they're a config
+    ///     mistake, not a runtime failure. If `self.def.skills` is
+    ///     non-empty, a scoped `skill_view` tool is added too.
+    ///   - **Max turns**: `max-turns` frontmatter (default 16).
+    ///
+    /// The factory closure clones the precomputed handles each call —
+    /// every sub-agent spawn produces a fresh child `Agent` with the
+    /// same scoped surface.
+    pub fn make_subagent_tool_with_context(
+        &self,
+        provider: Arc<dyn Provider>,
+        parent_pool: Arc<ToolRegistry>,
+        parent_skills: Arc<SkillRegistry>,
+        storage: Arc<dyn StorageBackend>,
+        skills_root: &'static str,
+    ) -> SubagentTool {
+        let agent_name = self.def.name.clone();
+        let description = self.def.description.clone();
+        let max_turns = self.def.max_turns.unwrap_or(16);
+        let allowed_tools = self.def.allowed_tools.clone();
+        let allowed_skills = self.def.skills.clone();
+
+        // Build the scoped skill registry once (skills are immutable per
+        // session). Same for the prompt prefix that lists them.
+        let scoped_skills = Arc::new(parent_skills.scope(&allowed_skills));
+        let system_prompt = compose_system_prompt(&self.system_prompt, &scoped_skills);
+
+        let factory_name = agent_name.clone();
         let factory = move || {
-            Agent::builder(provider.clone())
+            let mut child_tools = ToolRegistry::new();
+            for name in &allowed_tools {
+                match parent_pool.get(name) {
+                    Some(dispatch) => child_tools.insert_dispatch(dispatch),
+                    None => tracing::warn!(
+                        agent = factory_name.as_str(),
+                        tool = name.as_str(),
+                        "allowed-tool not found in parent pool — skipping",
+                    ),
+                }
+            }
+            if !scoped_skills.is_empty() {
+                let view = SkillViewTool::new(
+                    scoped_skills.clone(),
+                    storage.clone(),
+                    skills_root,
+                );
+                child_tools.register(Arc::new(view));
+            }
+
+            let mut builder = Agent::builder(provider.clone())
                 .system_prompt(system_prompt.clone())
                 .config(AgentConfig {
                     max_turns,
                     ..Default::default()
-                })
-                .build()
+                });
+            if !child_tools.is_empty() {
+                builder = builder.tools(child_tools);
+            }
+            builder.build()
         };
 
-        SubagentTool::new(name, description, factory)
+        SubagentTool::new(agent_name, description, factory)
     }
+}
+
+/// Prepend a `<skills>` block listing the scoped skills (name + one-line
+/// description) to the markdown body. The child model uses this as its
+/// trigger table for the `skill_view` tool. No skills → no block, body
+/// returned untouched.
+fn compose_system_prompt(body: &str, scoped: &SkillRegistry) -> String {
+    if scoped.is_empty() {
+        return body.to_string();
+    }
+    let mut out = String::from(
+        "<skills>\n\
+         Skills available to you. Call `skill_view(skill_name=...)` to load the full body before acting on a skill's domain.\n\n",
+    );
+    for skill in scoped.list() {
+        out.push_str("- ");
+        out.push_str(&skill.meta.name);
+        out.push_str(" — ");
+        out.push_str(skill.meta.description.trim());
+        out.push('\n');
+    }
+    out.push_str("</skills>\n\n");
+    out.push_str(body);
+    out
 }
 
 #[cfg(test)]

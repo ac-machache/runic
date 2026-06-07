@@ -109,6 +109,8 @@ mod tests {
                 name: name.into(),
                 description: description.into(),
                 max_turns: None,
+                allowed_tools: Vec::new(),
+                skills: Vec::new(),
             },
             system_prompt: format!("# {name}\n\nDo {name} stuff."),
             dir: name.into(),

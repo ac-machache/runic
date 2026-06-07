@@ -20,6 +20,7 @@ runic-agents = { workspace = true }
 runic-blobs = { workspace = true }
 runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
+runic-memory = { workspace = true }
 runic-plugins = { workspace = true }
 runic-message-types = { workspace = true }
 runic-sessions = { workspace = true }
@@ -28,6 +29,7 @@ runic-provider-core = { workspace = true }
 runic-provider-gemini = { workspace = true }
 runic-skills = { workspace = true }
 runic-storage-backend = { workspace = true }
+runic-tool-core = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "io-util", "signal"] }
 tokio-stream = { workspace = true }

@@ -209,6 +209,14 @@ impl ToolRegistry {
         self.tools.insert(adapter.name().to_string(), adapter);
     }
 
+    /// Insert an already-wrapped `Arc<dyn ToolDispatch>` directly. Used
+    /// when assembling a filtered registry from a pre-existing pool —
+    /// e.g. sub-agents that take a subset of the parent's tools without
+    /// re-wrapping them in adapters.
+    pub fn insert_dispatch(&mut self, dispatch: Arc<dyn ToolDispatch>) {
+        self.tools.insert(dispatch.name().to_string(), dispatch);
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn ToolDispatch>> {
         self.tools.get(name).cloned()
     }

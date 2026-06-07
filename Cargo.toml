@@ -16,6 +16,7 @@ members = [
     "crates/runic-plugins",
     "crates/runic-sessions",
     "crates/runic-blobs",
+    "crates/runic-memory",
     "crates/runic-examples",
 ]
 
@@ -45,6 +46,8 @@ serde_yml = "0.0.12"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+regex = "1"
+libc = "0.2"
 
 runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
@@ -60,6 +63,7 @@ runic-agents = { path = "crates/runic-agents" }
 runic-plugins = { path = "crates/runic-plugins" }
 runic-sessions = { path = "crates/runic-sessions" }
 runic-blobs = { path = "crates/runic-blobs" }
+runic-memory = { path = "crates/runic-memory" }
 runic-examples = { path = "crates/runic-examples" }
 
 [profile.release]

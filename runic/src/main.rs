@@ -21,7 +21,7 @@ use runic_context_engine::{
     MemoryLayer, PersonaLayer, ReminderEngine, SpilloverEngine, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
-use runic_agents::AgentRegistry;
+use runic_agents::{AgentRegistry, FilesystemMode};
 use runic_blobs::{BlobMaterializingProvider, BlobStore, BlobStoreResolver, FileBlobStore};
 use runic_mcp::{McpConfig, McpManager};
 use runic_memory::{BoundedMemoryStore, MemoryTool};
@@ -34,7 +34,7 @@ use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
 use runic_skills::{SkillRegistry, SkillViewTool, SkillsIndexLayer};
-use runic_storage_backend::{LocalFsBackend, StorageBackend};
+use runic_storage_backend::{LocalFsBackend, RootedBackend, StorageBackend};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_stream::StreamExt;
 use uuid::Uuid;
@@ -435,13 +435,50 @@ async fn main() -> Result<()> {
         builder = builder.tool(tool);
     }
 
-    // Register each markdown agent as a SubagentTool with the pool +
-    // scoped skill view. Per-agent allowed-tools and skills lists in
-    // the AGENT.md frontmatter dictate exactly what the child sees.
+    // Register each markdown agent as a SubagentTool. The pool we hand
+    // each one is shaped by its `filesystem.mode`:
+    //
+    //   - shared (default): inherit the parent pool as-is.
+    //   - none: clone the pool and strip the six shell-tool dispatches —
+    //     even if `allowed-tools` lists them by name they resolve to
+    //     nothing.
+    //   - isolated: clone the pool and re-register the shell tools
+    //     against a `RootedBackend(parent_storage, filesystem.root)` so
+    //     the sub-agent sees only that sub-tree as if it were `/`.
     for md_agent in agent_registry.list() {
+        let pool_for_this_agent = match md_agent.def.filesystem.mode {
+            FilesystemMode::Shared => subagent_pool.clone(),
+            FilesystemMode::None => {
+                let mut scoped = (*subagent_pool).clone();
+                runic_shell_tools::deregister_all(&mut scoped);
+                eprintln!(
+                    "[subagent:{}] filesystem=none — shell tools stripped",
+                    md_agent.def.name
+                );
+                Arc::new(scoped)
+            }
+            FilesystemMode::Isolated => {
+                let root = md_agent
+                    .def
+                    .filesystem
+                    .root
+                    .as_deref()
+                    .expect("registry::load validated this");
+                let rooted: Arc<dyn StorageBackend> =
+                    Arc::new(RootedBackend::new(storage.clone(), root));
+                let mut scoped = (*subagent_pool).clone();
+                runic_shell_tools::register_all(&mut scoped, rooted);
+                eprintln!(
+                    "[subagent:{}] filesystem=isolated root='{}'",
+                    md_agent.def.name, root
+                );
+                Arc::new(scoped)
+            }
+        };
+
         let tool = md_agent.make_subagent_tool_with_context(
             provider.clone(),
-            subagent_pool.clone(),
+            pool_for_this_agent,
             skill_registry.clone(),
             storage.clone(),
             "skills",

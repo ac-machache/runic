@@ -26,6 +26,13 @@ pub enum LoadError {
         #[source]
         source: crate::ParseError,
     },
+
+    #[error("invalid filesystem config in agent at '{path}': {source}")]
+    InvalidFilesystem {
+        path: String,
+        #[source]
+        source: crate::FilesystemConfigError,
+    },
 }
 
 impl AgentRegistry {
@@ -57,6 +64,18 @@ impl AgentRegistry {
                 path: agent_path.clone(),
                 source: e,
             })?;
+
+            // Fail at boot, not mid-session, on a misconfigured
+            // filesystem block — the model can't recover and silent
+            // fallback would hide the misconfig.
+            agent
+                .def
+                .filesystem
+                .validate()
+                .map_err(|source| LoadError::InvalidFilesystem {
+                    path: agent_path.clone(),
+                    source,
+                })?;
 
             agent.dir = std::path::Path::new(&agent_path)
                 .parent()
@@ -111,6 +130,7 @@ mod tests {
                 max_turns: None,
                 allowed_tools: Vec::new(),
                 skills: Vec::new(),
+                filesystem: crate::FilesystemConfig::default(),
             },
             system_prompt: format!("# {name}\n\nDo {name} stuff."),
             dir: name.into(),

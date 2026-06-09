@@ -217,6 +217,15 @@ impl ToolRegistry {
         self.tools.insert(dispatch.name().to_string(), dispatch);
     }
 
+    /// Remove the dispatch registered under `name`. Returns the removed
+    /// `Arc<dyn ToolDispatch>`, or `None` if no tool with that name
+    /// existed. Used by sub-agent setup to strip a class of tools the
+    /// child shouldn't have (e.g. shell tools when the AGENT.md
+    /// declares `filesystem.mode: none`).
+    pub fn remove(&mut self, name: &str) -> Option<Arc<dyn ToolDispatch>> {
+        self.tools.remove(name)
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn ToolDispatch>> {
         self.tools.get(name).cloned()
     }

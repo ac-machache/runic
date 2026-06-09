@@ -24,6 +24,7 @@ pub mod local;
 pub mod memory;
 pub mod namespaced;
 pub mod overlay;
+pub mod rooted;
 pub mod types;
 
 pub use backend::StorageBackend;
@@ -32,6 +33,7 @@ pub use local::LocalFsBackend;
 pub use memory::MemoryBackend;
 pub use namespaced::NamespacedBackend;
 pub use overlay::OverlayBackend;
+pub use rooted::RootedBackend;
 pub use types::{Entry, EntryKind, Metadata};
 
 /// Generate the standard conformance test suite for a `StorageBackend` impl.

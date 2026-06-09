@@ -32,7 +32,7 @@ pub mod registry;
 pub mod types;
 
 pub use registry::{AgentRegistry, LoadError};
-pub use types::AgentDef;
+pub use types::{AgentDef, FilesystemConfig, FilesystemConfigError, FilesystemMode};
 
 use std::sync::Arc;
 

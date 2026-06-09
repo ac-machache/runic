@@ -458,39 +458,35 @@ async fn main() -> Result<()> {
                 Arc::new(scoped)
             }
             FilesystemMode::Isolated => {
-                let root = md_agent
+                // registry::load validated that exactly one of root/path
+                // is set, so we can branch on resolved_path() and fall
+                // through to root.
+                let isolated_storage: Arc<dyn StorageBackend> = match md_agent
                     .def
                     .filesystem
-                    .root
-                    .as_deref()
-                    .expect("registry::load validated this");
-                // External-path override: setting `RUNIC_FS_ROOT_<UPPER(root)>`
-                // points the sub-agent at a fresh LocalFsBackend rooted
-                // wherever the env var says, instead of mounting a sub-tree
-                // of the parent's storage. Useful when the data physically
-                // lives outside ~/.runic — e.g. an indexed wiki under
-                // ~/Developper that we don't want to symlink in.
-                let env_key = format!(
-                    "RUNIC_FS_ROOT_{}",
-                    root.to_uppercase().replace(['-', '/'], "_")
-                );
-                let isolated_storage: Arc<dyn StorageBackend> =
-                    match std::env::var(&env_key).ok().filter(|s| !s.trim().is_empty()) {
-                        Some(path) => {
-                            eprintln!(
-                                "[subagent:{}] filesystem=isolated root='{}' (external path via {}={})",
-                                md_agent.def.name, root, env_key, path
-                            );
-                            Arc::new(LocalFsBackend::new(&path))
-                        }
-                        None => {
-                            eprintln!(
-                                "[subagent:{}] filesystem=isolated root='{}' (mounted under parent)",
-                                md_agent.def.name, root
-                            );
-                            Arc::new(RootedBackend::new(storage.clone(), root))
-                        }
-                    };
+                    .resolved_path()
+                {
+                    Some(path) => {
+                        eprintln!(
+                            "[subagent:{}] filesystem=isolated path='{}' (external)",
+                            md_agent.def.name, path
+                        );
+                        Arc::new(LocalFsBackend::new(&path))
+                    }
+                    None => {
+                        let root = md_agent
+                            .def
+                            .filesystem
+                            .root
+                            .as_deref()
+                            .expect("registry::load validated this");
+                        eprintln!(
+                            "[subagent:{}] filesystem=isolated root='{}' (mounted under parent)",
+                            md_agent.def.name, root
+                        );
+                        Arc::new(RootedBackend::new(storage.clone(), root))
+                    }
+                };
                 let mut scoped = (*subagent_pool).clone();
                 runic_shell_tools::register_all(&mut scoped, isolated_storage);
                 Arc::new(scoped)

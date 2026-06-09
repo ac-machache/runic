@@ -21,7 +21,7 @@ use runic_context_engine::{
     MemoryLayer, PersonaLayer, ReminderEngine, SpilloverEngine, UserFactsLayer,
 };
 use runic_message_types::ToolCall;
-use runic_agents::{AgentRegistry, FilesystemMode};
+use runic_agents::{AgentRegistry, DispatchMode, FilesystemMode};
 use runic_blobs::{BlobMaterializingProvider, BlobStore, BlobStoreResolver, FileBlobStore};
 use runic_mcp::{McpConfig, McpManager};
 use runic_memory::{BoundedMemoryStore, MemoryTool};
@@ -464,26 +464,65 @@ async fn main() -> Result<()> {
                     .root
                     .as_deref()
                     .expect("registry::load validated this");
-                let rooted: Arc<dyn StorageBackend> =
-                    Arc::new(RootedBackend::new(storage.clone(), root));
-                let mut scoped = (*subagent_pool).clone();
-                runic_shell_tools::register_all(&mut scoped, rooted);
-                eprintln!(
-                    "[subagent:{}] filesystem=isolated root='{}'",
-                    md_agent.def.name, root
+                // External-path override: setting `RUNIC_FS_ROOT_<UPPER(root)>`
+                // points the sub-agent at a fresh LocalFsBackend rooted
+                // wherever the env var says, instead of mounting a sub-tree
+                // of the parent's storage. Useful when the data physically
+                // lives outside ~/.runic — e.g. an indexed wiki under
+                // ~/Developper that we don't want to symlink in.
+                let env_key = format!(
+                    "RUNIC_FS_ROOT_{}",
+                    root.to_uppercase().replace(['-', '/'], "_")
                 );
+                let isolated_storage: Arc<dyn StorageBackend> =
+                    match std::env::var(&env_key).ok().filter(|s| !s.trim().is_empty()) {
+                        Some(path) => {
+                            eprintln!(
+                                "[subagent:{}] filesystem=isolated root='{}' (external path via {}={})",
+                                md_agent.def.name, root, env_key, path
+                            );
+                            Arc::new(LocalFsBackend::new(&path))
+                        }
+                        None => {
+                            eprintln!(
+                                "[subagent:{}] filesystem=isolated root='{}' (mounted under parent)",
+                                md_agent.def.name, root
+                            );
+                            Arc::new(RootedBackend::new(storage.clone(), root))
+                        }
+                    };
+                let mut scoped = (*subagent_pool).clone();
+                runic_shell_tools::register_all(&mut scoped, isolated_storage);
                 Arc::new(scoped)
             }
         };
 
-        let tool = md_agent.make_subagent_tool_with_context(
-            provider.clone(),
-            pool_for_this_agent,
-            skill_registry.clone(),
-            storage.clone(),
-            "skills",
-        );
-        builder = builder.tool(Arc::new(tool));
+        match md_agent.def.dispatch {
+            DispatchMode::Sync => {
+                let tool = md_agent.make_subagent_tool_with_context(
+                    provider.clone(),
+                    pool_for_this_agent,
+                    skill_registry.clone(),
+                    storage.clone(),
+                    "skills",
+                );
+                builder = builder.tool(Arc::new(tool));
+            }
+            DispatchMode::Async => {
+                let tool = md_agent.make_async_subagent_tool_with_context(
+                    provider.clone(),
+                    pool_for_this_agent,
+                    skill_registry.clone(),
+                    storage.clone(),
+                    "skills",
+                );
+                eprintln!(
+                    "[subagent:{}] dispatch=async — parent gets task_id, polls via background_status",
+                    md_agent.def.name
+                );
+                builder = builder.background_tool(Arc::new(tool));
+            }
+        }
     }
 
     let mut agent = builder.build();

@@ -131,6 +131,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 skills: Vec::new(),
                 filesystem: crate::FilesystemConfig::default(),
+                dispatch: crate::DispatchMode::default(),
             },
             system_prompt: format!("# {name}\n\nDo {name} stuff."),
             dir: name.into(),

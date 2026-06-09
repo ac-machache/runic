@@ -41,6 +41,27 @@ pub struct AgentDef {
     /// [`FilesystemConfig`].
     #[serde(default)]
     pub filesystem: FilesystemConfig,
+
+    /// How the parent calls this sub-agent. See [`DispatchMode`].
+    #[serde(default)]
+    pub dispatch: DispatchMode,
+}
+
+/// How the parent agent calls this sub-agent.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DispatchMode {
+    /// Parent blocks waiting for the child's response and assembles its
+    /// reply in the same turn. Best for short-running children whose
+    /// output is directly part of the user-facing answer.
+    #[default]
+    Sync,
+
+    /// Parent gets a `task_id` back immediately, keeps running, and
+    /// polls with `background_status` later. Best for long-running
+    /// children when the user shouldn't wait synchronously and the
+    /// parent has other useful work it can do in the meantime.
+    Async,
 }
 
 /// Sub-agent storage scoping for the `runic-shell-tools` surface.

@@ -32,11 +32,13 @@ pub mod registry;
 pub mod types;
 
 pub use registry::{AgentRegistry, LoadError};
-pub use types::{AgentDef, FilesystemConfig, FilesystemConfigError, FilesystemMode};
+pub use types::{
+    AgentDef, DispatchMode, FilesystemConfig, FilesystemConfigError, FilesystemMode,
+};
 
 use std::sync::Arc;
 
-use runic_agent_core::{Agent, AgentConfig, SubagentTool};
+use runic_agent_core::{Agent, AgentConfig, AsyncSubagentTool, SubagentTool};
 use runic_provider_core::Provider;
 use runic_skills::{SkillRegistry, SkillViewTool};
 use runic_storage_backend::StorageBackend;
@@ -175,6 +177,79 @@ impl MdAgent {
 
         SubagentTool::new(agent_name, description, factory)
     }
+
+    /// Same as [`make_subagent_tool_with_context`] but returns an
+    /// [`AsyncSubagentTool`] — the parent gets a `task_id` immediately
+    /// and polls via `background_status`. Use for children that run
+    /// long enough that synchronous waiting would block the parent's
+    /// other work.
+    ///
+    /// Description gets a one-line prefix telling the parent model the
+    /// call is fire-and-forget so it knows to expect a task_id and use
+    /// `background_status` to check on it.
+    pub fn make_async_subagent_tool_with_context(
+        &self,
+        provider: Arc<dyn Provider>,
+        parent_pool: Arc<ToolRegistry>,
+        parent_skills: Arc<SkillRegistry>,
+        storage: Arc<dyn StorageBackend>,
+        skills_root: &'static str,
+    ) -> AsyncSubagentTool {
+        let agent_name = self.def.name.clone();
+        let description = augment_async_description(&self.def.description);
+        let max_turns = self.def.max_turns.unwrap_or(16);
+        let allowed_tools = self.def.allowed_tools.clone();
+        let allowed_skills = self.def.skills.clone();
+
+        let scoped_skills = Arc::new(parent_skills.scope(&allowed_skills));
+        let system_prompt = compose_system_prompt(&self.system_prompt, &scoped_skills);
+
+        let factory_name = agent_name.clone();
+        let factory = move || {
+            let mut child_tools = ToolRegistry::new();
+            for name in &allowed_tools {
+                match parent_pool.get(name) {
+                    Some(dispatch) => child_tools.insert_dispatch(dispatch),
+                    None => tracing::warn!(
+                        agent = factory_name.as_str(),
+                        tool = name.as_str(),
+                        "allowed-tool not found in parent pool — skipping",
+                    ),
+                }
+            }
+            if !scoped_skills.is_empty() {
+                let view = SkillViewTool::new(
+                    scoped_skills.clone(),
+                    storage.clone(),
+                    skills_root,
+                );
+                child_tools.register(Arc::new(view));
+            }
+
+            let mut builder = Agent::builder(provider.clone())
+                .system_prompt(system_prompt.clone())
+                .config(AgentConfig {
+                    max_turns,
+                    ..Default::default()
+                });
+            if !child_tools.is_empty() {
+                builder = builder.tools(child_tools);
+            }
+            builder.build()
+        };
+
+        AsyncSubagentTool::new(agent_name, description, factory)
+    }
+}
+
+/// Prepend a short note to the AGENT.md description so the PARENT model
+/// knows this sub-agent is asynchronous — it should expect a `task_id`
+/// and check progress with `background_status`. We can't trust the
+/// human-written description to spell this out; better to bake it in.
+fn augment_async_description(raw: &str) -> String {
+    let prefix = "[async] Returns a task_id immediately — check progress with \
+                  `background_status(task_id)` and read the final answer when status is 'done'. ";
+    format!("{prefix}{}", raw.trim_start())
 }
 
 /// Prepend a `<skills>` block listing the scoped skills (name + one-line

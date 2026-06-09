@@ -403,6 +403,44 @@ async fn main() -> Result<()> {
         subagent_pool.names()
     );
 
+    // ── Persistence wiring (hoisted before sub-agent registration) ───────
+    // The parent's persister also needs these (it sets up below, after
+    // builder.build()). We hoist tenant + session store here so the
+    // sub-agent persister closure built below can capture them, AND so
+    // both parent and sub-agents land under the same FileSessionStore
+    // root (sessions/<tenant>/...). The parent's session_id isn't known
+    // yet — it's auto-generated inside builder.build() — so we stash it
+    // in a OnceLock that the closure reads at sub-agent spawn time,
+    // and main.rs populates immediately after build().
+    let persistence_enabled = std::env::var("RUNIC_PERSIST").as_deref() == Ok("1");
+    let runic_tenant = std::env::var("RUNIC_TENANT").unwrap_or_else(|_| "default".into());
+    let session_store: Arc<dyn SessionStore> = Arc::new(FileSessionStore::new(storage.clone()));
+    let parent_session_id_cell: Arc<std::sync::OnceLock<String>> =
+        Arc::new(std::sync::OnceLock::new());
+
+    let subagent_persister: Option<runic_agents::SubagentPersisterFn> = if persistence_enabled {
+        let store = session_store.clone();
+        let tenant = runic_tenant.clone();
+        let cell = parent_session_id_cell.clone();
+        Some(Arc::new(move |agent_name: &str, child_session_id: String, rx| {
+            let parent_id = cell
+                .get()
+                .map(String::as_str)
+                .unwrap_or("unknown_parent_session");
+            let composite_id =
+                format!("{parent_id}/subagents/{agent_name}/{child_session_id}");
+            eprintln!(
+                "[persist:sub] {agent_name} → sessions/{tenant}/{composite_id}/events.jsonl"
+            );
+            // Discard the handle: dropping a JoinHandle does NOT abort
+            // the task; the persister runs until the child agent's
+            // broadcast channel closes (i.e. the child is dropped).
+            let _ = spawn_persister(rx, store.clone(), tenant.clone(), composite_id);
+        }))
+    } else {
+        None
+    };
+
     let mut builder = Agent::builder(provider.clone())
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .context_engine_arc(context_engine)
@@ -501,6 +539,7 @@ async fn main() -> Result<()> {
                     skill_registry.clone(),
                     storage.clone(),
                     "skills",
+                    subagent_persister.clone(),
                 );
                 builder = builder.tool(Arc::new(tool));
             }
@@ -511,6 +550,7 @@ async fn main() -> Result<()> {
                     skill_registry.clone(),
                     storage.clone(),
                     "skills",
+                    subagent_persister.clone(),
                 );
                 eprintln!(
                     "[subagent:{}] dispatch=async — parent gets task_id, polls via background_status",
@@ -524,22 +564,24 @@ async fn main() -> Result<()> {
     let mut agent = builder.build();
 
     // ── Persistence (opt-in via RUNIC_PERSIST=1) ────────────────────────
-    // When enabled, every SessionEvent the agent emits gets streamed to a
-    // FileSessionStore under sessions/{tenant}/{session_id}/events.jsonl.
-    // Tenant defaults to "default" (single-user); a real server would pass
-    // the authenticated user id.
-    let _persister_handle = if std::env::var("RUNIC_PERSIST").as_deref() == Ok("1") {
-        let tenant = std::env::var("RUNIC_TENANT").unwrap_or_else(|_| "default".into());
+    // When enabled, every SessionEvent the agent emits gets streamed to
+    // a FileSessionStore at sessions/<tenant>/<session_id>/events.jsonl.
+    // The sub-agent persister wired above writes to
+    // sessions/<tenant>/<parent_session_id>/subagents/<name>/<child_session_id>/events.jsonl
+    // for every sub-agent invocation. Setting the parent_session_id cell
+    // here lets sub-agent runs land under the parent they ran for.
+    let _persister_handle = if persistence_enabled {
         let session_id = agent.state().session_id.clone();
-        let store: Arc<dyn SessionStore> =
-            Arc::new(FileSessionStore::new(storage.clone()));
+        parent_session_id_cell
+            .set(session_id.clone())
+            .expect("set exactly once after build");
         eprintln!(
-            "[persist] writing session events to sessions/{tenant}/{session_id}/events.jsonl"
+            "[persist] writing session events to sessions/{runic_tenant}/{session_id}/events.jsonl"
         );
         Some(spawn_persister(
             agent.subscribe_events(),
-            store,
-            tenant,
+            session_store,
+            runic_tenant,
             session_id,
         ))
     } else {

@@ -38,11 +38,25 @@ pub use types::{
 
 use std::sync::Arc;
 
-use runic_agent_core::{Agent, AgentConfig, AsyncSubagentTool, SubagentTool};
+use runic_agent_core::{Agent, AgentConfig, AsyncSubagentTool, SessionEvent, SubagentTool};
 use runic_provider_core::Provider;
 use runic_skills::{SkillRegistry, SkillViewTool};
 use runic_storage_backend::StorageBackend;
 use runic_tool_core::ToolRegistry;
+use tokio::sync::broadcast;
+
+/// Called once per sub-agent spawn so the host can persist the child's
+/// event stream alongside the parent's. The receiver is fresh from the
+/// child agent's broadcast — subscribe BEFORE the agent runs to catch
+/// the opening `RunStart`.
+///
+/// Args, in order:
+///   - sub-agent name (matches the AGENT.md `name` field)
+///   - child session_id (auto-generated UUID on `Agent::builder().build()`)
+///   - broadcast receiver for the child's `SessionEvent`s
+pub type SubagentPersisterFn = Arc<
+    dyn Fn(&str, String, broadcast::Receiver<SessionEvent>) + Send + Sync,
+>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -101,6 +115,7 @@ impl MdAgent {
             Arc::new(SkillRegistry::new()),
             Arc::new(runic_storage_backend::MemoryBackend::new()),
             "skills",
+            None,
         )
     }
 
@@ -129,6 +144,7 @@ impl MdAgent {
         parent_skills: Arc<SkillRegistry>,
         storage: Arc<dyn StorageBackend>,
         skills_root: &'static str,
+        persister: Option<SubagentPersisterFn>,
     ) -> SubagentTool {
         let agent_name = self.def.name.clone();
         let description = self.def.description.clone();
@@ -172,7 +188,17 @@ impl MdAgent {
             if !child_tools.is_empty() {
                 builder = builder.tools(child_tools);
             }
-            builder.build()
+            let agent = builder.build();
+            // Subscribe BEFORE returning so the persister catches the
+            // opening RunStart. The host's closure spawns the writer
+            // task; we discard the JoinHandle — dropping it doesn't
+            // kill the task, it runs until the child agent's broadcast
+            // channel closes.
+            if let Some(persister_fn) = persister.as_ref() {
+                let session_id = agent.state().session_id.clone();
+                persister_fn(&factory_name, session_id, agent.subscribe_events());
+            }
+            agent
         };
 
         SubagentTool::new(agent_name, description, factory)
@@ -194,6 +220,7 @@ impl MdAgent {
         parent_skills: Arc<SkillRegistry>,
         storage: Arc<dyn StorageBackend>,
         skills_root: &'static str,
+        persister: Option<SubagentPersisterFn>,
     ) -> AsyncSubagentTool {
         let agent_name = self.def.name.clone();
         let description = augment_async_description(&self.def.description);
@@ -235,7 +262,12 @@ impl MdAgent {
             if !child_tools.is_empty() {
                 builder = builder.tools(child_tools);
             }
-            builder.build()
+            let agent = builder.build();
+            if let Some(persister_fn) = persister.as_ref() {
+                let session_id = agent.state().session_id.clone();
+                persister_fn(&factory_name, session_id, agent.subscribe_events());
+            }
+            agent
         };
 
         AsyncSubagentTool::new(agent_name, description, factory)

@@ -17,6 +17,7 @@ members = [
     "crates/runic-sessions",
     "crates/runic-blobs",
     "crates/runic-memory",
+    "crates/runic-shell-tools",
     "crates/runic-examples",
 ]
 
@@ -48,6 +49,7 @@ hex = "0.4"
 base64 = "0.22"
 regex = "1"
 libc = "0.2"
+globset = "0.4"
 
 runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
@@ -64,6 +66,7 @@ runic-plugins = { path = "crates/runic-plugins" }
 runic-sessions = { path = "crates/runic-sessions" }
 runic-blobs = { path = "crates/runic-blobs" }
 runic-memory = { path = "crates/runic-memory" }
+runic-shell-tools = { path = "crates/runic-shell-tools" }
 runic-examples = { path = "crates/runic-examples" }
 
 [profile.release]

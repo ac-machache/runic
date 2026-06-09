@@ -26,6 +26,9 @@ use runic_blobs::{BlobMaterializingProvider, BlobStore, BlobStoreResolver, FileB
 use runic_mcp::{McpConfig, McpManager};
 use runic_memory::{BoundedMemoryStore, MemoryTool};
 use runic_sessions::{spawn_persister, FileSessionStore, SessionStore};
+use runic_shell_tools::{
+    EditFileTool, GlobTool, GrepTool, LsTool, ReadFileTool, WriteFileTool,
+};
 use runic_plugins::PluginManager;
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
@@ -354,6 +357,18 @@ async fn main() -> Result<()> {
     );
     let memory_tool = Arc::new(MemoryTool::new(memory_store));
 
+    // ── Shell tools ─────────────────────────────────────────────────────
+    // Six file-system tools (read_file, write_file, edit_file, ls, glob,
+    // grep) over the same StorageBackend the rest of runic uses. Sandbox
+    // = whatever the backend exposes (~/.runic by default). Subagents
+    // opt into individual tools via allowed-tools in their AGENT.md.
+    let read_file_tool = Arc::new(ReadFileTool::new(storage.clone()));
+    let write_file_tool = Arc::new(WriteFileTool::new(storage.clone()));
+    let edit_file_tool = Arc::new(EditFileTool::new(storage.clone()));
+    let ls_tool = Arc::new(LsTool::new(storage.clone()));
+    let glob_tool = Arc::new(GlobTool::new(storage.clone()));
+    let grep_tool = Arc::new(GrepTool::new(storage.clone()));
+
     // Hoist Arcs so every tool can be registered with BOTH the parent
     // builder AND the sub-agent pool. Sub-agents declare an
     // `allowed-tools:` list in their AGENT.md frontmatter and pull
@@ -370,6 +385,12 @@ async fn main() -> Result<()> {
     let mut subagent_pool = runic_tool_core::ToolRegistry::new();
     subagent_pool.register(echo_tool.clone());
     subagent_pool.register(memory_tool.clone());
+    subagent_pool.register(read_file_tool.clone());
+    subagent_pool.register(write_file_tool.clone());
+    subagent_pool.register(edit_file_tool.clone());
+    subagent_pool.register(ls_tool.clone());
+    subagent_pool.register(glob_tool.clone());
+    subagent_pool.register(grep_tool.clone());
     subagent_pool.register_hitl(email_tool.clone());
     subagent_pool.register_background(slow_count_tool.clone());
     for tool in &mcp_tools {
@@ -390,6 +411,12 @@ async fn main() -> Result<()> {
         .background_manager(background_manager.clone())
         .tool(echo_tool)
         .tool(memory_tool)
+        .tool(read_file_tool)
+        .tool(write_file_tool)
+        .tool(edit_file_tool)
+        .tool(ls_tool)
+        .tool(glob_tool)
+        .tool(grep_tool)
         .tool(skill_view_tool)
         .tool(research_subagent)
         .hitl_tool(email_tool)

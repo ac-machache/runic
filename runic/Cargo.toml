@@ -28,6 +28,7 @@ runic-provider-anthropic = { workspace = true }
 runic-provider-core = { workspace = true }
 runic-provider-gemini = { workspace = true }
 runic-skills = { workspace = true }
+runic-shell-tools = { workspace = true }
 runic-storage-backend = { workspace = true }
 runic-tool-core = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,120 @@
+//! Thread CRUD — backed by the `SessionStore`.
+//!
+//! A "thread" in the HTTP surface == a "session" in our internal
+//! `runic-sessions` vocabulary. We expose the resource with the more
+//! conventional HTTP name; internally it routes to the same store.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use runic_sessions::StoredEvent;
+use serde::{Deserialize, Serialize};
+
+use crate::app::AppState;
+use crate::error::ServeError;
+use crate::tenant::Tenant;
+
+#[derive(Debug, Serialize)]
+pub struct Thread {
+    pub thread_id: String,
+    pub tenant: String,
+    pub event_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadList {
+    pub threads: Vec<ThreadSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadSummary {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CreateThreadRequest {
+    /// If provided, the thread is created with this id. Otherwise the
+    /// server generates a UUID. Either way the value is returned in the
+    /// response so the client can stash it.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+}
+
+/// `POST /threads` — create an empty thread. Idempotent on existing id.
+///
+/// We don't materialise anything in the store for an empty thread —
+/// `runic-sessions::FileSessionStore` lazily creates the per-session
+/// directory on first event append. The response just confirms the id
+/// the client should use on subsequent calls.
+pub async fn create_thread(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Json(req): Json<CreateThreadRequest>,
+) -> Result<(StatusCode, Json<Thread>), ServeError> {
+    let thread_id = req
+        .thread_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let events: Vec<StoredEvent> = state
+        .session_store
+        .read(&tenant, &thread_id)
+        .await
+        .unwrap_or_default();
+
+    Ok((
+        StatusCode::CREATED,
+        Json(Thread {
+            thread_id: thread_id.clone(),
+            tenant,
+            event_count: events.len(),
+        }),
+    ))
+}
+
+/// `GET /threads` — list every thread for the authed tenant.
+pub async fn list_threads(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+) -> Result<Json<ThreadList>, ServeError> {
+    let ids: Vec<String> = state.session_store.list_sessions(&tenant).await?;
+    Ok(Json(ThreadList {
+        threads: ids
+            .into_iter()
+            .map(|thread_id| ThreadSummary { thread_id })
+            .collect(),
+    }))
+}
+
+/// `GET /threads/:id` — current shape of one thread (event count etc.).
+pub async fn get_thread(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Thread>, ServeError> {
+    let events: Vec<StoredEvent> = state.session_store.read(&tenant, &thread_id).await?;
+    // No events yet → return empty shape rather than 404. A real prod
+    // server would have a separate "threads" metadata table to
+    // distinguish "created but empty" from "never existed".
+    Ok(Json(Thread {
+        thread_id,
+        tenant,
+        event_count: events.len(),
+    }))
+}
+
+/// `DELETE /threads/:id` — drop the thread's session AND its in-pool
+/// Agent so the next run starts fresh.
+pub async fn delete_thread(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+) -> Result<StatusCode, ServeError> {
+    state.pool.evict(&tenant, &thread_id).await;
+    state
+        .session_store
+        .delete_session(&tenant, &thread_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}

@@ -18,6 +18,7 @@ members = [
     "crates/runic-blobs",
     "crates/runic-memory",
     "crates/runic-shell-tools",
+    "crates/runic-serve",
     "crates/runic-examples",
 ]
 
@@ -50,6 +51,10 @@ base64 = "0.22"
 regex = "1"
 libc = "0.2"
 globset = "0.4"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+async-stream = "0.3"
 
 runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
@@ -67,6 +72,7 @@ runic-sessions = { path = "crates/runic-sessions" }
 runic-blobs = { path = "crates/runic-blobs" }
 runic-memory = { path = "crates/runic-memory" }
 runic-shell-tools = { path = "crates/runic-shell-tools" }
+runic-serve = { path = "crates/runic-serve" }
 runic-examples = { path = "crates/runic-examples" }
 
 [profile.release]

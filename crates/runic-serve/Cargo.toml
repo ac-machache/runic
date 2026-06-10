@@ -1,0 +1,32 @@
+[package]
+name = "runic-serve"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+runic-agent-core = { workspace = true }
+runic-message-types = { workspace = true }
+runic-provider-core = { workspace = true }
+runic-sessions = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "time", "signal", "net"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+runic-storage-backend = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }

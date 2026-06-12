@@ -37,12 +37,17 @@ pub enum WireEvent {
     /// A tool call completed (success or error). `preview` is a trimmed
     /// head of the result for at-a-glance display; clients that need
     /// the full body can read it from the persisted message stream.
+    /// `metadata` is the tool's client-facing structured payload (e.g.
+    /// websearch source links for grounding chips) — passed through
+    /// verbatim, never shown to the model.
     ToolFinish {
         id: String,
         name: String,
         is_error: bool,
         duration_ms: u64,
         preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
 
     /// A complete message landed in agent state. Sent both during live
@@ -129,6 +134,7 @@ pub fn from_agent_event(event: AgentEvent) -> WireEvent {
             is_error: result.is_error,
             duration_ms,
             preview: truncate(&result.content, 200),
+            metadata: result.metadata.clone(),
         },
         AgentEvent::Usage(usage) => WireEvent::Usage {
             input_tokens: usage.input_tokens,

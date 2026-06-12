@@ -198,6 +198,73 @@ async fn tool_call_round_trip_dispatches_tool_then_replies() {
     assert_eq!(messages.len(), 4);
 }
 
+struct GroundedSearchTool;
+
+#[async_trait]
+impl Tool for GroundedSearchTool {
+    fn name(&self) -> &str {
+        "websearch"
+    }
+    fn description(&self) -> &str {
+        "Returns text for the model plus source links for the client."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": true })
+    }
+    async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+        ToolResult::ok("1. Rust 1.79 released — see blog").with_metadata(serde_json::json!({
+            "sources": [{ "title": "Rust blog", "url": "https://blog.rust-lang.org" }]
+        }))
+    }
+}
+
+#[tokio::test]
+async fn tool_metadata_flows_into_events_and_state_messages() {
+    let provider = ScriptedProvider::new(vec![
+        tool_call_turn("toolu_1", "websearch", r#"{}"#),
+        text_turn("done"),
+    ]);
+    let agent = Agent::builder(provider)
+        .system_prompt("test")
+        .tool(Arc::new(GroundedSearchTool))
+        .build();
+
+    let (agent, outcome, events) = collect_events(agent, "search rust news").await;
+    outcome.expect("run should succeed");
+
+    // Live event stream carries the metadata (this is what serve mode
+    // forwards to clients for grounding chips).
+    let live_metadata = events.iter().find_map(|e| match e {
+        AgentEvent::ToolFinished { result, .. } => result.metadata.clone(),
+        _ => None,
+    });
+    assert_eq!(
+        live_metadata.expect("ToolFinished must carry metadata")["sources"][0]["url"],
+        "https://blog.rust-lang.org"
+    );
+
+    // The persisted tool_result block carries it too (replayed threads
+    // keep their grounding), while content stays the model-facing text.
+    let stored_metadata = agent
+        .state()
+        .messages_for_provider()
+        .iter()
+        .flat_map(|m| m.content.clone())
+        .find_map(|block| match block {
+            runic_message_types::ContentBlock::ToolResult {
+                content, metadata, ..
+            } => {
+                assert_eq!(content, "1. Rust 1.79 released — see blog");
+                metadata
+            }
+            _ => None,
+        });
+    assert_eq!(
+        stored_metadata.expect("stored block must carry metadata")["sources"][0]["title"],
+        "Rust blog"
+    );
+}
+
 // ─── Hook tests ─────────────────────────────────────────────────────────────
 
 struct StopHook;

@@ -5,10 +5,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Output of a tool execution.
+///
+/// A result has two consumers with different needs: `content` is what the
+/// MODEL reads (plain text, costs tokens); `metadata` is what the CLIENT
+/// renders (structured JSON — search-result links for grounding chips,
+/// exec exit codes, thumbnail refs, …). Metadata never reaches the
+/// provider: adapters build API payloads field-by-field and don't copy it.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    /// Client-facing structured payload. Free-form by design — each tool
+    /// ships whatever its UI needs, the core stays schema-agnostic.
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl ToolResult {
@@ -16,6 +25,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: false,
+            metadata: None,
         }
     }
 
@@ -23,7 +33,14 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: true,
+            metadata: None,
         }
+    }
+
+    /// Attach client-facing metadata (builder-style).
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 }
 
@@ -285,6 +302,25 @@ mod tests {
 
     fn empty_ctx() -> ToolContext {
         ToolContext::new("sess".into(), "run".into(), 0, HashMap::new())
+    }
+
+    #[test]
+    fn tool_result_constructors_carry_no_metadata() {
+        assert!(ToolResult::ok("fine").metadata.is_none());
+        assert!(ToolResult::error("boom").metadata.is_none());
+    }
+
+    #[test]
+    fn tool_result_with_metadata_attaches_payload() {
+        let result = ToolResult::ok("3 results").with_metadata(serde_json::json!({
+            "sources": [{ "title": "Rust blog", "url": "https://blog.rust-lang.org" }]
+        }));
+        assert!(!result.is_error);
+        assert_eq!(result.content, "3 results");
+        assert_eq!(
+            result.metadata.unwrap()["sources"][0]["url"],
+            "https://blog.rust-lang.org"
+        );
     }
 
     #[test]

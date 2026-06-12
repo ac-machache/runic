@@ -298,6 +298,7 @@ mod tests {
                 tool_use_id: call_id.into(),
                 content: content.into(),
                 is_error: None,
+                metadata: None,
             }],
             timestamp: None,
             tool_duration_ms: None,

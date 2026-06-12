@@ -506,6 +506,9 @@ fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
             tool_use_id,
             content,
             is_error,
+            // metadata is client-facing only — deliberately NOT copied into
+            // the API payload (no token cost, invisible to the model).
+            metadata: _,
         } => {
             let mut response = serde_json::json!({ "content": content });
             if matches!(is_error, Some(true)) {
@@ -571,6 +574,27 @@ mod tests {
         assert_eq!(json["role"], "user");
         assert_eq!(json["parts"][0]["functionResponse"]["name"], "call_42");
         assert_eq!(json["parts"][0]["functionResponse"]["response"]["content"], "ok");
+    }
+
+    #[test]
+    fn tool_result_metadata_never_reaches_the_api_payload() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_42".into(),
+                content: "3 results".into(),
+                is_error: None,
+                metadata: Some(serde_json::json!({ "sources": ["https://a.example"] })),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let json = message_to_gemini(&msg).unwrap();
+        let rendered = json.to_string();
+        assert!(
+            !rendered.contains("a.example") && !rendered.contains("metadata"),
+            "client-facing metadata must not be sent to the model: {rendered}"
+        );
     }
 
     #[test]

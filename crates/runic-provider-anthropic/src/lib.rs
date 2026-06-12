@@ -474,6 +474,9 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value>
             tool_use_id,
             content,
             is_error,
+            // metadata is client-facing only — deliberately NOT copied into
+            // the API payload (no token cost, invisible to the model).
+            metadata: _,
         } => {
             let mut obj = serde_json::json!({
                 "type": "tool_result",
@@ -539,6 +542,26 @@ mod tests {
         let msg = Message::tool_result("toolu_1", "boom", true);
         let json = message_to_anthropic(&msg).unwrap();
         assert_eq!(json["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn tool_result_metadata_never_reaches_the_api_payload() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "3 results".into(),
+                is_error: None,
+                metadata: Some(serde_json::json!({ "sources": ["https://a.example"] })),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let json = message_to_anthropic(&msg).unwrap();
+        assert!(
+            json["content"][0].get("metadata").is_none(),
+            "client-facing metadata must not be sent to the model: {json}"
+        );
     }
 
     #[test]

@@ -625,6 +625,7 @@ impl Agent {
                 tool_use_id: call.id.clone(),
                 content: result.content.clone(),
                 is_error: if result.is_error { Some(true) } else { None },
+                metadata: result.metadata.clone(),
             });
 
             for hook in self.hooks.clone() {

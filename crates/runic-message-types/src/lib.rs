@@ -126,6 +126,12 @@ pub enum ContentBlock {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        /// Client-facing structured payload (e.g. websearch source links
+        /// for grounding chips). Persisted with the message so replayed
+        /// threads keep their UI affordances; never serialized into
+        /// provider API payloads (adapters copy fields explicitly).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
     Image {
         media_type: String,
@@ -223,6 +229,7 @@ impl Message {
                 tool_use_id: tool_use_id.to_string(),
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
+                metadata: None,
             }],
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms,
@@ -606,6 +613,47 @@ mod tests {
         match message.content.first() {
             Some(ContentBlock::Text { text, .. }) => text,
             other => panic!("expected text block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_result_metadata_round_trips_through_json() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "3 results".into(),
+            is_error: None,
+            metadata: Some(serde_json::json!({ "sources": [{ "url": "https://a.example" }] })),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"metadata\""));
+
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        match back {
+            ContentBlock::ToolResult { metadata, .. } => {
+                assert_eq!(metadata.unwrap()["sources"][0]["url"], "https://a.example");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_without_metadata_serializes_without_the_field() {
+        // Byte-compat both ways: new writers omit the field when None, and
+        // old event logs (no metadata key) still deserialize.
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "ok".into(),
+            is_error: None,
+            metadata: None,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(!json.contains("metadata"), "None must not serialize: {json}");
+
+        let old_log_line = r#"{"type":"tool_result","tool_use_id":"toolu_9","content":"legacy"}"#;
+        let back: ContentBlock = serde_json::from_str(old_log_line).unwrap();
+        match back {
+            ContentBlock::ToolResult { metadata, .. } => assert!(metadata.is_none()),
+            other => panic!("expected ToolResult, got {other:?}"),
         }
     }
 

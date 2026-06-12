@@ -630,4 +630,87 @@ mod tests {
             .unwrap();
         assert_eq!(usage, (Some(10), Some(5)));
     }
+
+    #[test]
+    fn stream_accum_emits_session_id_only_once() {
+        let mut s = StreamAccum::default();
+        let chunk = || -> GeminiStreamChunk {
+            serde_json::from_str(r#"{"responseId":"resp-1"}"#).unwrap()
+        };
+        let first = s.absorb(chunk());
+        assert!(matches!(&first[0], StreamEvent::SessionId(id) if id == "resp-1"));
+        assert!(
+            s.absorb(chunk()).is_empty(),
+            "session id must not repeat on later chunks"
+        );
+    }
+
+    #[test]
+    fn stream_accum_synthesizes_call_id_when_gemini_omits_it() {
+        // The public API often omits functionCall.id — the accumulator must
+        // still produce a usable id (the agent loop keys tool results on it).
+        let mut s = StreamAccum::default();
+        let chunk: GeminiStreamChunk = serde_json::from_str(
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"echo","args":{}}}]}}]}"#,
+        )
+        .unwrap();
+        let out = s.absorb(chunk);
+        match &out[0] {
+            StreamEvent::ToolUseStart { id, .. } => assert_eq!(id, "call_echo"),
+            other => panic!("expected ToolUseStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_accum_flush_synthesizes_message_end_when_stream_just_stops() {
+        // Gemini sometimes ends the SSE stream without ever sending a
+        // finishReason — flush() must still close the message.
+        let mut s = StreamAccum::default();
+        let out = s.flush();
+        assert!(
+            matches!(&out[0], StreamEvent::MessageEnd { stop_reason: None }),
+            "got {out:?}"
+        );
+        assert!(s.flush().is_empty(), "flush must be idempotent");
+    }
+
+    #[test]
+    fn stream_accum_flush_is_noop_after_real_message_end() {
+        let mut s = StreamAccum::default();
+        let chunk: GeminiStreamChunk =
+            serde_json::from_str(r#"{"candidates":[{"finishReason":"STOP"}]}"#).unwrap();
+        s.absorb(chunk);
+        assert!(s.flush().is_empty(), "MessageEnd already emitted via finishReason");
+    }
+
+    #[test]
+    fn stream_accum_tolerates_empty_and_partial_chunks() {
+        // Keep-alive / metadata-only chunks with no candidates, empty parts,
+        // or empty text must produce no events and no panic.
+        let mut s = StreamAccum::default();
+        for raw in [
+            r#"{}"#,
+            r#"{"candidates":[]}"#,
+            r#"{"candidates":[{}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}]}"#,
+        ] {
+            let chunk: GeminiStreamChunk = serde_json::from_str(raw).unwrap();
+            assert!(s.absorb(chunk).is_empty(), "chunk {raw} should emit nothing");
+        }
+    }
+
+    #[test]
+    fn reasoning_and_blob_blocks_are_dropped_from_gemini_payloads() {
+        // Reasoning isn't replayed to Gemini; Blob must be materialized
+        // upstream. A message containing ONLY such blocks serializes to
+        // nothing at all (Gemini rejects empty parts arrays).
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Reasoning { text: "private".into() }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        assert!(message_to_gemini(&msg).is_none());
+    }
 }

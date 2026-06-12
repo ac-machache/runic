@@ -170,3 +170,149 @@ impl McpClient {
         self.handle.transport.close().await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// Scripted transport: answers initialize / tools/list / tools/call
+    /// with canned JSON and records every method invoked, in order.
+    #[derive(Debug)]
+    struct FakeTransport {
+        with_tools_capability: bool,
+        fail_tools_list: bool,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeTransport {
+        fn new(with_tools_capability: bool, fail_tools_list: bool) -> Arc<Self> {
+            Arc::new(Self {
+                with_tools_capability,
+                fail_tools_list,
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Transport for FakeTransport {
+        fn server_name(&self) -> &str {
+            "fake"
+        }
+
+        async fn request(
+            &self,
+            method: &str,
+            params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, McpError> {
+            self.calls.lock().unwrap().push(method.to_string());
+            match method {
+                "initialize" => {
+                    let capabilities = if self.with_tools_capability {
+                        serde_json::json!({ "tools": {} })
+                    } else {
+                        serde_json::json!({})
+                    };
+                    Ok(serde_json::json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": capabilities,
+                        "serverInfo": { "name": "fake-server", "version": "1.2.3" },
+                    }))
+                }
+                "tools/list" => {
+                    if self.fail_tools_list {
+                        Err(McpError::protocol("tools/list exploded"))
+                    } else {
+                        Ok(serde_json::json!({
+                            "tools": [
+                                { "name": "echo", "description": "echoes", "inputSchema": { "type": "object" } },
+                            ]
+                        }))
+                    }
+                }
+                "tools/call" => {
+                    let name = params
+                        .as_ref()
+                        .and_then(|p| p.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    Ok(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("ran {name}") }]
+                    }))
+                }
+                other => Err(McpError::protocol(format!("unexpected request: {other}"))),
+            }
+        }
+
+        async fn notify(
+            &self,
+            method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<(), McpError> {
+            self.calls.lock().unwrap().push(format!("notify:{method}"));
+            Ok(())
+        }
+
+        async fn close(&self) {}
+    }
+
+    #[tokio::test]
+    async fn handshake_initializes_then_notifies_then_lists_tools() {
+        let transport = FakeTransport::new(true, false);
+        let client = McpClient::handshake(transport.clone()).await.unwrap();
+
+        assert_eq!(
+            transport.calls(),
+            vec!["initialize", "notify:notifications/initialized", "tools/list"],
+            "handshake sequence must follow the MCP spec order"
+        );
+        assert_eq!(client.server_info().name, "fake-server");
+        assert_eq!(client.tools().len(), 1);
+        assert_eq!(client.tools()[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn handshake_skips_tools_list_when_capability_absent() {
+        let transport = FakeTransport::new(false, false);
+        let client = McpClient::handshake(transport.clone()).await.unwrap();
+
+        assert!(
+            !transport.calls().iter().any(|c| c == "tools/list"),
+            "must not call tools/list when the server doesn't advertise tools"
+        );
+        assert!(client.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handshake_degrades_gracefully_when_tools_list_fails() {
+        // A flaky tools/list must not kill the connection — the server may
+        // still be useful for resources/prompts.
+        let transport = FakeTransport::new(true, true);
+        let client = McpClient::handshake(transport).await.unwrap();
+        assert!(client.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_tool_wraps_params_and_parses_result() {
+        let transport = FakeTransport::new(true, false);
+        let client = McpClient::handshake(transport).await.unwrap();
+
+        let result = client
+            .handle()
+            .call_tool("echo", serde_json::json!({ "msg": "hi" }))
+            .await
+            .unwrap();
+        match &result.content[0] {
+            crate::protocol::ContentBlock::Text { text } => assert_eq!(text, "ran echo"),
+            other => panic!("expected Text content, got {other:?}"),
+        }
+        assert!(result.is_error.is_none());
+    }
+}

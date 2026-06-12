@@ -584,4 +584,122 @@ mod tests {
         });
         assert_eq!(stop_reason.as_deref(), Some("tool_use"));
     }
+
+    #[test]
+    fn sse_state_tracks_thinking_lifecycle() {
+        let mut state = SseState::default();
+        let start = state
+            .handle(
+                "content_block_start",
+                r#"{"index":0,"content_block":{"type":"thinking"}}"#,
+            )
+            .unwrap();
+        assert!(matches!(&start[0], StreamEvent::ThinkingStart));
+
+        let delta = state
+            .handle(
+                "content_block_delta",
+                r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            )
+            .unwrap();
+        assert!(matches!(&delta[0], StreamEvent::ThinkingDelta(t) if t == "hmm"));
+
+        let stop = state.handle("content_block_stop", r#"{"index":0}"#).unwrap();
+        assert!(matches!(&stop[0], StreamEvent::ThinkingEnd));
+    }
+
+    #[test]
+    fn sse_state_distinguishes_concurrent_blocks_by_index() {
+        // A thinking block at index 0 and a tool_use at index 1 must each
+        // close with their own end event, keyed by index — not by order.
+        let mut state = SseState::default();
+        state.handle(
+            "content_block_start",
+            r#"{"index":0,"content_block":{"type":"thinking"}}"#,
+        );
+        state.handle(
+            "content_block_start",
+            r#"{"index":1,"content_block":{"type":"tool_use","id":"t","name":"bash"}}"#,
+        );
+
+        let stop1 = state.handle("content_block_stop", r#"{"index":1}"#).unwrap();
+        assert!(matches!(&stop1[0], StreamEvent::ToolUseEnd));
+        let stop0 = state.handle("content_block_stop", r#"{"index":0}"#).unwrap();
+        assert!(matches!(&stop0[0], StreamEvent::ThinkingEnd));
+    }
+
+    #[test]
+    fn sse_state_surfaces_error_events() {
+        let mut state = SseState::default();
+        let out = state
+            .handle(
+                "error",
+                r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            )
+            .unwrap();
+        assert!(matches!(&out[0], StreamEvent::Error { message, .. } if message == "Overloaded"));
+    }
+
+    #[test]
+    fn sse_state_extracts_session_id_and_usage_from_message_start() {
+        let mut state = SseState::default();
+        let out = state
+            .handle(
+                "message_start",
+                r#"{"message":{"id":"msg_abc","usage":{"input_tokens":100,"cache_read_input_tokens":80}}}"#,
+            )
+            .unwrap();
+        assert!(matches!(&out[0], StreamEvent::SessionId(id) if id == "msg_abc"));
+        assert!(matches!(
+            &out[1],
+            StreamEvent::TokenUsage {
+                input_tokens: Some(100),
+                cache_read_input_tokens: Some(80),
+                ..
+            }
+        ));
+    }
+
+    // ─── Forward compatibility: the API WILL grow event/block types we
+    //     don't know about; the parser must skip them, never panic. ─────────
+
+    #[test]
+    fn sse_state_ignores_unknown_event_types() {
+        let mut state = SseState::default();
+        assert!(state.handle("brand_new_event", r#"{"some":"payload"}"#).is_none());
+        assert!(state.handle("ping", r#"{}"#).is_none());
+    }
+
+    #[test]
+    fn sse_state_ignores_unknown_block_and_delta_types() {
+        let mut state = SseState::default();
+        assert!(
+            state
+                .handle(
+                    "content_block_start",
+                    r#"{"index":0,"content_block":{"type":"server_tool_use","id":"x"}}"#,
+                )
+                .is_none()
+        );
+        assert!(
+            state
+                .handle(
+                    "content_block_delta",
+                    r#"{"index":0,"delta":{"type":"citations_delta","citation":{}}}"#,
+                )
+                .is_none()
+        );
+        // The unknown block was never registered open, so its stop is silent.
+        assert!(state.handle("content_block_stop", r#"{"index":0}"#).is_none());
+    }
+
+    #[test]
+    fn sse_state_survives_malformed_payloads() {
+        let mut state = SseState::default();
+        assert!(state.handle("content_block_delta", "not json at all").is_none());
+        assert!(state.handle("message_start", "").is_none());
+        // Valid JSON, wrong shape — fields just come out missing.
+        assert!(state.handle("content_block_delta", r#"{"delta":42}"#).is_none());
+        assert!(state.handle("content_block_stop", r#"{"index":"zero"}"#).is_none());
+    }
 }

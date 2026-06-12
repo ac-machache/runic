@@ -182,6 +182,87 @@ impl std::fmt::Debug for SpilloverEngine {
     }
 }
 
+/// Result of a [`gc_spillover`] sweep.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SpilloverGcReport {
+    pub deleted_files: usize,
+    pub freed_bytes: u64,
+    pub kept_files: usize,
+}
+
+/// Delete spilled tool results whose age is `max_age` or older.
+///
+/// Spillover files are write-once per `(run_id, tool_use_id)` and only ever
+/// referenced from the conversation that produced them, so past a retention
+/// window they're dead weight — without this, the spillover root grows
+/// forever. Intended to be called on startup by whatever binary owns the
+/// storage root.
+///
+/// Files with no `modified` timestamp (backend doesn't track it) are kept —
+/// when in doubt, don't delete. Empty run directories are left behind on
+/// filesystem backends; they hold no data.
+pub async fn gc_spillover(
+    storage: &dyn StorageBackend,
+    root: &str,
+    max_age: chrono::Duration,
+) -> SpilloverGcReport {
+    let now = chrono::Utc::now();
+    let mut report = SpilloverGcReport::default();
+
+    // Missing root lists as empty — a fresh install sweeps nothing.
+    let run_dirs = match storage.list(root).await {
+        Ok(entries) => entries,
+        Err(err) => {
+            warn!(root, error = %err, "spillover gc: cannot list root; skipping");
+            return report;
+        }
+    };
+
+    for dir in run_dirs {
+        let files = match dir.kind {
+            runic_storage_backend::EntryKind::Directory => match storage.list(&dir.key).await {
+                Ok(f) => f,
+                Err(err) => {
+                    warn!(key = dir.key, error = %err, "spillover gc: cannot list run dir; skipping");
+                    continue;
+                }
+            },
+            // MemoryBackend-style flat backends list `{root}/{run}/{id}.txt`
+            // keys directly as files.
+            runic_storage_backend::EntryKind::File => vec![dir],
+        };
+
+        for file in files {
+            if file.kind != runic_storage_backend::EntryKind::File {
+                continue;
+            }
+            let stale = file.modified.map(|m| now - m >= max_age).unwrap_or(false);
+            if !stale {
+                report.kept_files += 1;
+                continue;
+            }
+            match storage.delete(&file.key).await {
+                Ok(()) => {
+                    report.deleted_files += 1;
+                    report.freed_bytes += file.size.unwrap_or(0);
+                }
+                Err(err) => {
+                    warn!(key = file.key, error = %err, "spillover gc: delete failed");
+                    report.kept_files += 1;
+                }
+            }
+        }
+    }
+
+    debug!(
+        deleted = report.deleted_files,
+        freed_bytes = report.freed_bytes,
+        kept = report.kept_files,
+        "spillover gc: sweep complete"
+    );
+    report
+}
+
 fn take_preview(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -375,6 +456,52 @@ mod tests {
             ContentBlock::Text { text, .. } => assert!(text.starts_with("TOUCHED_BY_INNER")),
             other => panic!("expected Text block, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn gc_deletes_stale_files_and_keeps_fresh_ones() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        storage.write("spillover/run-1/a.txt", b"aaaa").await.unwrap();
+        storage.write("spillover/run-1/b.txt", b"bbbb").await.unwrap();
+        storage.write("sessions/keep-me.jsonl", b"not spillover").await.unwrap();
+
+        // max_age = 30 days → freshly written files are kept.
+        let report = gc_spillover(storage.as_ref(), "spillover", chrono::Duration::days(30)).await;
+        assert_eq!(report.deleted_files, 0);
+        assert_eq!(report.kept_files, 2);
+
+        // max_age = 0 → everything under the root is stale.
+        let report = gc_spillover(storage.as_ref(), "spillover", chrono::Duration::zero()).await;
+        assert_eq!(report.deleted_files, 2);
+        assert_eq!(report.freed_bytes, 8);
+        assert!(!storage.exists("spillover/run-1/a.txt").await.unwrap());
+        assert!(!storage.exists("spillover/run-1/b.txt").await.unwrap());
+        assert!(
+            storage.exists("sessions/keep-me.jsonl").await.unwrap(),
+            "gc must never touch keys outside its root"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_on_missing_root_is_a_noop() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        let report = gc_spillover(storage.as_ref(), "spillover", chrono::Duration::zero()).await;
+        assert_eq!(report, SpilloverGcReport::default());
+    }
+
+    #[tokio::test]
+    async fn gc_walks_real_directories_on_localfs() {
+        use runic_storage_backend::LocalFsBackend;
+        let dir = tempfile::tempdir().unwrap();
+        let storage: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(dir.path()));
+        storage.write("spillover/run-1/a.txt", b"aaaa").await.unwrap();
+        storage.write("spillover/run-2/b.txt", b"bbbbbb").await.unwrap();
+
+        let report = gc_spillover(storage.as_ref(), "spillover", chrono::Duration::zero()).await;
+        assert_eq!(report.deleted_files, 2);
+        assert_eq!(report.freed_bytes, 10);
+        assert!(!storage.exists("spillover/run-1/a.txt").await.unwrap());
+        assert!(!storage.exists("spillover/run-2/b.txt").await.unwrap());
     }
 
     #[test]

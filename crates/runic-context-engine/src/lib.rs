@@ -20,7 +20,10 @@ pub use composite::CompositeEngine;
 pub use layer::ContextLayer;
 pub use layers::{BasePromptLayer, FileLayer, MemoryLayer, PersonaLayer, UserFactsLayer};
 pub use reminder::{BackgroundTaskReminder, Reminder, ReminderEngine};
-pub use spillover::{SpilloverEngine, DEFAULT_PREVIEW_CHARS, DEFAULT_THRESHOLD_BYTES};
+pub use spillover::{
+    gc_spillover, SpilloverEngine, SpilloverGcReport, DEFAULT_PREVIEW_CHARS,
+    DEFAULT_THRESHOLD_BYTES,
+};
 
 use async_trait::async_trait;
 use runic_message_types::Message;

@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+chrono = { workspace = true }
 futures = { workspace = true }
 runic-message-types = { workspace = true }
 runic-provider-core = { workspace = true }
@@ -20,4 +21,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

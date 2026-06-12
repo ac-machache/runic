@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 dotenvy = "0.15"
 futures = { workspace = true }
 runic-agent-core = { workspace = true }

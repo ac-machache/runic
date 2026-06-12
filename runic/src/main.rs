@@ -197,6 +197,29 @@ async fn main() -> Result<()> {
         "[context] compact_threshold={compact_threshold} tokens, spillover_threshold={spill_threshold} bytes"
     );
 
+    // Sweep spilled tool results past the retention window. Spillover files
+    // are only referenced by the conversation that produced them, so old
+    // ones are dead weight that would otherwise accumulate forever.
+    // RUNIC_SPILLOVER_RETENTION_DAYS=0 disables the sweep entirely.
+    let retention_days: i64 = std::env::var("RUNIC_SPILLOVER_RETENTION_DAYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(14);
+    if retention_days > 0 {
+        let report = runic_context_engine::gc_spillover(
+            storage.as_ref(),
+            "spillover",
+            chrono::Duration::days(retention_days),
+        )
+        .await;
+        if report.deleted_files > 0 {
+            eprintln!(
+                "[spillover] gc: deleted {} stale files ({} bytes), kept {}",
+                report.deleted_files, report.freed_bytes, report.kept_files
+            );
+        }
+    }
+
     // BackgroundManager constructed up front so it can be shared by both
     // the agent (via runtime context) and the reminder (read-only access).
     let background_manager = Arc::new(BackgroundManager::new());

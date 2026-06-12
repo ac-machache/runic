@@ -75,7 +75,7 @@ pub enum Role {
 }
 
 /// A message in the conversation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
@@ -86,7 +86,7 @@ pub struct Message {
 }
 
 /// Cache control metadata for prompt caching.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub kind: String,
@@ -104,7 +104,7 @@ impl CacheControl {
 }
 
 /// Content block within a message.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {

@@ -10,18 +10,26 @@
 //!   4. Replaces the older messages with a single synthetic message
 //!      containing the summary
 //!
-//! Compaction is sticky-by-content: once messages get rewritten via
-//! `maybe_compact`, the new (shorter) list is what gets sent to the
-//! provider. The original messages on disk (in `AgentState.events`) are
-//! untouched — `maybe_compact` only mutates the in-memory copy for the
-//! current turn. That means we re-summarize each turn we cross the
-//! threshold. Future optimization: write the summary back into state via
-//! a `SessionEvent::StateSnapshot` so the work persists.
+//! The original messages on disk (in `AgentState.events`) are untouched —
+//! `maybe_compact` only mutates the in-memory copy for the current turn,
+//! which is rebuilt from events every turn. To avoid paying a summarizer
+//! call on *every* turn past the threshold, the engine caches the summary
+//! together with a chain-hash of the message prefix it covers. On later
+//! turns the same prefix is recognized and swapped for the cached synthetic
+//! message with no provider call; when history outgrows the threshold
+//! again, the old summary is folded into the next one and the cache
+//! extends. A welcome side effect: the replaced prefix is byte-identical
+//! across turns, which keeps provider prompt caches warm.
+//!
+//! The cache lives in memory, so the first over-threshold turn after a
+//! process restart pays one summarizer call to rebuild it.
 
 use async_trait::async_trait;
 use runic_message_types::{ContentBlock, Message, Role};
 use runic_provider_core::Provider;
-use std::sync::Arc;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
 use crate::{AmbientNote, ContextEngine, TurnContext};
@@ -48,12 +56,30 @@ Write in plain prose, third-person past tense. Do not editorialize. The \
 summary will replace the original messages in the live conversation, so \
 prioritize information the assistant will need to keep working effectively.";
 
+/// Seed for the prefix chain-hash. Arbitrary but fixed — changing it only
+/// invalidates in-memory caches, which rebuild on the next compaction.
+const CHAIN_SEED: u64 = 0x52_55_4e_49_43; // "RUNIC"
+
+/// A previously computed summary and the message prefix it stands in for.
+struct SummaryCache {
+    /// How many original (pre-compaction) messages the summary covers.
+    covered: usize,
+    /// Chain-hash over those messages (role + content only, so per-turn
+    /// timestamp stamping can't invalidate it).
+    prefix_hash: u64,
+    /// Cumulative original messages folded into the summary, for the marker.
+    total_compacted: usize,
+    /// The synthetic message that replaces the covered prefix.
+    synthetic: Message,
+}
+
 pub struct CompactorEngine {
     inner: Arc<dyn ContextEngine>,
     summarizer: Arc<dyn Provider>,
     token_threshold: usize,
     keep_recent: usize,
     summarizer_system_prompt: String,
+    cache: Mutex<Option<SummaryCache>>,
 }
 
 impl CompactorEngine {
@@ -64,6 +90,7 @@ impl CompactorEngine {
             token_threshold: DEFAULT_TOKEN_THRESHOLD,
             keep_recent: DEFAULT_KEEP_RECENT,
             summarizer_system_prompt: DEFAULT_SUMMARIZER_SYSTEM_PROMPT.to_string(),
+            cache: Mutex::new(None),
         }
     }
 
@@ -131,6 +158,31 @@ impl ContextEngine for CompactorEngine {
     async fn maybe_compact(&self, ctx: &TurnContext<'_>, messages: &mut Vec<Message>) {
         self.inner.maybe_compact(ctx, messages).await;
 
+        // 1. Reuse a previous summary if its covered prefix is intact.
+        //    Applied unconditionally (not just over threshold) so the
+        //    context the provider sees stays byte-stable turn over turn.
+        //    `applied` records (covered, prefix_hash, total_compacted) so
+        //    the extension step below can build on it.
+        let mut applied: Option<(usize, u64, usize)> = None;
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(entry) = cache.as_ref() {
+                if messages.len() >= entry.covered
+                    && chain_hash(CHAIN_SEED, &messages[..entry.covered]) == entry.prefix_hash
+                {
+                    messages.drain(..entry.covered);
+                    messages.insert(0, entry.synthetic.clone());
+                    applied = Some((entry.covered, entry.prefix_hash, entry.total_compacted));
+                } else {
+                    // The prefix no longer matches what we summarized
+                    // (history was rewritten upstream) — the summary is
+                    // stale, drop it rather than misrepresent history.
+                    debug!("compactor: cached summary no longer matches prefix; discarding");
+                    *cache = None;
+                }
+            }
+        }
+
         let estimated = self.estimated_tokens(messages);
         if estimated < self.token_threshold {
             return;
@@ -139,6 +191,9 @@ impl ContextEngine for CompactorEngine {
             return;
         }
 
+        // 2. Still too big — summarize everything but the recent tail. If a
+        //    cached summary was applied above it sits at index 0, gets
+        //    drained into `older`, and is folded into the new summary.
         let cutoff = messages.len() - self.keep_recent;
         let older: Vec<Message> = messages.drain(..cutoff).collect();
         debug!(
@@ -146,6 +201,7 @@ impl ContextEngine for CompactorEngine {
             threshold = self.token_threshold,
             compacting_count = older.len(),
             keeping = self.keep_recent,
+            reusing_cached_summary = applied.is_some(),
             "compactor: triggering summarization"
         );
 
@@ -153,13 +209,26 @@ impl ContextEngine for CompactorEngine {
             Some(s) => s,
             None => {
                 // Summarization failed — restore the messages so we don't
-                // silently lose history.
+                // silently lose history. (If a cached summary was applied,
+                // `older[0]` is that summary — equivalent context, and the
+                // cache entry is still valid for next turn.)
                 let mut restored = older;
                 restored.append(messages);
                 *messages = restored;
                 return;
             }
         };
+
+        // Cache bookkeeping: coverage and hash are tracked in terms of the
+        // ORIGINAL message list (what next turn's rebuild will hand us).
+        // When extending, `older[0]` is the previous synthetic summary and
+        // everything after it is original messages.
+        let (prev_covered, prev_hash, prev_total) =
+            applied.unwrap_or((0, CHAIN_SEED, 0));
+        let newly_covered = if applied.is_some() { &older[1..] } else { &older[..] };
+        let covered = prev_covered + newly_covered.len();
+        let prefix_hash = chain_hash(prev_hash, newly_covered);
+        let total_compacted = prev_total + newly_covered.len();
 
         // Prepend a synthetic User message that carries the summary. Using
         // User role (not Assistant) so the summary reads as "background
@@ -168,9 +237,7 @@ impl ContextEngine for CompactorEngine {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: format!(
-                    "[summary of earlier conversation, {} messages compacted]\n{}",
-                    older.len(),
-                    summary
+                    "[summary of earlier conversation, {total_compacted} messages compacted]\n{summary}"
                 ),
                 cache_control: None,
             }],
@@ -178,7 +245,13 @@ impl ContextEngine for CompactorEngine {
             tool_duration_ms: None,
         };
 
-        messages.insert(0, synthetic);
+        messages.insert(0, synthetic.clone());
+        *self.cache.lock().unwrap() = Some(SummaryCache {
+            covered,
+            prefix_hash,
+            total_compacted,
+            synthetic,
+        });
     }
 }
 
@@ -193,6 +266,35 @@ impl std::fmt::Debug for CompactorEngine {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Fingerprint one message from its role + content only. Timestamps and
+/// durations are deliberately excluded: the agent loop may stamp those per
+/// turn, and they carry no information about what was said.
+fn message_fingerprint(msg: &Message) -> u64 {
+    let mut h = DefaultHasher::new();
+    match msg.role {
+        Role::User => 0u8,
+        Role::Assistant => 1u8,
+    }
+    .hash(&mut h);
+    for block in &msg.content {
+        serde_json::to_string(block).unwrap_or_default().hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Chain-hash a slice of messages onto a previous hash. Because the fold is
+/// sequential, `chain_hash(chain_hash(seed, a), b) == chain_hash(seed, a ++ b)`
+/// — which is what lets the cache extend its coverage without re-reading
+/// messages it already summarized.
+fn chain_hash(seed: u64, messages: &[Message]) -> u64 {
+    messages.iter().fold(seed, |acc, msg| {
+        let mut h = DefaultHasher::new();
+        acc.hash(&mut h);
+        message_fingerprint(msg).hash(&mut h);
+        h.finish()
+    })
+}
 
 fn content_block_char_count(block: &ContentBlock) -> usize {
     match block {
@@ -309,6 +411,17 @@ mod tests {
                 canned_response: self.canned_response.clone(),
                 calls: Mutex::new(0),
             })
+        }
+    }
+
+    /// Equality on what the provider actually pays attention to —
+    /// `Message::user()` stamps creation time, so two builds of the same
+    /// history differ in timestamps even though the content is identical.
+    fn assert_same_content(left: &[Message], right: &[Message], msg: &str) {
+        assert_eq!(left.len(), right.len(), "{msg}: length mismatch");
+        for (l, r) in left.iter().zip(right) {
+            assert_eq!(l.role, r.role, "{msg}: role mismatch");
+            assert_eq!(l.content, r.content, "{msg}: content mismatch");
         }
     }
 
@@ -454,6 +567,112 @@ mod tests {
         });
         let engine = CompactorEngine::new(Arc::new(Marker), provider);
         assert_eq!(engine.assemble_system_prompt(&ctx()).await, "FROM_INNER");
+    }
+
+    #[tokio::test]
+    async fn second_turn_with_same_history_reuses_cached_summary() {
+        let provider = Arc::new(StubProvider {
+            canned_response: "Summary: stuff happened.".into(),
+            calls: Mutex::new(0),
+        });
+        // Threshold chosen so the post-compaction list (2 kept messages +
+        // short summary) lands UNDER it — i.e. realistic proportions.
+        let engine = CompactorEngine::new(Arc::new(NoopEngine), provider.clone())
+            .with_token_threshold(300)
+            .with_keep_recent(2);
+
+        // Turn 1: 20 × 500 chars ≈ 2500 tokens → compacts, one call.
+        let mut turn1 = big_messages(20, 500);
+        engine.maybe_compact(&ctx(), &mut turn1).await;
+        assert_eq!(turn1.len(), 3);
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+
+        // Turn 2: the agent loop rebuilds the SAME original list from
+        // events. The cache must kick in with zero provider calls and
+        // produce a byte-identical result.
+        let mut turn2 = big_messages(20, 500);
+        engine.maybe_compact(&ctx(), &mut turn2).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 1, "no re-summarization");
+        assert_same_content(&turn1, &turn2, "context must be stable across turns");
+    }
+
+    #[tokio::test]
+    async fn growing_history_extends_summary_incrementally() {
+        let provider = Arc::new(StubProvider {
+            canned_response: "Summary: stuff happened.".into(),
+            calls: Mutex::new(0),
+        });
+        let engine = CompactorEngine::new(Arc::new(NoopEngine), provider.clone())
+            .with_token_threshold(300)
+            .with_keep_recent(2);
+
+        // Turn 1: compact 18 of 20 messages.
+        let mut turn1 = big_messages(20, 500);
+        engine.maybe_compact(&ctx(), &mut turn1).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+
+        // Turn 2: history grew to 30 originals → over threshold again even
+        // after the cached summary collapses the first 18. One more call,
+        // folding the old summary in; cumulative count reflects originals.
+        let mut turn2 = big_messages(30, 500);
+        engine.maybe_compact(&ctx(), &mut turn2).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 2);
+        match &turn2[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(
+                    text.contains("28 messages compacted"),
+                    "cumulative original count expected: {text}"
+                );
+            }
+            other => panic!("expected Text block, got {other:?}"),
+        }
+
+        // Turn 3: same 30 originals → extended cache covers 28, the 2 kept
+        // messages fit under threshold → no further calls.
+        let mut turn3 = big_messages(30, 500);
+        engine.maybe_compact(&ctx(), &mut turn3).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 2, "extended cache reused");
+        assert_same_content(&turn2, &turn3, "extended context stable across turns");
+    }
+
+    #[tokio::test]
+    async fn rewritten_history_invalidates_cache() {
+        let provider = Arc::new(StubProvider {
+            canned_response: "Summary: stuff happened.".into(),
+            calls: Mutex::new(0),
+        });
+        let engine = CompactorEngine::new(Arc::new(NoopEngine), provider.clone())
+            .with_token_threshold(300)
+            .with_keep_recent(2);
+
+        let mut turn1 = big_messages(20, 500);
+        engine.maybe_compact(&ctx(), &mut turn1).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 1);
+
+        // A different history (e.g. upstream rewrote a tool result) must
+        // not be misrepresented by the stale summary: cache is dropped and
+        // a fresh summarization happens.
+        let mut different: Vec<Message> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Message::user(&"y".repeat(500))
+                } else {
+                    Message::assistant_text(&"y".repeat(500))
+                }
+            })
+            .collect();
+        engine.maybe_compact(&ctx(), &mut different).await;
+        assert_eq!(*provider.calls.lock().unwrap(), 2, "stale cache must not be reused");
+        assert_eq!(different.len(), 3);
+    }
+
+    #[test]
+    fn chain_hash_extension_matches_full_recompute() {
+        let msgs = big_messages(10, 50);
+        let full = chain_hash(CHAIN_SEED, &msgs);
+        let prefix = chain_hash(CHAIN_SEED, &msgs[..6]);
+        let extended = chain_hash(prefix, &msgs[6..]);
+        assert_eq!(full, extended, "chain hash must compose over slices");
     }
 
     #[test]

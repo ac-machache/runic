@@ -11,6 +11,7 @@ members = [
     "crates/runic-tool-core",
     "crates/runic-agent-core",
     "crates/runic-skills",
+    "crates/runic-commands",
     "crates/runic-mcp",
     "crates/runic-agents",
     "crates/runic-plugins",
@@ -65,6 +66,7 @@ runic-context-engine = { path = "crates/runic-context-engine" }
 runic-tool-core = { path = "crates/runic-tool-core" }
 runic-agent-core = { path = "crates/runic-agent-core" }
 runic-skills = { path = "crates/runic-skills" }
+runic-commands = { path = "crates/runic-commands" }
 runic-mcp = { path = "crates/runic-mcp" }
 runic-agents = { path = "crates/runic-agents" }
 runic-plugins = { path = "crates/runic-plugins" }

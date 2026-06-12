@@ -165,6 +165,20 @@ async fn main() -> Result<()> {
         skill_registry.list().iter().map(|s| s.meta.name.as_str()).collect::<Vec<_>>()
     );
 
+    // ── Slash commands: scan ~/.runic/commands/ for {dir}/COMMAND.md ───
+    // Commands are prompt templates the REPL expands locally — the model
+    // never sees the slash invocation, only the expanded body.
+    let command_registry = runic_commands::CommandRegistry::load(storage.clone(), "commands")
+        .await
+        .context("loading commands from ~/.runic/commands/")?;
+    if !command_registry.is_empty() {
+        eprintln!(
+            "[commands] {} command(s): {:?}",
+            command_registry.len(),
+            command_registry.list().iter().map(|c| c.meta.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
     // PersonaLayer stays hot-reload — tweaking SOUL.md between turns is
     // a deliberate feature. UserFactsLayer and MemoryLayer are FROZEN —
     // they snap content on first render and serve the same value all
@@ -617,7 +631,22 @@ async fn main() -> Result<()> {
         agent.tools().names(),
         session_uuid_for_print
     );
-    eprintln!("commands: /state (summary)  /dump (full JSON)  /quit | /exit | Ctrl-D\n");
+    eprintln!(
+        "commands: /state (summary)  /dump (full JSON)  /quit | /exit | Ctrl-D{}\n",
+        if command_registry.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "  + {}",
+                command_registry
+                    .list()
+                    .iter()
+                    .map(|c| format!("/{}", c.meta.name))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
+    );
 
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
@@ -659,7 +688,30 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        let (mut events, handle) = agent.run_streaming(trimmed);
+        // Anything else starting with `/` is a user-defined slash command.
+        // Known → expand its COMMAND.md template and send that to the agent.
+        // Unknown → list what's available rather than sending a typo to the
+        // model as a prompt.
+        let input: String = match runic_commands::split_invocation(trimmed) {
+            Some((name, args)) => match command_registry.get(name) {
+                Some(cmd) => cmd.expand(args),
+                None => {
+                    let available: Vec<&str> = command_registry
+                        .list()
+                        .iter()
+                        .map(|c| c.meta.name.as_str())
+                        .collect();
+                    eprintln!(
+                        "[commands] unknown command /{name} — available: {available:?} \
+                         (plus builtins /state /dump /quit)"
+                    );
+                    continue;
+                }
+            },
+            None => trimmed.to_string(),
+        };
+
+        let (mut events, handle) = agent.run_streaming(&input);
         let mut printer_state = PrinterState::default();
 
         tokio::pin! {

@@ -98,7 +98,7 @@ cargo run --example with_blob -- IMG    # upload a file as a blob + ask the mode
 
 Each example is self-contained and commented. See `crates/runic-examples/`.
 
-## Crate map (14 crates)
+## Crate map (20 crates)
 
 ```
 runic-message-types       wire types (Message, ContentBlock, StreamEvent, ToolCall)
@@ -110,11 +110,15 @@ runic-tool-core           Tool / HitlTool / BackgroundTool + dispatch registry
 runic-context-engine      ContextEngine trait + Composite + Compactor + Spillover + Reminder
 runic-agent-core          Agent loop, hooks, state, sub-agent dispatch
 runic-skills              SKILL.md parser, registry, layer, view tool
+runic-commands            COMMAND.md parser + registry (slash-command prompt templates)
 runic-agents              AGENT.md parser, registry, conversion to SubagentTool
 runic-plugins             ~/.runic/plugins/{name}/ discovery, aggregate registries
 runic-mcp                 MCP client (stdio + Streamable HTTP transports)
 runic-sessions            SessionStore trait + FileSessionStore + spawn_persister + replay
 runic-blobs               BlobStore trait + FileBlobStore (sha256, dedup) + materializing provider
+runic-memory              bounded MEMORY.md / USER.md stores + memory tool (threat-scanned)
+runic-shell-tools         read/write/edit/ls/glob/grep tools over any StorageBackend
+runic-serve               axum HTTP server — threads, runs, SSE streaming, resume
 runic                     REPL binary that wires everything together
 runic-examples            runnable examples
 ```
@@ -132,13 +136,13 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 | `GEMINI_API_KEY` | Required when provider is Gemini | — |
 | `RUNIC_SPILLOVER_THRESHOLD` | Bytes above which a tool result gets spilled | `8192` |
 | `RUNIC_COMPACT_THRESHOLD` | Token count above which to compact | `100000` |
+| `RUNIC_SPILLOVER_RETENTION_DAYS` | Spillover files older than this are deleted at startup (`0` disables) | `14` |
 | `RUNIC_PERSIST` | Set to `1` to persist session events under `sessions/{tenant}/{session_id}/events.jsonl` | unset |
 | `RUNIC_TENANT` | Tenant id used when persistence is enabled | `default` |
 
 ## What's not built yet
 
-- Serve mode (HTTP/socket daemon)
-- Slash commands
+- Serve mode hardening (auth, persistent run queue — routes and SSE streaming exist)
 - MemoryStore (cross-session memory; separate from `SessionStore`)
 
 See the roadmap section of [ARCHITECTURE.md](./ARCHITECTURE.md#whats-not-built).

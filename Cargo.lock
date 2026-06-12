@@ -1116,6 +1116,7 @@ dependencies = [
  "runic-agent-core",
  "runic-agents",
  "runic-blobs",
+ "runic-commands",
  "runic-context-engine",
  "runic-mcp",
  "runic-memory",
@@ -1193,6 +1194,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "runic-commands"
+version = "0.1.0"
+dependencies = [
+ "runic-storage-backend",
+ "serde",
+ "serde_yml",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

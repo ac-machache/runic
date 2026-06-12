@@ -19,6 +19,7 @@ futures = { workspace = true }
 runic-agent-core = { workspace = true }
 runic-agents = { workspace = true }
 runic-blobs = { workspace = true }
+runic-commands = { workspace = true }
 runic-context-engine = { workspace = true }
 runic-mcp = { workspace = true }
 runic-memory = { workspace = true }

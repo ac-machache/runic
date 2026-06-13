@@ -25,16 +25,49 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 
+use runic_message_types::{ContentBlock, Message, Role};
+
 use crate::app::AppState;
 use crate::error::ServeError;
 use crate::tenant::Tenant;
 use crate::wire::{from_agent_event, from_session_event, WireEvent};
 
+/// The user turn for a run. Two shapes, checked in order:
+///
+///   {"message": "plain text"}                         // text shorthand
+///   {"content": [{"type":"text","text":"..."},        // full blocks
+///                {"type":"blob","id":"sha256…", "mime":"image/png", "size":1234}]}
+///
+/// `content` carries `ContentBlock`s directly, so an upload is just a
+/// `blob` block referencing bytes already in the BlobStore — the
+/// provider adapter materializes it on the way to the model. No separate
+/// upload endpoint: multipart content rides inside the message, the way
+/// the providers' own APIs model it.
 #[derive(Debug, Deserialize)]
 pub struct RunMessageRequest {
-    /// The user message body. Free-form text for now — multipart and
-    /// multi-block content land in a future phase.
-    pub message: String,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub content: Option<Vec<ContentBlock>>,
+}
+
+impl RunMessageRequest {
+    /// Resolve into the user `Message` to run, or a `BadRequest` if the
+    /// body carried neither a non-empty `message` nor any `content`.
+    fn into_message(self) -> Result<Message, ServeError> {
+        match (self.content, self.message) {
+            (Some(blocks), _) if !blocks.is_empty() => Ok(Message {
+                role: Role::User,
+                content: blocks,
+                timestamp: None,
+                tool_duration_ms: None,
+            }),
+            (_, Some(text)) if !text.trim().is_empty() => Ok(Message::user(&text)),
+            _ => Err(ServeError::BadRequest(
+                "run request needs a non-empty `message` string or a non-empty `content` array".into(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -54,48 +87,63 @@ pub async fn create_and_stream_run(
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
+    // Validate the body BEFORE building/locking anything, so a malformed
+    // request gets a clean 400 instead of a half-open SSE stream.
+    let user_msg = req.into_message()?;
+
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
 
-    let stream = stream! {
-        // Hold the mutex for the whole run. Concurrent POSTs on the
-        // same thread queue here — intentional, since interleaved
-        // turns would corrupt the conversation log.
-        let mut slot = agent_arc.lock().await;
+    // The run executes in a DETACHED task that owns the agent's slot for
+    // the whole turn (so concurrent POSTs on the same thread still
+    // serialize) and ALWAYS returns the agent when finished. The SSE
+    // response only *observes* via `sse_rx`. If the client disconnects,
+    // the response stream is dropped and `sse_tx.send` starts erroring —
+    // we ignore that and keep draining the agent to completion, so the
+    // agent is returned to its slot regardless. Previously the return
+    // happened inside the response stream, so a mid-run disconnect left
+    // the slot permanently empty and bricked the thread.
+    let (sse_tx, mut sse_rx) = tokio::sync::mpsc::channel::<WireEvent>(256);
 
-        // run_streaming consumes the Agent and returns it via the
-        // JoinHandle. Take it out, run it, put it back.
+    tokio::spawn(async move {
+        let mut slot = agent_arc.lock().await;
         let agent = match slot.take() {
             Some(a) => a,
             None => {
-                let body = WireEvent::Warning {
-                    message: "agent slot was empty — concurrent take?".into(),
-                };
-                yield Ok(to_sse(&body, None));
+                let _ = sse_tx
+                    .send(WireEvent::Warning {
+                        message: "agent slot was empty — a prior run panicked; DELETE the thread to reset".into(),
+                    })
+                    .await;
                 return;
             }
         };
 
-        let (mut events, handle) = agent.run_streaming(&req.message);
-
+        let (mut events, handle) = agent.run_streaming_message(user_msg);
         while let Some(event) = events.next().await {
-            let wire = from_agent_event(event);
-            yield Ok(to_sse(&wire, None));
+            // Ignore send errors (client gone) but keep draining so the
+            // agent runs to completion and is returned below.
+            let _ = sse_tx.send(from_agent_event(event)).await;
         }
 
-        // Pull the Agent back from the JoinHandle and park it in the
-        // slot for the next turn.
         match handle.await {
             Ok((returned_agent, _outcome)) => {
                 *slot = Some(returned_agent);
             }
             Err(join_err) => {
-                let body = WireEvent::Warning {
-                    message: format!("join error: {join_err}"),
-                };
-                yield Ok(to_sse(&body, None));
-                // Slot stays None — next request will see the empty
-                // and surface a clean error rather than a panic.
+                // The run task panicked — the agent is lost. Leave the slot
+                // empty; the next request surfaces a clean error and the
+                // client can DELETE/recreate the thread.
+                let _ = sse_tx
+                    .send(WireEvent::Warning { message: format!("run task failed: {join_err}") })
+                    .await;
             }
+        }
+        // slot guard drops here → the next queued run on this thread proceeds.
+    });
+
+    let stream = stream! {
+        while let Some(wire) = sse_rx.recv().await {
+            yield Ok(to_sse(&wire, None));
         }
     };
 
@@ -212,4 +260,65 @@ fn to_sse(wire: &WireEvent, id: Option<u64>) -> SseEvent {
         event = event.id(seq.to_string());
     }
     event
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> RunMessageRequest {
+        serde_json::from_str(json).expect("valid request json")
+    }
+
+    #[test]
+    fn text_shorthand_becomes_a_user_text_message() {
+        let msg = parse(r#"{"message":"hello"}"#).into_message().unwrap();
+        assert!(matches!(msg.role, Role::User));
+        match &msg.content[0] {
+            ContentBlock::Text { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_blocks_pass_through_including_a_blob_ref() {
+        let req = parse(
+            r#"{"content":[
+                {"type":"text","text":"look at this"},
+                {"type":"blob","id":"abc123","mime":"image/png","size":42}
+            ]}"#,
+        );
+        let msg = req.into_message().unwrap();
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "look at this"));
+        match &msg.content[1] {
+            ContentBlock::Blob(b) => {
+                assert_eq!(b.id, "abc123");
+                assert_eq!(b.mime, "image/png");
+                assert_eq!(b.size, 42);
+            }
+            other => panic!("expected blob block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn content_takes_precedence_over_message_when_both_present() {
+        let req = parse(r#"{"message":"ignored","content":[{"type":"text","text":"win"}]}"#);
+        let msg = req.into_message().unwrap();
+        assert_eq!(msg.content.len(), 1);
+        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "win"));
+    }
+
+    #[test]
+    fn empty_content_array_falls_back_to_message_text() {
+        let msg = parse(r#"{"message":"fallback","content":[]}"#).into_message().unwrap();
+        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "fallback"));
+    }
+
+    #[test]
+    fn neither_field_is_a_bad_request() {
+        assert!(matches!(parse(r#"{}"#).into_message(), Err(ServeError::BadRequest(_))));
+        assert!(matches!(parse(r#"{"message":"   "}"#).into_message(), Err(ServeError::BadRequest(_))));
+        assert!(matches!(parse(r#"{"content":[]}"#).into_message(), Err(ServeError::BadRequest(_))));
+    }
 }

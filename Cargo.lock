@@ -1110,6 +1110,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "dotenvy",
  "futures",
@@ -1125,6 +1126,7 @@ dependencies = [
  "runic-provider-anthropic",
  "runic-provider-core",
  "runic-provider-gemini",
+ "runic-serve",
  "runic-sessions",
  "runic-shell-tools",
  "runic-skills",

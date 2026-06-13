@@ -3,9 +3,10 @@
 A personal Rust agent harness. Inspired by the simplicity of pi and the
 speed and type-safety of Rust.
 
-Built as a library first — no TUI, no CLI, no UI. A minimal REPL ships
-in the `runic` binary just for testing. Drop the agent into your own
-surface (HTTP server, desktop app, custom CLI, whatever).
+Built as a library first — no TUI, no CLI, no UI. The `runic` binary
+ships two surfaces over one shared harness: a minimal REPL (`runic`) and
+an HTTP server (`runic serve`). Drop the agent into your own surface
+(desktop app, custom CLI, whatever) the same way they do.
 
 ```
 $ ANTHROPIC_API_KEY=sk-... cargo run --bin runic
@@ -36,6 +37,7 @@ hello! how can I help today?
 | Compactor (summarize old messages when context fills) | ✅ |
 | Reminder (peripheral vision via pluggable sources) | ✅ |
 | Persistence (pluggable `SessionStore` trait, multi-tenant) | ✅ |
+| HTTP server (`runic serve` — threads, SSE runs, resume, replay-on-restart) | ✅ |
 
 ## 60-second quickstart
 
@@ -139,10 +141,39 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 | `RUNIC_SPILLOVER_RETENTION_DAYS` | Spillover files older than this are deleted at startup (`0` disables) | `14` |
 | `RUNIC_PERSIST` | Set to `1` to persist session events under `sessions/{tenant}/{session_id}/events.jsonl` | unset |
 | `RUNIC_TENANT` | Tenant id used when persistence is enabled | `default` |
+| `RUNIC_SERVE_ADDR` | Bind address for `runic serve` | `127.0.0.1:8080` |
+
+## Serving over HTTP
+
+```sh
+RUNIC_PERSIST=1 runic serve         # bind 127.0.0.1:8080
+```
+
+The server exposes threads (== sessions) and SSE-streamed runs; the
+tenant comes from the `X-Runic-Tenant` header (defaults to `default`).
+
+```sh
+curl -XPOST localhost:8080/threads -H 'x-runic-tenant: alice' -d '{"thread_id":"t1"}'
+
+# Stream a run. Body is either a text shorthand or full content blocks:
+curl -N -XPOST localhost:8080/threads/t1/runs/stream \
+  -H 'x-runic-tenant: alice' -d '{"message":"hi"}'
+curl -N -XPOST localhost:8080/threads/t1/runs/stream -H 'x-runic-tenant: alice' \
+  -d '{"content":[{"type":"text","text":"describe this"},
+                  {"type":"blob","id":"<sha256>","mime":"image/png","size":1234}]}'
+
+# Resume a run from where a dropped connection left off:
+curl -N localhost:8080/threads/t1/runs/<run_id>/stream -H 'last-event-id: 42'
+```
+
+With `RUNIC_PERSIST=1`, a thread that goes cold (server restart, eviction)
+is rebuilt from its persisted events on the next request — full history
+intact. A client disconnect mid-run never bricks the thread: the run
+finishes server-side and the agent returns to the pool.
 
 ## What's not built yet
 
-- Serve mode hardening (auth, persistent run queue — routes and SSE streaming exist)
+- Serve mode hardening (auth, persistent run queue, pool eviction, run cancellation)
 - MemoryStore (cross-session memory; separate from `SessionStore`)
 
 See the roadmap section of [ARCHITECTURE.md](./ARCHITECTURE.md#whats-not-built).

@@ -12,6 +12,8 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use runic_agent_core::Agent;
+use runic_message_types::{Message, StreamEvent, ToolDefinition};
+use runic_provider_core::{EventStream, Provider, ProviderError};
 use runic_sessions::FileSessionStore;
 use runic_storage_backend::{MemoryBackend, StorageBackend};
 use runic_serve::{router, AgentFactory, ServeConfig};
@@ -36,6 +38,75 @@ fn make_router() -> axum::Router {
         session_store: store,
         agent_factory: Arc::new(PanicFactory),
     })
+}
+
+/// Minimal provider that streams one text turn then ends. Lets us
+/// exercise the agent-hot path (run streaming, slot return) without a
+/// network or API key.
+struct ScriptedProvider;
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream, ProviderError> {
+        let events = vec![
+            Ok(StreamEvent::TextDelta("pong".into())),
+            Ok(StreamEvent::MessageEnd { stop_reason: Some("end_turn".into()) }),
+        ];
+        Ok(Box::pin(futures::stream::iter(events)))
+    }
+    fn name(&self) -> &str {
+        "scripted"
+    }
+    fn model(&self) -> String {
+        "scripted-model".into()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(ScriptedProvider)
+    }
+}
+
+/// Factory that builds a real Agent backed by the scripted provider,
+/// keyed to the requested session id (so persistence/replay line up).
+struct ScriptedFactory;
+
+#[async_trait]
+impl AgentFactory for ScriptedFactory {
+    async fn build(&self, _tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(Arc::new(ScriptedProvider))
+            .system_prompt("test")
+            .session_id(session_id)
+            .build()
+    }
+}
+
+fn scripted_router() -> axum::Router {
+    let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let store = Arc::new(FileSessionStore::new(backend));
+    router(ServeConfig {
+        session_store: store,
+        agent_factory: Arc::new(ScriptedFactory),
+    })
+}
+
+fn run_request(thread_id: &str, message: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/threads/{thread_id}/runs/stream"))
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(format!(r#"{{"message":"{message}"}}"#)))
+        .unwrap()
+}
+
+async fn body_to_string(resp: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 async fn body_to_json(resp: axum::response::Response) -> Value {
@@ -227,4 +298,61 @@ async fn replay_unknown_run_returns_empty_stream() {
     //
     // Skipping deliberately: marked as ignored so it doesn't masquerade
     // as passing.
+}
+
+#[tokio::test]
+async fn run_streams_agent_events() {
+    let app = scripted_router();
+    let resp = app.oneshot(run_request("t1", "ping")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_string(resp).await;
+    // The scripted text delta and a terminal event should both appear.
+    assert!(body.contains("pong"), "streamed text missing from body: {body}");
+}
+
+#[tokio::test]
+async fn sequential_runs_on_same_thread_both_succeed() {
+    // Proves the agent is returned to its slot after a run: the second
+    // run can only proceed if the first put the agent back. The return
+    // now happens in a detached task, so this is the core guarantee
+    // behind the disconnect fix.
+    let app = scripted_router();
+
+    let r1 = app.clone().oneshot(run_request("t1", "one")).await.unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    let b1 = body_to_string(r1).await;
+    assert!(b1.contains("pong"));
+
+    let r2 = app.clone().oneshot(run_request("t1", "two")).await.unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    let b2 = body_to_string(r2).await;
+    assert!(
+        b2.contains("pong") && !b2.contains("slot was empty"),
+        "second run must reuse the returned agent, not hit an empty slot: {b2}"
+    );
+}
+
+#[tokio::test]
+async fn abandoned_run_does_not_brick_the_thread() {
+    // Simulate a client disconnect: issue a run and DROP the response
+    // without reading its body. The detached run task still drains the
+    // agent to completion and returns it to the slot. A follow-up run on
+    // the same thread must therefore succeed — under the old code the
+    // slot stayed empty forever and this run would surface a warning.
+    let app = scripted_router();
+
+    let abandoned = app.clone().oneshot(run_request("t1", "abandon")).await.unwrap();
+    assert_eq!(abandoned.status(), StatusCode::OK);
+    drop(abandoned); // never read the SSE body — client "hung up"
+
+    // This run queues on the thread's slot mutex; it cannot proceed until
+    // the abandoned run's task returns the agent. So a success here is a
+    // direct assertion that the slot was repopulated.
+    let resp = app.clone().oneshot(run_request("t1", "after")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_string(resp).await;
+    assert!(
+        body.contains("pong") && !body.contains("slot was empty"),
+        "thread must survive an abandoned run: {body}"
+    );
 }

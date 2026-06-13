@@ -108,12 +108,19 @@ impl Agent {
             .expect("AgentBuilder must install events_tx in build()")
     }
 
-    /// Drive a user input to completion, streaming events.
-    pub fn run_streaming(mut self, user_input: impl Into<String>) -> RunStreamingHandle {
+    /// Drive a text user input to completion, streaming events.
+    pub fn run_streaming(self, user_input: impl Into<String>) -> RunStreamingHandle {
+        self.run_streaming_message(Message::user(&user_input.into()))
+    }
+
+    /// Drive a full user [`Message`] to completion, streaming events.
+    /// Use this when the turn carries more than plain text — image or
+    /// blob content blocks (e.g. an upload arriving over HTTP). The
+    /// text-only [`Self::run_streaming`] is a thin wrapper over this.
+    pub fn run_streaming_message(mut self, user_msg: Message) -> RunStreamingHandle {
         let (tx, rx) = mpsc::channel::<AgentEvent>(128);
-        let user_input = user_input.into();
         let handle = tokio::spawn(async move {
-            let result = self.run_inner(user_input, &tx).await;
+            let result = self.run_inner(user_msg, &tx).await;
             (self, result)
         });
         (ReceiverStream::new(rx), handle)
@@ -123,7 +130,7 @@ impl Agent {
     pub async fn run(&mut self, user_input: impl Into<String>) -> Result<RunOutcome, AgentError> {
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(128);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let result = self.run_inner(user_input.into(), &tx).await;
+        let result = self.run_inner(Message::user(&user_input.into()), &tx).await;
         drop(tx);
         let _ = drain.await;
         result
@@ -131,7 +138,7 @@ impl Agent {
 
     async fn run_inner(
         &mut self,
-        user_input: String,
+        raw_user_msg: Message,
         events: &mpsc::Sender<AgentEvent>,
     ) -> Result<RunOutcome, AgentError> {
         let run_id = uuid::Uuid::new_v4().to_string();
@@ -143,7 +150,6 @@ impl Agent {
 
         // Engine pass: process_user_input — engine may rewrite the message
         // (e.g. spill huge pastes to disk, redact secrets, attach metadata).
-        let raw_user_msg = Message::user(&user_input);
         let processed_user_msg = {
             let messages_so_far = self.state.messages_for_provider();
             let ctx = TurnContext {
@@ -805,6 +811,7 @@ pub struct AgentBuilder {
     session_id: Option<String>,
     runtime: RunTimeContext,
     context_engine: Arc<dyn ContextEngine>,
+    restore_state: Option<AgentState>,
 }
 
 impl AgentBuilder {
@@ -818,7 +825,20 @@ impl AgentBuilder {
             session_id: None,
             runtime: RunTimeContext::default(),
             context_engine: Arc::new(NoopEngine),
+            restore_state: None,
         }
+    }
+
+    /// Resume from a previously-persisted [`AgentState`] (e.g. one
+    /// rebuilt by `runic_sessions::replay_into_state`). The replayed
+    /// event history and its `session_id` are adopted; the builder's
+    /// `system_prompt`, `runtime`, tools, hooks, and a fresh broadcast
+    /// channel are layered on top. Without this, every `build()` starts
+    /// from an empty conversation — which is exactly why a server thread
+    /// loses its history on a cold rebuild after restart.
+    pub fn restore_state(mut self, state: AgentState) -> Self {
+        self.restore_state = Some(state);
+        self
     }
 
     /// Plug in a `ContextEngine` to manage the system prompt, ambient
@@ -933,10 +953,25 @@ impl AgentBuilder {
     }
 
     pub fn build(self) -> Agent {
-        let session_id = self
-            .session_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let mut state = AgentState::new(session_id, self.system_prompt);
+        // A restored state keeps its event history and session_id; an
+        // explicit session_id() on the builder still wins if both are set
+        // (lets a caller re-key a resumed conversation). The system prompt
+        // and runtime always come from the builder — they hold live Arcs
+        // (provider-backed layers, DB handles) that don't survive replay.
+        let mut state = match self.restore_state {
+            Some(restored) => {
+                let session_id = self.session_id.unwrap_or(restored.session_id);
+                let mut s = AgentState::new(session_id, self.system_prompt);
+                s.events = restored.events;
+                s
+            }
+            None => {
+                let session_id = self
+                    .session_id
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                AgentState::new(session_id, self.system_prompt)
+            }
+        };
         state.runtime = self.runtime;
 
         // Install the broadcast channel. Every Agent has one from birth,

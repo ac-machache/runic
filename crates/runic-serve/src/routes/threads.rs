@@ -104,6 +104,28 @@ pub async fn get_thread(
     }))
 }
 
+/// `GET /threads/:id/events` — the full stored event log as a JSON
+/// snapshot (not an SSE stream). Each entry is `{seq, event}`, where
+/// `event` is the raw `SessionEvent`. Powers a dev UI's history load and
+/// state inspector — the SSE replay endpoint is for *live* following; this
+/// is for "show me everything this thread has done."
+pub async fn thread_events(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let stored: Vec<StoredEvent> = state.session_store.read(&tenant, &thread_id).await?;
+    let events: Vec<serde_json::Value> = stored
+        .into_iter()
+        .map(|s| serde_json::json!({ "seq": s.seq, "event": s.event }))
+        .collect();
+    Ok(Json(serde_json::json!({
+        "thread_id": thread_id,
+        "tenant": tenant,
+        "events": events,
+    })))
+}
+
 /// `DELETE /threads/:id` — drop the thread's session AND its in-pool
 /// Agent so the next run starts fresh.
 pub async fn delete_thread(

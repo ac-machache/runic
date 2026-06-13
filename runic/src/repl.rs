@@ -15,7 +15,8 @@ use crate::harness::Harness;
 /// Run the REPL against a freshly-built agent from `harness`.
 pub async fn run(harness: Harness) -> Result<()> {
     let approver = Arc::new(StdinApprover);
-    let mut agent = harness.build_agent(None, None, Some(approver));
+    let tenant = harness.config.tenant.clone();
+    let mut agent = harness.build_agent(&tenant, None, None, Some(approver));
     let command_registry = harness.command_registry().clone();
 
     if harness.config.persist {

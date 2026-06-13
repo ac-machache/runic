@@ -20,6 +20,7 @@ members = [
     "crates/runic-memory",
     "crates/runic-shell-tools",
     "crates/runic-serve",
+    "crates/runic-web",
     "crates/runic-examples",
 ]
 

@@ -6,3 +6,9 @@ Cargo.lock.bak
 .vscode/
 *.swp
 .env
+
+# local runic serve data (sessions, spillover, blobs)
+/runic-data
+
+# trunk build output
+/crates/runic-web/dist

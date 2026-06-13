@@ -257,12 +257,12 @@ impl Harness {
     /// The per-session sub-agent persister: writes child events under
     /// `sessions/<tenant>/<parent_session>/subagents/<name>/<child>/...`.
     /// `None` when persistence is disabled.
-    fn subagent_persister(&self, parent_session_id: &str) -> Option<runic_agents::SubagentPersisterFn> {
+    fn subagent_persister(&self, tenant: &str, parent_session_id: &str) -> Option<runic_agents::SubagentPersisterFn> {
         if !self.config.persist {
             return None;
         }
         let store = self.session_store.clone();
-        let tenant = self.config.tenant.clone();
+        let tenant = tenant.to_string();
         let parent_id = parent_session_id.to_string();
         Some(Arc::new(move |agent_name: &str, child_session_id: String, rx| {
             let composite_id = format!("{parent_id}/subagents/{agent_name}/{child_session_id}");
@@ -280,6 +280,7 @@ impl Harness {
     /// cold rebuild able to replay.
     pub fn build_agent(
         &self,
+        tenant: &str,
         session_id: Option<String>,
         restore: Option<AgentState>,
         approver: Option<ApproverHandle>,
@@ -361,7 +362,7 @@ impl Harness {
 
         // Register each markdown sub-agent, shaping its pool by filesystem
         // mode, and wiring this session's sub-agent persister.
-        let persister = self.subagent_persister(&session_id);
+        let persister = self.subagent_persister(tenant, &session_id);
         for md_agent in self.agent_registry.list() {
             let pool_for_agent = match md_agent.def.filesystem.mode {
                 FilesystemMode::Shared => subagent_pool.clone(),
@@ -412,7 +413,7 @@ impl Harness {
             let _ = spawn_persister(
                 agent.subscribe_events(),
                 self.session_store.clone(),
-                self.config.tenant.clone(),
+                tenant.to_string(),
                 session_id,
             );
         }
@@ -446,7 +447,7 @@ impl runic_serve::AgentFactory for Harness {
             }
         };
         // Server agents get no stdin approver — HITL tools have no channel.
-        self.build_agent(Some(session_id.to_string()), restore, None)
+        self.build_agent(tenant, Some(session_id.to_string()), restore, None)
     }
 }
 

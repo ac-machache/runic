@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::routing::{get, post};
 use axum::Router;
 use runic_sessions::SessionStore;
+use tower_http::cors::CorsLayer;
 
 use crate::factory::BoxedAgentFactory;
 use crate::pool::ThreadPool;
@@ -44,6 +45,7 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}",
             get(threads::get_thread).delete(threads::delete_thread),
         )
+        .route("/threads/{thread_id}/events", get(threads::thread_events))
         .route(
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),
@@ -52,6 +54,9 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}/runs/{run_id}/stream",
             get(runs::replay_run),
         )
+        // Permissive CORS so a browser dev UI served from another origin
+        // (e.g. trunk on :8080) can drive the server on :8920.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 

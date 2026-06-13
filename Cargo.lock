@@ -2142,6 +2142,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "runic-message-types",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

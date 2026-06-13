@@ -42,6 +42,22 @@ struct Source {
     url: String,
 }
 
+/// A HITL tool waiting for the operator's decision. Only one is live at a
+/// time (HITL dispatch serializes), so the app holds a single `Option`.
+/// Field edits are written back into the `pending` signal by index, so we
+/// don't create per-field signals from the (owner-less) stream callback.
+#[derive(Clone)]
+struct PendingApproval {
+    call_id: String,
+    tool_name: String,
+    summary: String,
+    /// Full current input, used as the base when submitting; edited fields
+    /// are overlaid on top.
+    current_input: serde_json::Value,
+    /// Editable `(name, value)` pairs, prefilled from `current_input`.
+    fields: Vec<(String, String)>,
+}
+
 fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
@@ -61,6 +77,10 @@ fn App() -> impl IntoView {
     let usage = RwSignal::new(None::<(u64, u64)>); // (input, output)
     let input = RwSignal::new(String::new());
     let streaming = RwSignal::new(false);
+    let pending = RwSignal::new(None::<PendingApproval>);
+    // Gate the card on presence only, so per-keystroke field edits (which
+    // update `pending`) don't rebuild the card and steal input focus.
+    let has_pending = Memo::new(move |_| pending.get().is_some());
 
     let client = move || ApiClient::new(api_base.get_untracked(), tenant.get_untracked());
 
@@ -134,7 +154,12 @@ fn App() -> impl IntoView {
                 events.update(|e| e.push(ev.clone()));
                 if let Some(("usage", (i, o))) = usage_of(&ev) {
                     usage.set(Some((i, o)));
-                    let _ = "usage";
+                }
+                if ev.get("type").and_then(|v| v.as_str()) == Some("approval_required") {
+                    if let Some(p) = parse_pending(&ev) {
+                        pending.set(Some(p));
+                    }
+                    return;
                 }
                 items.update(|its| apply_event(its, &ev));
             };
@@ -142,6 +167,8 @@ fn App() -> impl IntoView {
                 items.update(|its| its.push(Item::Warning(format!("stream error: {e}"))));
             }
             streaming.set(false);
+            // The run is over; any unanswered approval is moot.
+            pending.set(None);
         });
     };
 
@@ -183,6 +210,55 @@ fn App() -> impl IntoView {
                 <div class="transcript">
                     {move || items.get().into_iter().map(render_item).collect_view()}
                 </div>
+                {move || has_pending.get().then(|| {
+                    let p = pending.get_untracked().expect("has_pending implies Some");
+                    let field_views = p.fields.iter().enumerate().map(|(i, (name, val))| {
+                        view! {
+                            <label class="apv-field">
+                                <span>{name.clone()}</span>
+                                <input value=val.clone()
+                                    on:input=move |e| pending.update(|opt| {
+                                        if let Some(p) = opt {
+                                            if let Some(f) = p.fields.get_mut(i) { f.1 = event_target_value(&e); }
+                                        }
+                                    }) />
+                            </label>
+                        }
+                    }).collect_view();
+                    let approve = move |_| {
+                        let Some(p) = pending.get_untracked() else { return };
+                        let mut fi = p.current_input.clone();
+                        if !fi.is_object() { fi = serde_json::json!({}); }
+                        if let Some(obj) = fi.as_object_mut() {
+                            for (name, val) in &p.fields { obj.insert(name.clone(), Value::String(val.clone())); }
+                        }
+                        let decision = serde_json::json!({ "decision": "submit", "final_input": fi });
+                        let c = client();
+                        let thread = current.get_untracked().unwrap_or_default();
+                        let call_id = p.call_id.clone();
+                        pending.set(None);
+                        spawn_local(async move { let _ = c.submit_approval(&thread, &call_id, decision).await; });
+                    };
+                    let cancel = move |_| {
+                        let Some(p) = pending.get_untracked() else { return };
+                        let decision = serde_json::json!({ "decision": "cancel", "reason": "declined by operator" });
+                        let c = client();
+                        let thread = current.get_untracked().unwrap_or_default();
+                        pending.set(None);
+                        spawn_local(async move { let _ = c.submit_approval(&thread, &p.call_id, decision).await; });
+                    };
+                    view! {
+                        <div class="approval">
+                            <div class="apv-head">"⚠ approval required · " {p.tool_name.clone()}</div>
+                            <div class="apv-summary">{p.summary.clone()}</div>
+                            {field_views}
+                            <div class="apv-actions">
+                                <button class="apv-approve" on:click=approve>"approve"</button>
+                                <button class="apv-cancel" on:click=cancel>"cancel"</button>
+                            </div>
+                        </div>
+                    }
+                })}
                 <div class="composer">
                     <input
                         prop:value=move || input.get()
@@ -342,6 +418,28 @@ fn parse_sources(metadata: Option<&Value>) -> Vec<Source> {
             Some(Source { title, url })
         })
         .collect()
+}
+
+fn parse_pending(ev: &Value) -> Option<PendingApproval> {
+    let call_id = ev.get("call_id")?.as_str()?.to_string();
+    let tool_name = ev.get("tool_name").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
+    let draft = ev.get("draft")?;
+    let summary = draft.get("summary").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let current_input = draft.get("current_input").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let fields = draft
+        .get("editable_fields")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.as_str())
+                .map(|name| {
+                    let cur = current_input.get(name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    (name.to_string(), cur)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(PendingApproval { call_id, tool_name, summary, current_input, fields })
 }
 
 fn usage_of(ev: &Value) -> Option<(&'static str, (u64, u64))> {

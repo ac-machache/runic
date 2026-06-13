@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use runic_serve::{router, ServeConfig};
+use runic_serve::{router, ApprovalHub, ServeConfig};
 
 use crate::harness::Harness;
 
@@ -20,11 +20,23 @@ pub async fn run(harness: Harness) -> Result<()> {
 
     let session_store = harness.session_store().clone();
     let model = harness.provider_model();
+
+    // One hub shared two ways: the harness installs a ChannelApprover backed
+    // by it in every server agent (so HITL tools resolve over the wire), and
+    // AppState holds it so the decision endpoint can wake parked approvals.
+    let approval_hub = Arc::new(ApprovalHub::new());
+    let mut harness = harness;
+    harness.set_approval_hub(approval_hub.clone());
+
     // The harness IS the factory. Arc it so the pool can build agents on
     // demand, keyed by (tenant, thread_id).
     let factory: Arc<dyn runic_serve::AgentFactory> = Arc::new(harness);
 
-    let app = router(ServeConfig { session_store, agent_factory: factory });
+    let app = router(ServeConfig {
+        session_store,
+        agent_factory: factory,
+        approval_hub,
+    });
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

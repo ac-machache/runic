@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_stream::stream;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::stream::{Stream, StreamExt};
@@ -94,6 +94,9 @@ pub async fn create_and_stream_run(
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
 
     // The run executes in a DETACHED task that owns the agent's slot for
+    //
+    // (See below: before running, we point this thread's HITL approvals at
+    // `sse_tx` so an approval raised mid-run surfaces on this same stream.)
     // the whole turn (so concurrent POSTs on the same thread still
     // serialize) and ALWAYS returns the agent when finished. The SSE
     // response only *observes* via `sse_rx`. If the client disconnects,
@@ -104,6 +107,12 @@ pub async fn create_and_stream_run(
     // the slot permanently empty and bricked the thread.
     let (sse_tx, mut sse_rx) = tokio::sync::mpsc::channel::<WireEvent>(256);
 
+    // Route this thread's HITL approval prompts onto this run's stream, and
+    // tear that down when the run task ends (below).
+    state.approval_hub.set_wire(&thread_id, sse_tx.clone());
+
+    let hub = state.approval_hub.clone();
+    let thread_for_task = thread_id.clone();
     tokio::spawn(async move {
         let mut slot = agent_arc.lock().await;
         let agent = match slot.take() {
@@ -138,6 +147,8 @@ pub async fn create_and_stream_run(
                     .await;
             }
         }
+        // Stop routing approvals at this (now-closing) stream.
+        hub.clear_wire(&thread_for_task);
         // slot guard drops here → the next queued run on this thread proceeds.
     });
 
@@ -246,6 +257,31 @@ pub async fn replay_run(
             .interval(Duration::from_secs(15))
             .text(":keepalive"),
     ))
+}
+
+/// `POST /threads/:id/runs/:run_id/approvals/:call_id`
+///
+/// Deliver an operator decision to a HITL tool parked inside a running
+/// agent (see [`crate::approval`]). Body is a [`UserDecision`]:
+///   `{"decision":"submit","final_input":{…}}` or
+///   `{"decision":"cancel","reason":"…"}`.
+/// The parked `review()` wakes, the tool runs (or is cancelled), and the
+/// rest of the turn streams on the original run connection.
+pub async fn submit_approval(
+    State(state): State<AppState>,
+    Tenant(_tenant): Tenant,
+    Path((_thread_id, _run_id, call_id)): Path<(String, String, String)>,
+    Json(decision): Json<runic_agent_core::UserDecision>,
+) -> Result<StatusCode, ServeError> {
+    if state.approval_hub.submit_decision(&call_id, decision) {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        // No approval is parked under this call_id — already decided, timed
+        // out, or never existed.
+        Err(ServeError::BadRequest(format!(
+            "no pending approval for call_id '{call_id}'"
+        )))
+    }
 }
 
 fn to_sse(wire: &WireEvent, id: Option<u64>) -> SseEvent {

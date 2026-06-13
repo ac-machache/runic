@@ -177,6 +177,7 @@ impl<T: crate::approval::HitlTool + 'static> ToolDispatch for HitlAdapter<T> {
             tool_name: call.name.clone(),
             call_id: call.id.clone(),
             run_id: ctx.run_id.clone(),
+            session_id: ctx.session_id.clone(),
             draft,
         };
 

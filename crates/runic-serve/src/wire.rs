@@ -86,6 +86,16 @@ pub enum WireEvent {
     /// Non-fatal warning from the agent. Doesn't end the run.
     Warning { message: String },
 
+    /// A HITL tool is waiting for operator approval. The run is parked until
+    /// a decision is POSTed to `.../approvals/{call_id}`. `draft` is the
+    /// serialized [`runic_agent_core::Draft`] (summary, current input, input
+    /// schema, editable fields) — everything a client needs to render a form.
+    ApprovalRequired {
+        call_id: String,
+        tool_name: String,
+        draft: serde_json::Value,
+    },
+
     /// Sent once after a stream finishes (live or replay). Clients use
     /// this to close their EventSource cleanly.
     Done { total_turns: u32 },
@@ -107,6 +117,7 @@ impl WireEvent {
             Self::RunEnd { .. } => "run_end",
             Self::Usage { .. } => "usage",
             Self::Warning { .. } => "warning",
+            Self::ApprovalRequired { .. } => "approval_required",
             Self::Done { .. } => "done",
         }
     }

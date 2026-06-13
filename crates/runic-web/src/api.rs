@@ -75,6 +75,32 @@ impl ApiClient {
             .unwrap_or_default())
     }
 
+    /// Deliver a HITL approval decision for a parked tool call. `decision`
+    /// is `{"decision":"submit","final_input":{…}}` or
+    /// `{"decision":"cancel","reason":"…"}`. The `run_id` path segment is
+    /// ignored server-side (the decision is keyed by `call_id`), so a
+    /// placeholder is fine.
+    pub async fn submit_approval(
+        &self,
+        thread: &str,
+        call_id: &str,
+        decision: serde_json::Value,
+    ) -> Result<(), String> {
+        let url = format!("{}/threads/{thread}/runs/live/approvals/{call_id}", self.base);
+        let resp = Request::post(&url)
+            .header("x-runic-tenant", &self.tenant)
+            .json(&decision)
+            .map_err(e2s)?
+            .send()
+            .await
+            .map_err(e2s)?;
+        if resp.ok() {
+            Ok(())
+        } else {
+            Err(format!("approval rejected: HTTP {}", resp.status()))
+        }
+    }
+
     /// POST a run and invoke `on_event` for every parsed SSE event as it
     /// streams in. Resolves when the stream closes.
     pub async fn stream_run(

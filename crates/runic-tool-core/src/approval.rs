@@ -1,11 +1,12 @@
 use crate::tool::ToolContext;
 use crate::tool::ToolResult;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 pub type ApproverHandle = Arc<dyn Approver + Send + Sync>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Draft {
     pub summary: String,
     pub current_input: serde_json::Value,
@@ -13,14 +14,22 @@ pub struct Draft {
     pub editable_fields: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApprovalRequest {
     pub tool_name: String,
     pub call_id: String,
     pub run_id: String,
+    /// The session/thread this approval belongs to. Lets a remote approver
+    /// (e.g. the HTTP server) route the request to the right client stream.
+    pub session_id: String,
     pub draft: Draft,
 }
-#[derive(Debug, Clone)]
+
+/// The operator's verdict on an [`ApprovalRequest`]. Serde-tagged so it can
+/// be carried in an HTTP request body: `{"decision":"submit","final_input":…}`
+/// or `{"decision":"cancel","reason":"…"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
 pub enum UserDecision {
     Submit { final_input: serde_json::Value },
     Cancel { reason: String },

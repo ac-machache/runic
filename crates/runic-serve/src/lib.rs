@@ -36,6 +36,7 @@
 //! store-assigned seq number from [`SessionStore`].
 
 pub mod app;
+pub mod approval;
 pub mod error;
 pub mod factory;
 pub mod pool;
@@ -44,6 +45,7 @@ pub mod tenant;
 pub mod wire;
 
 pub use app::{router, AppState, ServeConfig};
+pub use approval::{ApprovalHub, ChannelApprover};
 pub use error::ServeError;
 pub use factory::{AgentFactory, BoxedAgentFactory};
 pub use pool::ThreadPool;

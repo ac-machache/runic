@@ -57,6 +57,9 @@ pub struct Harness {
     agent_registry: Arc<AgentRegistry>,
     command_registry: Arc<CommandRegistry>,
     mcp_manager: McpManager,
+    /// Set by the server (`runic serve`) so HITL tools resolve approvals
+    /// over the wire. `None` in the REPL, where the stdin approver is used.
+    approval_hub: Option<Arc<runic_serve::ApprovalHub>>,
 }
 
 impl Harness {
@@ -190,7 +193,15 @@ impl Harness {
             agent_registry,
             command_registry,
             mcp_manager,
+            approval_hub: None,
         })
+    }
+
+    /// Install the server's approval hub. Server agents then get a
+    /// `ChannelApprover` instead of no approver, so HITL tools prompt over
+    /// the wire rather than failing with "no Approver registered".
+    pub fn set_approval_hub(&mut self, hub: Arc<runic_serve::ApprovalHub>) {
+        self.approval_hub = Some(hub);
     }
 
     pub fn command_registry(&self) -> &Arc<CommandRegistry> {
@@ -446,8 +457,13 @@ impl runic_serve::AgentFactory for Harness {
                 None
             }
         };
-        // Server agents get no stdin approver — HITL tools have no channel.
-        self.build_agent(tenant, Some(session_id.to_string()), restore, None)
+        // Server agents get a wire-backed approver when the hub is present,
+        // so HITL tools prompt the client over SSE instead of failing.
+        let approver: Option<ApproverHandle> = self
+            .approval_hub
+            .as_ref()
+            .map(|hub| Arc::new(runic_serve::ChannelApprover::new(hub.clone())) as ApproverHandle);
+        self.build_agent(tenant, Some(session_id.to_string()), restore, approver)
     }
 }
 

@@ -16,7 +16,7 @@ use runic_message_types::{Message, StreamEvent, ToolDefinition};
 use runic_provider_core::{EventStream, Provider, ProviderError};
 use runic_sessions::FileSessionStore;
 use runic_storage_backend::{MemoryBackend, StorageBackend};
-use runic_serve::{router, AgentFactory, ServeConfig};
+use runic_serve::{router, AgentFactory, ApprovalHub, ServeConfig};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -37,6 +37,7 @@ fn make_router() -> axum::Router {
     router(ServeConfig {
         session_store: store,
         agent_factory: Arc::new(PanicFactory),
+        approval_hub: Arc::new(ApprovalHub::new()),
     })
 }
 
@@ -91,6 +92,7 @@ fn scripted_router() -> axum::Router {
     router(ServeConfig {
         session_store: store,
         agent_factory: Arc::new(ScriptedFactory),
+        approval_hub: Arc::new(ApprovalHub::new()),
     })
 }
 
@@ -240,6 +242,7 @@ async fn tenant_header_isolates_thread_listings() {
     let app = router(ServeConfig {
         session_store: store,
         agent_factory: Arc::new(PanicFactory),
+        approval_hub: Arc::new(ApprovalHub::new()),
     });
 
     // Tenant alice creates a thread.

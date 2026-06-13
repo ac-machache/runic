@@ -13,7 +13,10 @@ live state/event inspector.
 - **Threads** — create / list / select (per `X-Runic-Tenant`).
 - **Chat** — streaming assistant text, collapsible thinking, tool-call
   cards with status + duration + grounding-source chips (from tool-result
-  `metadata`).
+  `metadata`), and **HITL approval cards** — when a human-in-the-loop tool
+  fires, the run parks and an editable approval form appears (approve with
+  edits, or cancel); the decision POSTs back and the run resumes on the
+  same stream.
 - **State** — token usage and the live `SessionEvent` log (the same data
   persisted to `events.jsonl`).
 

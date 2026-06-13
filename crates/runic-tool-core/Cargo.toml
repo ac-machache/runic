@@ -10,6 +10,7 @@ publish.workspace = true
 async-trait = { workspace = true }
 chrono = { workspace = true }
 runic-message-types = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

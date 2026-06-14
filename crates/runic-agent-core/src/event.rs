@@ -40,6 +40,9 @@ pub enum AgentEvent {
     },
     /// The full run finished (no more tool calls outstanding, or hard stop).
     RunComplete { total_turns: u32 },
+    /// Structured output captured — the model called the finish tool with
+    /// schema-valid arguments. The run ends right after this.
+    StructuredOutput(serde_json::Value),
     /// Non-fatal warning surfaced for observability.
     Warning(String),
 }

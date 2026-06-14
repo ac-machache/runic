@@ -334,6 +334,7 @@ mod tests {
                 total_turns: 3,
                 stop_reason: Some("end_turn".into()),
                 usage: TokenUsage::default(),
+                structured_result: None,
             },
             at: Utc::now(),
         };
@@ -477,6 +478,7 @@ mod tests {
                 total_turns: 1,
                 stop_reason: None,
                 usage: TokenUsage::default(),
+                structured_result: None,
             },
             at: Utc::now(),
         });
@@ -503,6 +505,7 @@ mod tests {
                 total_turns: 1,
                 stop_reason: None,
                 usage: TokenUsage::default(),
+                structured_result: None,
             },
             at: Utc::now(),
         });

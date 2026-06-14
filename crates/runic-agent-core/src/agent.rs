@@ -4,7 +4,8 @@ use runic_context_engine::{ContextEngine, NoopEngine, TurnContext};
 use runic_message_types::{ContentBlock, Message, Role, ToolCall};
 use runic_provider_core::Provider;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -13,7 +14,11 @@ use crate::error::AgentError;
 use crate::event::{AgentEvent, TokenUsage};
 use crate::hooks::{Hook, HookOutcome};
 use crate::state::{AgentState, HookLifecycle, RunTimeContext, SessionEvent};
+use crate::structured::{StructuredHandle, StructuredOutputTool};
 use runic_tool_core::{ToolContext, ToolDispatchError, ToolRegistry, ToolResult};
+
+/// Default name for the synthesized structured-output finish tool.
+pub const DEFAULT_STRUCTURED_TOOL: &str = "respond";
 
 /// Tunable knobs for the agent run loop.
 #[derive(Debug, Clone)]
@@ -44,6 +49,10 @@ pub struct RunOutcome {
     pub total_turns: u32,
     pub stop_reason: Option<String>,
     pub usage: TokenUsage,
+    /// When the run was configured for structured output and the model
+    /// called the finish tool with schema-valid arguments, those arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_result: Option<Value>,
 }
 
 /// Returned by `Agent::run_streaming`: the event channel plus a join handle
@@ -66,11 +75,36 @@ pub struct Agent {
     /// ambient injections, no spillover, no compaction. Configure with
     /// `AgentBuilder::context_engine`.
     context_engine: Arc<dyn ContextEngine>,
+    /// When set, the run ends as soon as the model calls this finish tool
+    /// with schema-valid arguments (see [`crate::structured`]).
+    structured_output: Option<StructuredHandle>,
 }
 
 impl Agent {
     pub fn builder(provider: Arc<dyn Provider>) -> AgentBuilder {
         AgentBuilder::new(provider)
+    }
+
+    /// Configure (or clear) structured output for subsequent runs. `Some`
+    /// registers a synthesized finish tool whose schema is `schema`; the
+    /// next run that sees the model call it with valid args ends with the
+    /// value in `RunOutcome::structured_result`. `None` removes it. Uses
+    /// [`DEFAULT_STRUCTURED_TOOL`] as the tool name.
+    pub fn set_structured_output(&mut self, schema: Option<Value>) {
+        // Drop any previous finish tool first.
+        if let Some(prev) = self.structured_output.take() {
+            self.tools.remove(&prev.tool_name);
+        }
+        if let Some(schema) = schema {
+            let tool_name = DEFAULT_STRUCTURED_TOOL.to_string();
+            let slot = Arc::new(Mutex::new(None));
+            self.tools.register(Arc::new(StructuredOutputTool::new(
+                tool_name.clone(),
+                schema,
+                slot.clone(),
+            )));
+            self.structured_output = Some(StructuredHandle { tool_name, slot });
+        }
     }
 
     pub fn state(&self) -> &AgentState {
@@ -203,6 +237,12 @@ impl Agent {
         let mut total_turns: u32 = 0;
         let mut total_usage = TokenUsage::default();
         let final_stop_reason: Option<String>;
+        let mut structured_result: Option<Value> = None;
+
+        // Clear any leftover finish-tool output from a prior run.
+        if let Some(h) = &self.structured_output {
+            *h.slot.lock().expect("output slot poisoned") = None;
+        }
 
         loop {
             if total_turns >= self.config.max_turns {
@@ -265,6 +305,22 @@ impl Agent {
 
             self.dispatch_tools(tool_calls, &run_id, total_turns, events)
                 .await?;
+
+            // Structured output: if the model called the finish tool with
+            // schema-valid args this turn, the slot is now filled — capture
+            // it and end the run. (Invalid args left the slot empty and
+            // produced a tool error, so we keep looping for a retry.)
+            if let Some(h) = &self.structured_output {
+                let captured = h.slot.lock().expect("output slot poisoned").take();
+                if let Some(result) = captured {
+                    let _ = events
+                        .send(AgentEvent::StructuredOutput(result.clone()))
+                        .await;
+                    structured_result = Some(result);
+                    final_stop_reason = Some("structured_output".to_string());
+                    break;
+                }
+            }
         }
 
         if matches!(
@@ -279,6 +335,7 @@ impl Agent {
 
         let outcome = RunOutcome {
             total_turns,
+            structured_result,
             stop_reason: final_stop_reason,
             usage: total_usage,
         };
@@ -343,7 +400,7 @@ impl Agent {
         };
 
         // Merge config's static system_dynamic with engine's ambient text.
-        let combined_dynamic = match (
+        let mut combined_dynamic = match (
             self.config.system_dynamic.trim().is_empty(),
             ambient_dynamic.trim().is_empty(),
         ) {
@@ -352,6 +409,25 @@ impl Agent {
             (true, false) => ambient_dynamic,
             (false, false) => format!("{}\n\n{}", self.config.system_dynamic, ambient_dynamic),
         };
+
+        // When structured output is active, instruct the model (unforced) to
+        // finish by calling the finish tool — otherwise a model told to
+        // "reply directly" will answer in plain text and never call it.
+        // Injected into the dynamic tail so the cached prefix stays warm.
+        if let Some(h) = &self.structured_output {
+            let directive = format!(
+                "IMPORTANT: When you have your final answer, you MUST deliver it by \
+                 calling the `{tool}` tool with arguments that match its schema. Do not \
+                 write your final answer as plain text — call `{tool}` to finish.",
+                tool = h.tool_name
+            );
+            if combined_dynamic.is_empty() {
+                combined_dynamic = directive;
+            } else {
+                combined_dynamic.push_str("\n\n");
+                combined_dynamic.push_str(&directive);
+            }
+        }
 
         let stream = if combined_dynamic.is_empty() {
             self.provider
@@ -834,6 +910,7 @@ pub struct AgentBuilder {
     runtime: RunTimeContext,
     context_engine: Arc<dyn ContextEngine>,
     restore_state: Option<AgentState>,
+    structured_output: Option<Value>,
 }
 
 impl AgentBuilder {
@@ -848,7 +925,17 @@ impl AgentBuilder {
             runtime: RunTimeContext::default(),
             context_engine: Arc::new(NoopEngine),
             restore_state: None,
+            structured_output: None,
         }
+    }
+
+    /// Configure structured output: the model finishes by calling a
+    /// synthesized tool whose `input_schema` is `schema`; the run ends with
+    /// the validated arguments in [`RunOutcome::structured_result`]. See
+    /// [`crate::structured`].
+    pub fn structured_output(mut self, schema: Value) -> Self {
+        self.structured_output = Some(schema);
+        self
     }
 
     /// Resume from a previously-persisted [`AgentState`] (e.g. one
@@ -1005,13 +1092,18 @@ impl AgentBuilder {
             );
         state.set_events_tx(events_tx);
 
-        Agent {
+        let mut agent = Agent {
             provider: self.provider,
             tools: self.tools,
             hooks: self.hooks,
             config: self.config,
             state,
             context_engine: self.context_engine,
+            structured_output: None,
+        };
+        if let Some(schema) = self.structured_output {
+            agent.set_structured_output(Some(schema));
         }
+        agent
     }
 }

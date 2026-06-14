@@ -585,3 +585,65 @@ async fn plain_tools_in_one_turn_dispatch_in_parallel() {
          likely sequential dispatch regression"
     );
 }
+
+// ─── Structured output ────────────────────────────────────────────────────────
+
+fn answer_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "required": ["answer"],
+        "additionalProperties": false
+    })
+}
+
+#[tokio::test]
+async fn structured_output_ends_run_with_validated_result() {
+    // Model calls the synthesized finish tool ("respond") with valid args.
+    let provider = ScriptedProvider::new(vec![tool_call_turn(
+        "t1",
+        "respond",
+        r#"{"answer":"42"}"#,
+    )]);
+    let agent = Agent::builder(provider)
+        .system_prompt("test")
+        .structured_output(answer_schema())
+        .build();
+
+    let (_agent, outcome, events) = collect_events(agent, "what is 6x7?").await;
+    let outcome = outcome.expect("run should succeed");
+
+    assert_eq!(outcome.total_turns, 1, "should end right after the finish call");
+    assert_eq!(outcome.stop_reason.as_deref(), Some("structured_output"));
+    assert_eq!(
+        outcome.structured_result,
+        Some(serde_json::json!({ "answer": "42" }))
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::StructuredOutput(v) if v["answer"] == "42")),
+        "a StructuredOutput event should be emitted"
+    );
+}
+
+#[tokio::test]
+async fn structured_output_invalid_args_retries_then_succeeds() {
+    // Turn 1: missing the required "answer" → schema validation fails → the
+    // tool returns an error → run keeps going. Turn 2: valid → ends.
+    let provider = ScriptedProvider::new(vec![
+        tool_call_turn("t1", "respond", r#"{}"#),
+        tool_call_turn("t2", "respond", r#"{"answer":"fixed"}"#),
+    ]);
+    let agent = Agent::builder(provider)
+        .system_prompt("test")
+        .structured_output(answer_schema())
+        .build();
+
+    let (_agent, outcome, _events) = collect_events(agent, "go").await;
+    let outcome = outcome.expect("run should succeed");
+
+    assert_eq!(outcome.total_turns, 2, "first call invalid, retried on the second");
+    assert_eq!(
+        outcome.structured_result,
+        Some(serde_json::json!({ "answer": "fixed" }))
+    );
+}

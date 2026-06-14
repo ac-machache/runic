@@ -184,6 +184,17 @@ body {
 .role-assistant { color: #9fe0a8; }
 .state-msg code { color: var(--fg); font: 11px var(--mono); white-space: pre-wrap; word-break: break-word; }
 
+.structured { max-width: 820px; margin-left: 40px; background: #131b2b; border: 1px solid #2f4a78; border-radius: 10px; padding: 10px 13px; }
+.structured-head { font-weight: 600; color: #8ab4ff; margin-bottom: 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+.structured pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12.5px var(--mono); color: var(--fg); }
+
+.schema-box { margin: 0 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.schema-box > summary { cursor: pointer; padding: 7px 12px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); user-select: none; }
+.schema-box > summary:hover { color: var(--fg); }
+.schema-on { color: var(--green); }
+.schema-input { width: 100%; min-height: 90px; background: var(--panel2); border: none; border-top: 1px solid var(--border); color: var(--fg); padding: 10px 12px; font: 12px var(--mono); resize: vertical; box-sizing: border-box; }
+.schema-input:focus { outline: none; }
+
 .spin { color: var(--accent); font-size: 11px; font-weight: 600; }
 
 /* inspector */

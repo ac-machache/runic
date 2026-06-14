@@ -195,6 +195,10 @@ fn print_event(state: &mut PrinterState, event: AgentEvent) {
             eprintln!("[turn complete] stop={:?} tool_calls={}", stop_reason, tool_calls_this_turn);
         }
         AgentEvent::RunComplete { total_turns: _ } => {}
+        AgentEvent::StructuredOutput(value) => {
+            eprintln!("\n[structured output]");
+            println!("{}", serde_json::to_string_pretty(&value).unwrap_or_default());
+        }
         AgentEvent::Warning(msg) => eprintln!("[warning] {msg}"),
     }
 }

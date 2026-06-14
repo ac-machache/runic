@@ -23,10 +23,12 @@ pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod state;
+pub mod structured;
 pub mod subagent;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig, RunOutcome};
 pub use error::AgentError;
+pub use structured::StructuredOutputTool;
 pub use event::{AgentEvent, TokenUsage};
 pub use hooks::{Hook, HookOutcome};
 pub use state::{AgentState, HookLifecycle, RunTimeContext, SessionEvent, EVENT_BROADCAST_CAPACITY};

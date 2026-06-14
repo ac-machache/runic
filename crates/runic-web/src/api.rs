@@ -119,11 +119,15 @@ impl ApiClient {
         &self,
         thread: &str,
         message: &str,
+        output_schema: Option<Value>,
         abort: Option<&web_sys::AbortSignal>,
         mut on_event: impl FnMut(Value),
     ) -> Result<(), String> {
         let url = format!("{}/threads/{thread}/runs/stream", self.base);
-        let body = serde_json::json!({ "message": message });
+        let mut body = serde_json::json!({ "message": message });
+        if let Some(schema) = output_schema {
+            body["output_schema"] = schema;
+        }
         let resp = Request::post(&url)
             .header("x-runic-tenant", &self.tenant)
             .abort_signal(abort)

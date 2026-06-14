@@ -96,6 +96,10 @@ pub enum WireEvent {
         draft: serde_json::Value,
     },
 
+    /// The model produced schema-valid structured output via the finish
+    /// tool. The run ends right after this.
+    StructuredOutput { result: serde_json::Value },
+
     /// Sent once after a stream finishes (live or replay). Clients use
     /// this to close their EventSource cleanly.
     Done { total_turns: u32 },
@@ -118,6 +122,7 @@ impl WireEvent {
             Self::Usage { .. } => "usage",
             Self::Warning { .. } => "warning",
             Self::ApprovalRequired { .. } => "approval_required",
+            Self::StructuredOutput { .. } => "structured_output",
             Self::Done { .. } => "done",
         }
     }
@@ -161,6 +166,7 @@ pub fn from_agent_event(event: AgentEvent) -> WireEvent {
             tool_calls_this_turn,
         },
         AgentEvent::RunComplete { total_turns } => WireEvent::Done { total_turns },
+        AgentEvent::StructuredOutput(result) => WireEvent::StructuredOutput { result },
         AgentEvent::Warning(msg) => WireEvent::Warning { message: msg },
     }
 }

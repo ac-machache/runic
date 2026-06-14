@@ -49,6 +49,11 @@ pub struct RunMessageRequest {
     pub message: Option<String>,
     #[serde(default)]
     pub content: Option<Vec<ContentBlock>>,
+    /// When set, the run is given a synthesized finish tool with this JSON
+    /// schema; it ends when the model calls it with valid args, and the
+    /// result arrives as a `structured_output` event.
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 impl RunMessageRequest {
@@ -87,6 +92,8 @@ pub async fn create_and_stream_run(
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
+    // Per-request structured output schema (None clears it on the warm agent).
+    let output_schema = req.output_schema.clone();
     // Validate the body BEFORE building/locking anything, so a malformed
     // request gets a clean 400 instead of a half-open SSE stream.
     let user_msg = req.into_message()?;
@@ -115,7 +122,7 @@ pub async fn create_and_stream_run(
     let thread_for_task = thread_id.clone();
     tokio::spawn(async move {
         let mut slot = agent_arc.lock().await;
-        let agent = match slot.take() {
+        let mut agent = match slot.take() {
             Some(a) => a,
             None => {
                 let _ = sse_tx
@@ -126,6 +133,9 @@ pub async fn create_and_stream_run(
                 return;
             }
         };
+
+        // Apply (or clear) structured output for this run.
+        agent.set_structured_output(output_schema);
 
         let (mut events, handle) = agent.run_streaming_message(user_msg);
         while let Some(event) = events.next().await {

@@ -40,6 +40,8 @@ enum Item {
     /// Hidden reasoning, accumulated across `assistant_thinking_delta`.
     Thinking(String),
     Tool(ToolView),
+    /// Schema-valid structured output from the finish tool (pretty JSON).
+    Structured(String),
     Warning(String),
 }
 
@@ -97,6 +99,8 @@ fn App() -> impl IntoView {
     let usage = RwSignal::new(None::<(u64, u64)>); // (input, output)
     let input = RwSignal::new(String::new());
     let streaming = RwSignal::new(false);
+    // Raw JSON schema text; when non-empty + valid, sent as output_schema.
+    let output_schema = RwSignal::new(String::new());
     let pending = RwSignal::new(None::<PendingApproval>);
     // Gate the card on presence only, so per-keystroke field edits (which
     // update `pending`) don't rebuild the card and steal input focus.
@@ -184,6 +188,20 @@ fn App() -> impl IntoView {
             Some(id) => id,
             None => return,
         };
+        // Parse the schema box (if any). Bad JSON → warn and abort the send.
+        let schema_text = output_schema.get_untracked();
+        let schema_val: Option<Value> = if schema_text.trim().is_empty() {
+            None
+        } else {
+            match serde_json::from_str::<Value>(&schema_text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    items.update(|its| its.push(Item::Warning(format!("invalid output schema JSON: {e}"))));
+                    return;
+                }
+            }
+        };
+
         input.set(String::new());
         items.update(|its| its.push(Item::User(text.clone())));
         streaming.set(true);
@@ -215,13 +233,20 @@ fn App() -> impl IntoView {
                             pending.set(Some(p));
                         }
                     }
+                    "structured_output" => {
+                        flush_live(live, items);
+                        let pretty = ev.get("result")
+                            .map(|r| serde_json::to_string_pretty(r).unwrap_or_default())
+                            .unwrap_or_default();
+                        items.update(|its| its.push(Item::Structured(pretty)));
+                    }
                     _ => {
                         flush_live(live, items);
                         items.update(|its| apply_event(its, &ev));
                     }
                 }
             };
-            let result = c.stream_run(&thread_id, &text, signal.as_ref(), on_event).await;
+            let result = c.stream_run(&thread_id, &text, schema_val, signal.as_ref(), on_event).await;
             flush_live(live, items);
             if let Err(e) = result {
                 // An aborted fetch isn't an error worth surfacing.
@@ -374,6 +399,18 @@ fn App() -> impl IntoView {
                         </div>
                     }
                 })}
+                <details class="schema-box">
+                    <summary>
+                        "structured output schema"
+                        {move || (!output_schema.get().trim().is_empty()).then(|| view! { <span class="schema-on">" ● on"</span> })}
+                    </summary>
+                    <textarea
+                        class="schema-input"
+                        placeholder=r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#
+                        prop:value=move || output_schema.get()
+                        on:input=move |e| output_schema.set(event_target_value(&e))
+                    ></textarea>
+                </details>
                 <div class="composer">
                     <input
                         prop:value=move || input.get()
@@ -449,6 +486,12 @@ fn render_item(item: Item) -> AnyView {
                 <summary>"thinking"</summary>
                 <div class="body md" inner_html=md_to_html(&text)></div>
             </details>
+        }.into_any(),
+        Item::Structured(json) => view! {
+            <div class="structured">
+                <div class="structured-head">"⬢ structured output"</div>
+                <pre>{json}</pre>
+            </div>
         }.into_any(),
         Item::Warning(text) => view! { <div class="msg warn">{text}</div> }.into_any(),
         Item::Tool(t) => {

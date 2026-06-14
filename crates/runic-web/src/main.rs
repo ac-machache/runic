@@ -178,13 +178,18 @@ fn App() -> impl IntoView {
     view! {
         <div class="app">
             <aside class="threads">
-                <div class="pane-head">"threads"</div>
+                <div class="brand">"⟡ runic"<span class="brand-sub">"dev console"</span></div>
                 <div class="conn">
+                    <label class="conn-label">"server"</label>
                     <input class="mini" prop:value=move || api_base.get()
-                        on:input=move |e| api_base.set(event_target_value(&e)) placeholder="server url" />
+                        on:input=move |e| api_base.set(event_target_value(&e)) placeholder="http://127.0.0.1:8920" />
+                    <label class="conn-label">"tenant"</label>
                     <input class="mini" prop:value=move || tenant.get()
-                        on:input=move |e| tenant.set(event_target_value(&e)) placeholder="tenant" />
-                    <button on:click=move |_| refresh_threads()>"⟳"</button>
+                        on:input=move |e| tenant.set(event_target_value(&e)) placeholder="default" />
+                </div>
+                <div class="threads-head">
+                    <span>"threads"</span>
+                    <button class="icon-btn" title="refresh" on:click=move |_| refresh_threads()>"⟳"</button>
                 </div>
                 <button class="newthread" on:click=move |_| new_thread()>"+ new thread"</button>
                 <ul>
@@ -208,7 +213,16 @@ fn App() -> impl IntoView {
                     {move || streaming.get().then(|| view! { <span class="spin">" ● streaming"</span> })}
                 </div>
                 <div class="transcript">
-                    {move || items.get().into_iter().map(render_item).collect_view()}
+                    {move || if items.get().is_empty() {
+                        let msg = if current.get().is_some() {
+                            "Send a message to start the conversation."
+                        } else {
+                            "Create or select a thread to begin."
+                        };
+                        view! { <div class="empty">{msg}</div> }.into_any()
+                    } else {
+                        items.get().into_iter().map(render_item).collect_view().into_any()
+                    }}
                 </div>
                 {move || has_pending.get().then(|| {
                     let p = pending.get_untracked().expect("has_pending implies Some");
@@ -293,9 +307,24 @@ fn App() -> impl IntoView {
 
 fn render_item(item: Item) -> AnyView {
     match item {
-        Item::User(text) => view! { <div class="msg user"><span class="role">"user"</span><div class="body">{text}</div></div> }.into_any(),
-        Item::Assistant(text) => view! { <div class="msg assistant"><span class="role">"assistant"</span><div class="body">{text}</div></div> }.into_any(),
-        Item::Thinking(text) => view! { <details class="msg thinking"><summary>"thinking"</summary><div class="body">{text}</div></details> }.into_any(),
+        Item::User(text) => view! {
+            <div class="msg user">
+                <div class="avatar user-av">"you"</div>
+                <div class="bubble">{text}</div>
+            </div>
+        }.into_any(),
+        Item::Assistant(text) => view! {
+            <div class="msg assistant">
+                <div class="avatar bot-av">"ai"</div>
+                <div class="body md" inner_html=md_to_html(&text)></div>
+            </div>
+        }.into_any(),
+        Item::Thinking(text) => view! {
+            <details class="msg thinking">
+                <summary>"thinking"</summary>
+                <div class="body md" inner_html=md_to_html(&text)></div>
+            </details>
+        }.into_any(),
         Item::Warning(text) => view! { <div class="msg warn">{text}</div> }.into_any(),
         Item::Tool(t) => {
             let badge = if t.status == "done" { "✓" } else if t.status == "error" { "✗" } else { "⟳" };
@@ -450,6 +479,20 @@ fn usage_of(ev: &Value) -> Option<(&'static str, (u64, u64))> {
     } else {
         None
     }
+}
+
+/// Render assistant/thinking markdown to HTML. pulldown-cmark escapes raw
+/// text, so model output can't inject arbitrary tags — adequate for a local
+/// dev tool. Tables + strikethrough enabled on top of CommonMark.
+fn md_to_html(src: &str) -> String {
+    use pulldown_cmark::{html, Options, Parser};
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TABLES);
+    let parser = Parser::new_ext(src, opts);
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
 }
 
 fn short_id(id: &str) -> String {

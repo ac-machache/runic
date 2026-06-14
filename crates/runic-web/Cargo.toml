@@ -19,6 +19,7 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 gloo-net = "0.6"
 wasm-streams = "0.5"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

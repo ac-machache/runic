@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use runic_provider_anthropic::{AnthropicConfig, AnthropicProvider};
 use runic_provider_core::Provider;
 use runic_provider_gemini::{GeminiConfig, GeminiProvider};
+use runic_provider_openai::{OpenAiConfig, OpenAiProvider};
 use std::sync::Arc;
 
 /// Resolved configuration for a runic process.
@@ -76,8 +77,42 @@ impl RunicConfig {
                 }
                 GeminiProvider::new(cfg)
             }
+            "mistral" => {
+                let key = std::env::var("MISTRAL_API_KEY")
+                    .context("MISTRAL_API_KEY must be set when RUNIC_PROVIDER=mistral")?;
+                let mut cfg = OpenAiConfig::mistral(key);
+                if let Some(m) = &self.model_override {
+                    cfg = cfg.with_model(m.clone());
+                }
+                OpenAiProvider::mistral(cfg)
+            }
+            "openai" => {
+                let key = std::env::var("OPENAI_API_KEY")
+                    .context("OPENAI_API_KEY must be set when RUNIC_PROVIDER=openai")?;
+                let mut cfg = OpenAiConfig::new(key);
+                if let Some(m) = &self.model_override {
+                    cfg = cfg.with_model(m.clone());
+                }
+                OpenAiProvider::new(cfg)
+            }
+            // Any other OpenAI-compatible endpoint: point it via
+            // RUNIC_OPENAI_BASE_URL (+ OPENAI_API_KEY). Covers Groq,
+            // OpenRouter, local LM Studio / Ollama shims, etc.
+            "openai-compatible" => {
+                let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+                let base = std::env::var("RUNIC_OPENAI_BASE_URL").context(
+                    "RUNIC_OPENAI_BASE_URL must be set when RUNIC_PROVIDER=openai-compatible",
+                )?;
+                let mut cfg = OpenAiConfig::new(key).with_base_url(base);
+                if let Some(m) = &self.model_override {
+                    cfg = cfg.with_model(m.clone());
+                }
+                OpenAiProvider::new(cfg)
+            }
             other => {
-                anyhow::bail!("unknown RUNIC_PROVIDER='{other}' (expected: anthropic | gemini)");
+                anyhow::bail!(
+                    "unknown RUNIC_PROVIDER='{other}' (expected: anthropic | gemini | mistral | openai | openai-compatible)"
+                );
             }
         };
         Ok(provider)

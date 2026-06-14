@@ -6,6 +6,7 @@ members = [
     "crates/runic-provider-core",
     "crates/runic-provider-anthropic",
     "crates/runic-provider-gemini",
+    "crates/runic-provider-openai",
     "crates/runic-storage-backend",
     "crates/runic-context-engine",
     "crates/runic-tool-core",
@@ -62,6 +63,7 @@ runic-message-types = { path = "crates/runic-message-types" }
 runic-provider-core = { path = "crates/runic-provider-core" }
 runic-provider-anthropic = { path = "crates/runic-provider-anthropic" }
 runic-provider-gemini = { path = "crates/runic-provider-gemini" }
+runic-provider-openai = { path = "crates/runic-provider-openai" }
 runic-storage-backend = { path = "crates/runic-storage-backend" }
 runic-context-engine = { path = "crates/runic-context-engine" }
 runic-tool-core = { path = "crates/runic-tool-core" }

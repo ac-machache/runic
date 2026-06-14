@@ -1834,6 +1834,7 @@ dependencies = [
  "runic-provider-anthropic",
  "runic-provider-core",
  "runic-provider-gemini",
+ "runic-provider-openai",
  "runic-serve",
  "runic-sessions",
  "runic-shell-tools",
@@ -2051,6 +2052,23 @@ dependencies = [
 
 [[package]]
 name = "runic-provider-gemini"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "runic-message-types",
+ "runic-provider-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "runic-provider-openai"
 version = "0.1.0"
 dependencies = [
  "async-trait",

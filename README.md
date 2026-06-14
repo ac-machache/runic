@@ -23,7 +23,7 @@ hello! how can I help today?
 
 | Feature | Status |
 |---|---|
-| Streaming Anthropic + Gemini providers | ✅ |
+| Streaming providers — Anthropic, Gemini, OpenAI-compatible (Mistral/OpenAI/Groq/local) | ✅ |
 | Tool calls (plain, HITL-gated, background) | ✅ |
 | Async subagents (sync + background variants) | ✅ |
 | Six-point hook system (`before/after` × agent/model/tool) | ✅ |
@@ -100,13 +100,14 @@ cargo run --example with_blob -- IMG    # upload a file as a blob + ask the mode
 
 Each example is self-contained and commented. See `crates/runic-examples/`.
 
-## Crate map (20 crates)
+## Crate map (22 crates)
 
 ```
 runic-message-types       wire types (Message, ContentBlock, StreamEvent, ToolCall)
 runic-provider-core       Provider trait + retry policy
 runic-provider-anthropic  Anthropic SSE client
 runic-provider-gemini     Gemini client
+runic-provider-openai     OpenAI-compatible client (Mistral, OpenAI, Groq, local, …)
 runic-storage-backend     StorageBackend trait + LocalFs, Memory, Overlay, Namespaced impls
 runic-tool-core           Tool / HitlTool / BackgroundTool + dispatch registry
 runic-context-engine      ContextEngine trait + Composite + Compactor + Spillover + Reminder
@@ -120,8 +121,9 @@ runic-sessions            SessionStore trait + FileSessionStore + spawn_persiste
 runic-blobs               BlobStore trait + FileBlobStore (sha256, dedup) + materializing provider
 runic-memory              bounded MEMORY.md / USER.md stores + memory tool (threat-scanned)
 runic-shell-tools         read/write/edit/ls/glob/grep tools over any StorageBackend
-runic-serve               axum HTTP server — threads, runs, SSE streaming, resume
-runic                     REPL binary that wires everything together
+runic-serve               axum HTTP server — threads, runs, SSE streaming, resume, HITL
+runic-web                 Leptos dev console (WASM) for `runic serve`
+runic                     binary: REPL + `serve` over one shared harness
 runic-examples            runnable examples
 ```
 
@@ -132,10 +134,13 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 | Variable | Purpose | Default |
 |---|---|---|
 | `RUNIC_HOME` | Root for skills, agents, plugins, mcp.json, memory | `~/.runic` |
-| `RUNIC_PROVIDER` | `anthropic` or `gemini` | `anthropic` |
+| `RUNIC_PROVIDER` | `anthropic`, `gemini`, `mistral`, `openai`, or `openai-compatible` | `anthropic` |
 | `RUNIC_MODEL` | Provider model override | provider default |
 | `ANTHROPIC_API_KEY` | Required when provider is Anthropic | — |
 | `GEMINI_API_KEY` | Required when provider is Gemini | — |
+| `MISTRAL_API_KEY` | Required when provider is Mistral | — |
+| `OPENAI_API_KEY` | Required when provider is OpenAI / openai-compatible | — |
+| `RUNIC_OPENAI_BASE_URL` | Endpoint for `openai-compatible` (Groq, OpenRouter, local, …) | — |
 | `RUNIC_SPILLOVER_THRESHOLD` | Bytes above which a tool result gets spilled | `8192` |
 | `RUNIC_COMPACT_THRESHOLD` | Token count above which to compact | `100000` |
 | `RUNIC_SPILLOVER_RETENTION_DAYS` | Spillover files older than this are deleted at startup (`0` disables) | `14` |

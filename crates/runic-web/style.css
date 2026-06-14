@@ -92,6 +92,8 @@ body {
 .thinking-live { color: var(--dim); font-style: italic; white-space: pre-wrap; max-width: 820px; border-left: 2px solid var(--border2); padding-left: 10px; }
 
 .msg { display: flex; gap: 12px; align-items: flex-start; max-width: 820px; }
+/* user turns sit on the right, assistant on the left */
+.msg.user { flex-direction: row-reverse; align-self: flex-end; }
 .avatar {
   flex: 0 0 28px; width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center;
   font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; margin-top: 2px;
@@ -99,7 +101,7 @@ body {
 .user-av { background: var(--accent-dim); color: #dce8ff; }
 .bot-av { background: #243321; color: #9fe0a8; }
 
-.bubble { background: var(--user); color: #fff; padding: 9px 13px; border-radius: 4px 12px 12px 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.bubble { background: var(--user); color: #fff; padding: 9px 13px; border-radius: 12px 12px 4px 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .body { line-height: 1.6; min-width: 0; padding-top: 3px; }
 
 /* markdown */

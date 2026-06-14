@@ -89,6 +89,28 @@ impl Agent {
         &self.tools
     }
 
+    /// The tool definitions (name, description, JSON schema) exactly as
+    /// they'd be sent to the provider. For inspection / dev tooling.
+    pub fn tool_definitions(&self) -> Vec<runic_message_types::ToolDefinition> {
+        self.tools.definitions()
+    }
+
+    /// Render the system prompt the context engine would assemble right now
+    /// — base prompt plus every layer (SOUL/USER/MEMORY files, skills
+    /// index, …). Unlike `state().system_prompt` (the static base), this is
+    /// what the model actually receives. For inspection only; uses the
+    /// current message history as context.
+    pub async fn assembled_system_prompt(&self) -> String {
+        let messages = self.state.messages_for_provider();
+        let ctx = TurnContext {
+            base_system_prompt: &self.state.system_prompt,
+            messages: &messages,
+            run_id: "inspect",
+            turn: 0,
+        };
+        self.context_engine.assemble_system_prompt(&ctx).await
+    }
+
     /// Subscribe to the agent's [`crate::state::SessionEvent`] stream.
     ///
     /// Every event pushed to state (run start/end, message, tool call,

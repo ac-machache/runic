@@ -143,11 +143,9 @@ fn App() -> impl IntoView {
         spawn_local(async move {
             match c.thread_events(&id).await {
                 Ok(evs) => {
-                    let mut its = Vec::new();
-                    for ev in &evs {
-                        apply_event(&mut its, ev);
-                    }
-                    items.set(its);
+                    // Persisted events are `{seq, event:{kind:"Message", …}}`
+                    // (NOT the live wire format), so reconstruct from those.
+                    items.set(items_from_events(&evs));
                     events.set(evs);
                 }
                 Err(e) => leptos::logging::warn!("load history failed: {e}"),
@@ -512,6 +510,82 @@ fn finalize(kind: LiveKind, text: &str) -> Item {
     }
 }
 
+/// Rebuild the transcript from a thread's persisted event log. These come
+/// from `GET /events` as `{seq, event:{kind, …}}` (the `SessionEvent`
+/// shape), distinct from the live wire format — so we read `kind` and the
+/// full `msg`, not streaming deltas.
+fn items_from_events(events: &[Value]) -> Vec<Item> {
+    let mut items = Vec::new();
+    for entry in events {
+        let event = entry.get("event").unwrap_or(entry);
+        match event.get("kind").and_then(|v| v.as_str()) {
+            Some("Message") => {
+                if let Some(msg) = event.get("msg") {
+                    ingest_message(&mut items, msg);
+                }
+            }
+            // Compaction snapshot replaces the prior history wholesale.
+            Some("StateSnapshot") => {
+                if let Some(msgs) = event.get("messages").and_then(|v| v.as_array()) {
+                    items.clear();
+                    for m in msgs {
+                        ingest_message(&mut items, m);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+/// Convert one persisted `Message` (role + content blocks) into transcript
+/// items, pairing tool results back onto their tool-use cards.
+fn ingest_message(items: &mut Vec<Item>, msg: &Value) {
+    let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    let blocks = msg.get("content").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for b in &blocks {
+        match b.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                let t = b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if t.is_empty() {
+                    continue;
+                }
+                if role == "user" {
+                    items.push(Item::User(t));
+                } else {
+                    items.push(Item::Assistant(t));
+                }
+            }
+            Some("tool_use") => {
+                items.push(Item::Tool(ToolView {
+                    id: b.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    name: b.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string(),
+                    input: b.get("input").map(|v| truncate(&v.to_string(), 300)).unwrap_or_default(),
+                    status: "done".to_string(),
+                    ..Default::default()
+                }));
+            }
+            Some("tool_result") => {
+                let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                let is_error = b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let content = b.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let sources = parse_sources(b.get("metadata"));
+                if let Some(Item::Tool(t)) = items
+                    .iter_mut()
+                    .rev()
+                    .find(|i| matches!(i, Item::Tool(t) if t.id == id))
+                {
+                    t.status = if is_error { "error".into() } else { "done".into() };
+                    t.result = truncate(&content, 600);
+                    t.sources = sources;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Fold one parsed event into the transcript items.
 fn apply_event(items: &mut Vec<Item>, ev: &Value) {
     let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -566,13 +640,13 @@ fn apply_event(items: &mut Vec<Item>, ev: &Value) {
         "message" => {
             if let Some(msg) = ev.get("msg") {
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                if role == "User" {
+                if role == "user" {
                     if let Some(text) = first_text(msg) {
                         if !matches!(items.last(), Some(Item::User(u)) if *u == text) {
                             items.push(Item::User(text));
                         }
                     }
-                } else if role == "Assistant" {
+                } else if role == "assistant" {
                     if let Some(text) = first_text(msg) {
                         if !matches!(items.last(), Some(Item::Assistant(_))) {
                             items.push(Item::Assistant(text));
@@ -640,14 +714,33 @@ fn usage_of(ev: &Value) -> Option<(&'static str, (u64, u64))> {
     }
 }
 
-/// Render the full thread-state snapshot: system prompt + counts + the
-/// message list as the model sees it.
+/// Render the full thread-state snapshot as collapsible sections: assembled
+/// + base system prompt, tool schemas, and the message list as sent to the
+/// model. Collapsed by default so you open only what you want to read.
 fn render_state(s: &Value) -> AnyView {
     let busy = s.get("busy").and_then(|v| v.as_bool()).unwrap_or(false);
-    let system_prompt = s.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let assembled = s.get("assembled_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let base = s.get("base_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let events = s.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let runs = s.get("run_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let runs = s.get("run_count").and_then(|v| v.as_u64());
     let messages = s.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let tools = s.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let msg_count = messages.len();
+
+    let tool_views = tools.iter().map(|t| {
+        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let schema = t.get("input_schema")
+            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+            .unwrap_or_default();
+        view! {
+            <details class="state-tool">
+                <summary>{name}</summary>
+                <div class="state-tool-desc">{desc}</div>
+                <pre class="state-code">{schema}</pre>
+            </details>
+        }
+    }).collect_view();
 
     let msg_views = messages.into_iter().map(|m| {
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("?").to_string();
@@ -663,20 +756,35 @@ fn render_state(s: &Value) -> AnyView {
         }
     }).collect_view();
 
+    let runs_str = runs.map(|r| r.to_string()).unwrap_or_else(|| "?".into());
+    let tool_count = tools.len();
+
     view! {
         <div>
-            {busy.then(|| view! { <div class="state-busy">"⏳ agent busy (run in progress) — messages from store"</div> })}
-            <div class="state-counts">{format!("{runs} runs · {events} events · {} messages", msg_views_len(s))}</div>
-            <div class="state-section">"system prompt"</div>
-            <pre class="state-prompt">{system_prompt}</pre>
-            <div class="state-section">"messages (as sent to the model)"</div>
-            <div class="state-msgs">{msg_views}</div>
+            {busy.then(|| view! { <div class="state-busy">"⏳ agent busy (run in progress) — prompt/tools unavailable; messages from store"</div> })}
+            <div class="state-counts">{format!("{runs_str} runs · {events} events · {msg_count} messages")}</div>
+
+            <details class="state-fold" open=true>
+                <summary>"assembled system prompt"</summary>
+                <pre class="state-code prompt">{assembled}</pre>
+            </details>
+
+            <details class="state-fold">
+                <summary>"base system prompt"</summary>
+                <pre class="state-code prompt">{base}</pre>
+            </details>
+
+            <details class="state-fold">
+                <summary>{format!("tools ({tool_count})")}</summary>
+                <div class="state-tools">{tool_views}</div>
+            </details>
+
+            <details class="state-fold" open=true>
+                <summary>{format!("messages ({msg_count})")}</summary>
+                <div class="state-msgs">{msg_views}</div>
+            </details>
         </div>
     }.into_any()
-}
-
-fn msg_views_len(s: &Value) -> usize {
-    s.get("messages").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
 }
 
 /// One-line summary of a content block for the state view.
@@ -723,5 +831,63 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let head: String = s.chars().take(max).collect();
         format!("{head}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(kind: &str, msg: Value) -> Value {
+        serde_json::json!({ "seq": 1, "event": { "kind": kind, "msg": msg } })
+    }
+
+    #[test]
+    fn reconstructs_history_with_lowercase_roles() {
+        // Persisted Role serializes lowercase ("user"/"assistant").
+        let events = vec![
+            ev("RunStart", Value::Null),
+            ev("Message", serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "hi" }] })),
+            ev("Message", serde_json::json!({ "role": "assistant", "content": [{ "type": "text", "text": "hello!" }] })),
+        ];
+        let items = items_from_events(&events);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], Item::User(t) if t == "hi"));
+        assert!(matches!(&items[1], Item::Assistant(t) if t == "hello!"));
+    }
+
+    #[test]
+    fn pairs_tool_use_with_its_result() {
+        let events = vec![
+            ev("Message", serde_json::json!({ "role": "assistant", "content": [
+                { "type": "tool_use", "id": "call_1", "name": "echo", "input": { "msg": "x" } }
+            ] })),
+            ev("Message", serde_json::json!({ "role": "user", "content": [
+                { "type": "tool_result", "tool_use_id": "call_1", "content": "ran echo", "is_error": false }
+            ] })),
+        ];
+        let items = items_from_events(&events);
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            Item::Tool(t) => {
+                assert_eq!(t.name, "echo");
+                assert_eq!(t.status, "done");
+                assert!(t.result.contains("ran echo"));
+            }
+            other => panic!("expected Tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_snapshot_replaces_history() {
+        let events = vec![
+            ev("Message", serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "old" }] })),
+            serde_json::json!({ "seq": 2, "event": { "kind": "StateSnapshot", "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "summary" }] }
+            ] } }),
+        ];
+        let items = items_from_events(&events);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Item::User(t) if t == "summary"));
     }
 }

@@ -139,15 +139,35 @@ pub async fn thread_state(
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     if let Ok(slot) = agent_arc.try_lock() {
         if let Some(agent) = slot.as_ref() {
-            let st = agent.state();
+            let base_system_prompt = agent.state().system_prompt.clone();
+            let messages = agent.state().messages_for_provider();
+            let event_count = agent.state().events.len();
+            let run_count = agent.state().runs().len();
+            // The fully assembled prompt (base + SOUL/USER/MEMORY/skills
+            // layers) — what the model actually receives — and the tool
+            // schemas as sent to the provider.
+            let assembled_system_prompt = agent.assembled_system_prompt().await;
+            let tools: Vec<serde_json::Value> = agent
+                .tool_definitions()
+                .into_iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
+                })
+                .collect();
             return Ok(Json(serde_json::json!({
                 "thread_id": thread_id,
                 "tenant": tenant,
                 "busy": false,
-                "system_prompt": st.system_prompt,
-                "messages": st.messages_for_provider(),
-                "event_count": st.events.len(),
-                "run_count": st.runs().len(),
+                "base_system_prompt": base_system_prompt,
+                "assembled_system_prompt": assembled_system_prompt,
+                "tools": tools,
+                "messages": messages,
+                "event_count": event_count,
+                "run_count": run_count,
             })));
         }
     }
@@ -165,7 +185,9 @@ pub async fn thread_state(
         "thread_id": thread_id,
         "tenant": tenant,
         "busy": true,
-        "system_prompt": "",
+        "base_system_prompt": "",
+        "assembled_system_prompt": "",
+        "tools": serde_json::Value::Array(vec![]),
         "messages": messages,
         "event_count": event_count,
         "run_count": serde_json::Value::Null,

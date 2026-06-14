@@ -75,6 +75,18 @@ impl ApiClient {
             .unwrap_or_default())
     }
 
+    /// Full thread state: system prompt + messages (as sent to the model) +
+    /// counts. Returned verbatim as JSON for the state inspector.
+    pub async fn thread_state(&self, id: &str) -> Result<Value, String> {
+        let url = format!("{}/threads/{id}/state", self.base);
+        let resp = Request::get(&url)
+            .header("x-runic-tenant", &self.tenant)
+            .send()
+            .await
+            .map_err(e2s)?;
+        resp.json().await.map_err(e2s)
+    }
+
     /// Deliver a HITL approval decision for a parked tool call. `decision`
     /// is `{"decision":"submit","final_input":{…}}` or
     /// `{"decision":"cancel","reason":"…"}`. The `run_id` path segment is
@@ -107,12 +119,14 @@ impl ApiClient {
         &self,
         thread: &str,
         message: &str,
+        abort: Option<&web_sys::AbortSignal>,
         mut on_event: impl FnMut(Value),
     ) -> Result<(), String> {
         let url = format!("{}/threads/{thread}/runs/stream", self.base);
         let body = serde_json::json!({ "message": message });
         let resp = Request::post(&url)
             .header("x-runic-tenant", &self.tenant)
+            .abort_signal(abort)
             .json(&body)
             .map_err(e2s)?
             .send()

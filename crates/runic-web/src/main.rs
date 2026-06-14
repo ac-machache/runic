@@ -12,6 +12,25 @@ use serde_json::Value;
 mod api;
 use api::ApiClient;
 
+/// The actively-streaming tail. Tokens append here (one reactive text node)
+/// instead of mutating the `items` list, so per-token cost is O(1) DOM
+/// instead of re-rendering the whole transcript. On a boundary (a non-text
+/// event) or run end it flushes into `items` as a finalized, markdown-
+/// rendered message.
+#[derive(Clone, Default, PartialEq)]
+struct LiveBuf {
+    kind: LiveKind,
+    text: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+enum LiveKind {
+    #[default]
+    None,
+    Text,
+    Thinking,
+}
+
 /// One rendered entry in the chat transcript.
 #[derive(Clone, Debug)]
 enum Item {
@@ -73,6 +92,7 @@ fn App() -> impl IntoView {
     let threads = RwSignal::new(Vec::<String>::new());
     let current = RwSignal::new(None::<String>);
     let items = RwSignal::new(Vec::<Item>::new());
+    let live = RwSignal::new(LiveBuf::default());
     let events = RwSignal::new(Vec::<Value>::new());
     let usage = RwSignal::new(None::<(u64, u64)>); // (input, output)
     let input = RwSignal::new(String::new());
@@ -81,6 +101,23 @@ fn App() -> impl IntoView {
     // Gate the card on presence only, so per-keystroke field edits (which
     // update `pending`) don't rebuild the card and steal input focus.
     let has_pending = Memo::new(move |_| pending.get().is_some());
+
+    // Cancel: the active run's AbortController, so a stop button can abort
+    // the fetch stream.
+    let abort = RwSignal::new(None::<web_sys::AbortController>);
+    // Right pane: "events" (live log) vs "state" (prompt + messages).
+    let inspect_tab = RwSignal::new("events");
+    let state_json = RwSignal::new(None::<Value>);
+
+    // Auto-scroll the transcript to the bottom as content arrives.
+    let transcript_ref = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move |_| {
+        items.track();
+        live.track();
+        if let Some(el) = transcript_ref.get() {
+            el.set_scroll_top(el.scroll_height());
+        }
+    });
 
     let client = move || ApiClient::new(api_base.get_untracked(), tenant.get_untracked());
 
@@ -99,7 +136,9 @@ fn App() -> impl IntoView {
     let load_thread = move |id: String| {
         current.set(Some(id.clone()));
         items.set(Vec::new());
+        live.set(LiveBuf::default());
         events.set(Vec::new());
+        state_json.set(None);
         let c = client();
         spawn_local(async move {
             match c.thread_events(&id).await {
@@ -123,7 +162,9 @@ fn App() -> impl IntoView {
                 Ok(id) => {
                     current.set(Some(id.clone()));
                     items.set(Vec::new());
+                    live.set(LiveBuf::default());
                     events.set(Vec::new());
+                    state_json.set(None);
                     match c.list_threads().await {
                         Ok(ids) => threads.set(ids),
                         Err(_) => threads.update(|t| if !t.contains(&id) { t.push(id.clone()) }),
@@ -149,26 +190,73 @@ fn App() -> impl IntoView {
         items.update(|its| its.push(Item::User(text.clone())));
         streaming.set(true);
 
+        // Fresh AbortController so the stop button can cancel this run.
+        let controller = web_sys::AbortController::new().ok();
+        let signal = controller.as_ref().map(|c| c.signal());
+        abort.set(controller);
+
         spawn_local(async move {
             let on_event = move |ev: Value| {
                 events.update(|e| e.push(ev.clone()));
                 if let Some(("usage", (i, o))) = usage_of(&ev) {
                     usage.set(Some((i, o)));
                 }
-                if ev.get("type").and_then(|v| v.as_str()) == Some("approval_required") {
-                    if let Some(p) = parse_pending(&ev) {
-                        pending.set(Some(p));
+                let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match kind {
+                    "assistant_text_delta" => {
+                        let t = ev.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        append_live(live, items, LiveKind::Text, t);
                     }
-                    return;
+                    "assistant_thinking_delta" => {
+                        let t = ev.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        append_live(live, items, LiveKind::Thinking, t);
+                    }
+                    "approval_required" => {
+                        flush_live(live, items);
+                        if let Some(p) = parse_pending(&ev) {
+                            pending.set(Some(p));
+                        }
+                    }
+                    _ => {
+                        flush_live(live, items);
+                        items.update(|its| apply_event(its, &ev));
+                    }
                 }
-                items.update(|its| apply_event(its, &ev));
             };
-            if let Err(e) = c.stream_run(&thread_id, &text, on_event).await {
-                items.update(|its| its.push(Item::Warning(format!("stream error: {e}"))));
+            let result = c.stream_run(&thread_id, &text, signal.as_ref(), on_event).await;
+            flush_live(live, items);
+            if let Err(e) = result {
+                // An aborted fetch isn't an error worth surfacing.
+                if !e.to_lowercase().contains("abort") {
+                    items.update(|its| its.push(Item::Warning(format!("stream error: {e}"))));
+                } else {
+                    items.update(|its| its.push(Item::Warning("— stopped —".into())));
+                }
             }
             streaming.set(false);
+            abort.set(None);
             // The run is over; any unanswered approval is moot.
             pending.set(None);
+        });
+    };
+
+    // Stop the active run: aborts the fetch stream client-side. (The server
+    // run finishes its current turn; this just stops the UI waiting.)
+    let stop = move || {
+        if let Some(c) = abort.get_untracked() {
+            c.abort();
+        }
+    };
+
+    // Fetch the full thread state (system prompt + messages) for the state tab.
+    let fetch_state = move || {
+        let Some(id) = current.get_untracked() else { return };
+        let c = client();
+        spawn_local(async move {
+            match c.thread_state(&id).await {
+                Ok(v) => state_json.set(Some(v)),
+                Err(e) => leptos::logging::warn!("state fetch failed: {e}"),
+            }
         });
     };
 
@@ -212,16 +300,31 @@ fn App() -> impl IntoView {
                     {move || current.get().map(|id| short_id(&id)).unwrap_or_else(|| "no thread selected".into())}
                     {move || streaming.get().then(|| view! { <span class="spin">" ● streaming"</span> })}
                 </div>
-                <div class="transcript">
-                    {move || if items.get().is_empty() {
+                <div class="transcript" node_ref=transcript_ref>
+                    {move || (items.get().is_empty() && live.get().text.is_empty()).then(|| {
                         let msg = if current.get().is_some() {
                             "Send a message to start the conversation."
                         } else {
                             "Create or select a thread to begin."
                         };
-                        view! { <div class="empty">{msg}</div> }.into_any()
-                    } else {
-                        items.get().into_iter().map(render_item).collect_view().into_any()
+                        view! { <div class="empty">{msg}</div> }
+                    })}
+                    {move || items.get().into_iter().map(render_item).collect_view()}
+                    // Live streaming tail — plain text, updated per token.
+                    {move || {
+                        let lb = live.get();
+                        if lb.text.is_empty() {
+                            ().into_any()
+                        } else if matches!(lb.kind, LiveKind::Thinking) {
+                            view! { <div class="msg thinking-live">{lb.text}</div> }.into_any()
+                        } else {
+                            view! {
+                                <div class="msg assistant">
+                                    <div class="avatar bot-av">"ai"</div>
+                                    <div class="body live">{lb.text}</div>
+                                </div>
+                            }.into_any()
+                        }
                     }}
                 </div>
                 {move || has_pending.get().then(|| {
@@ -281,25 +384,49 @@ fn App() -> impl IntoView {
                         placeholder=move || if current.get().is_some() { "type a message…".to_string() } else { "create or pick a thread first".to_string() }
                         disabled=move || current.get().is_none() || streaming.get()
                     />
-                    <button on:click=move |_| send() disabled=move || streaming.get()>"send"</button>
+                    {move || if streaming.get() {
+                        view! { <button class="stop" on:click=move |_| stop()>"stop"</button> }.into_any()
+                    } else {
+                        view! { <button on:click=move |_| send()>"send"</button> }.into_any()
+                    }}
                 </div>
             </main>
 
             <aside class="inspect">
-                <div class="pane-head">"state"</div>
-                <div class="usage">
-                    {move || match usage.get() {
-                        Some((i, o)) => format!("tokens  in {i}  out {o}"),
-                        None => "tokens  —".into(),
-                    }}
+                <div class="tabs">
+                    <button class="tab" class:on=move || inspect_tab.get() == "events"
+                        on:click=move |_| inspect_tab.set("events")>"events"</button>
+                    <button class="tab" class:on=move || inspect_tab.get() == "state"
+                        on:click=move |_| { inspect_tab.set("state"); fetch_state(); }>"state"</button>
+                    <span class="tab-usage">
+                        {move || match usage.get() {
+                            Some((i, o)) => format!("in {i} · out {o}"),
+                            None => "—".into(),
+                        }}
+                    </span>
                 </div>
-                <div class="events">
-                    {move || events.get().into_iter().rev().map(|ev| {
-                        let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                        let body = serde_json::to_string(&ev).unwrap_or_default();
-                        view! { <div class="evt"><span class="evt-kind">{kind}</span><code>{truncate(&body, 240)}</code></div> }
-                    }).collect_view()}
-                </div>
+
+                {move || if inspect_tab.get() == "events" {
+                    view! {
+                        <div class="events">
+                            {move || events.get().into_iter().rev().map(|ev| {
+                                let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                let body = serde_json::to_string(&ev).unwrap_or_default();
+                                view! { <div class="evt"><span class="evt-kind">{kind}</span><code>{truncate(&body, 240)}</code></div> }
+                            }).collect_view()}
+                        </div>
+                    }.into_any()
+                } else {
+                    view! {
+                        <div class="state-view">
+                            <button class="refresh-state" on:click=move |_| fetch_state()>"⟳ refresh"</button>
+                            {move || match state_json.get() {
+                                None => view! { <div class="empty small">"Loading state…"</div> }.into_any(),
+                                Some(s) => render_state(&s).into_any(),
+                            }}
+                        </div>
+                    }.into_any()
+                }}
             </aside>
         </div>
     }
@@ -350,6 +477,38 @@ fn render_item(item: Item) -> AnyView {
                 </div>
             }.into_any()
         }
+    }
+}
+
+/// Append a streaming token to the live buffer. On a kind change (text →
+/// thinking or vice-versa) the existing buffer is finalized into `items`
+/// first.
+fn append_live(live: RwSignal<LiveBuf>, items: RwSignal<Vec<Item>>, kind: LiveKind, text: &str) {
+    live.update(|lb| {
+        if lb.kind != kind && !lb.text.is_empty() {
+            items.update(|its| its.push(finalize(lb.kind, &lb.text)));
+            lb.text.clear();
+        }
+        lb.kind = kind;
+        lb.text.push_str(text);
+    });
+}
+
+/// Flush any buffered live text into `items` as a finalized message.
+fn flush_live(live: RwSignal<LiveBuf>, items: RwSignal<Vec<Item>>) {
+    live.update(|lb| {
+        if !lb.text.is_empty() {
+            items.update(|its| its.push(finalize(lb.kind, &lb.text)));
+        }
+        lb.kind = LiveKind::None;
+        lb.text.clear();
+    });
+}
+
+fn finalize(kind: LiveKind, text: &str) -> Item {
+    match kind {
+        LiveKind::Thinking => Item::Thinking(text.to_string()),
+        _ => Item::Assistant(text.to_string()),
     }
 }
 
@@ -478,6 +637,65 @@ fn usage_of(ev: &Value) -> Option<(&'static str, (u64, u64))> {
         Some(("usage", (i, o)))
     } else {
         None
+    }
+}
+
+/// Render the full thread-state snapshot: system prompt + counts + the
+/// message list as the model sees it.
+fn render_state(s: &Value) -> AnyView {
+    let busy = s.get("busy").and_then(|v| v.as_bool()).unwrap_or(false);
+    let system_prompt = s.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let events = s.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let runs = s.get("run_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let messages = s.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+    let msg_views = messages.into_iter().map(|m| {
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let body = m.get("content").and_then(|v| v.as_array()).map(|blocks| {
+            blocks.iter().map(render_block_summary).collect::<Vec<_>>().join("\n")
+        }).unwrap_or_default();
+        let cls = format!("state-role role-{}", role.to_lowercase());
+        view! {
+            <div class="state-msg">
+                <span class=cls>{role}</span>
+                <code>{body}</code>
+            </div>
+        }
+    }).collect_view();
+
+    view! {
+        <div>
+            {busy.then(|| view! { <div class="state-busy">"⏳ agent busy (run in progress) — messages from store"</div> })}
+            <div class="state-counts">{format!("{runs} runs · {events} events · {} messages", msg_views_len(s))}</div>
+            <div class="state-section">"system prompt"</div>
+            <pre class="state-prompt">{system_prompt}</pre>
+            <div class="state-section">"messages (as sent to the model)"</div>
+            <div class="state-msgs">{msg_views}</div>
+        </div>
+    }.into_any()
+}
+
+fn msg_views_len(s: &Value) -> usize {
+    s.get("messages").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0)
+}
+
+/// One-line summary of a content block for the state view.
+fn render_block_summary(b: &Value) -> String {
+    match b.get("type").and_then(|v| v.as_str()) {
+        Some("text") => b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Some("tool_use") => format!(
+            "→ tool_use {}({})",
+            b.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            b.get("input").map(|v| truncate(&v.to_string(), 120)).unwrap_or_default()
+        ),
+        Some("tool_result") => format!(
+            "← tool_result {}",
+            truncate(b.get("content").and_then(|v| v.as_str()).unwrap_or(""), 120)
+        ),
+        Some("image") => "[image]".to_string(),
+        Some("reasoning") => format!("[thinking] {}", truncate(b.get("text").and_then(|v| v.as_str()).unwrap_or(""), 120)),
+        Some("blob") => "[blob]".to_string(),
+        other => format!("[{}]", other.unwrap_or("?")),
     }
 }
 

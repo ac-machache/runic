@@ -126,6 +126,52 @@ pub async fn thread_events(
     })))
 }
 
+/// `GET /threads/:id/state` — the full agent state for inspection: the
+/// system prompt, the message list exactly as sent to the model, and run /
+/// event counts. Reads the warm agent when it's idle; if a run is in
+/// flight (slot locked) it reports `busy` and falls back to the message
+/// list reconstructed from the event store.
+pub async fn thread_state(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
+    if let Ok(slot) = agent_arc.try_lock() {
+        if let Some(agent) = slot.as_ref() {
+            let st = agent.state();
+            return Ok(Json(serde_json::json!({
+                "thread_id": thread_id,
+                "tenant": tenant,
+                "busy": false,
+                "system_prompt": st.system_prompt,
+                "messages": st.messages_for_provider(),
+                "event_count": st.events.len(),
+                "run_count": st.runs().len(),
+            })));
+        }
+    }
+    // Busy (run in progress) or empty slot — reconstruct messages from store.
+    let messages = runic_sessions::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
+        .await
+        .unwrap_or_default();
+    let event_count = state
+        .session_store
+        .read(&tenant, &thread_id)
+        .await
+        .map(|e| e.len())
+        .unwrap_or(0);
+    Ok(Json(serde_json::json!({
+        "thread_id": thread_id,
+        "tenant": tenant,
+        "busy": true,
+        "system_prompt": "",
+        "messages": messages,
+        "event_count": event_count,
+        "run_count": serde_json::Value::Null,
+    })))
+}
+
 /// `DELETE /threads/:id` — drop the thread's session AND its in-pool
 /// Agent so the next run starts fresh.
 pub async fn delete_thread(

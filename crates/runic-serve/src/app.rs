@@ -53,6 +53,7 @@ pub fn router(config: ServeConfig) -> Router {
             get(threads::get_thread).delete(threads::delete_thread),
         )
         .route("/threads/{thread_id}/events", get(threads::thread_events))
+        .route("/threads/{thread_id}/state", get(threads::thread_state))
         .route(
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),

@@ -1,9 +1,10 @@
 # Slash commands (`runic-commands`)
 
-A command is a reusable prompt template invoked as `/name args` from the
-REPL (or any other surface that chooses to wire the registry in). Like
-skills and agents, commands are purely declarative markdown — no Rust
-required to add one.
+A command is a reusable prompt template invoked as `/name args` from any
+surface that wires the registry in. In the reference server it's wired as
+a `CommandExpansionEngine` context layer, which expands a matching
+invocation before the message reaches the model. Like skills and agents,
+commands are purely declarative markdown — no Rust required to add one.
 
 ## Layout
 
@@ -38,11 +39,11 @@ the user message — the model never sees the slash invocation itself.
   name (trimmed).
 - If the body has no `$ARGUMENTS` and arguments were given, they're
   appended on their own line, so user input is never dropped.
-- Unknown `/whatever` input is intercepted by the REPL and answered with
-  the list of available commands instead of being sent to the model.
+- Input that isn't a known command passes through unchanged to the model.
 
-Builtin REPL commands (`/state`, `/dump`, `/quit`, `/exit`) take
-precedence over user-defined commands with the same name.
+Wiring is up to the surface: the reference server expands commands via a
+`CommandExpansionEngine`; a custom surface can call the registry directly
+(see the API below).
 
 ## API
 

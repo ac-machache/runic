@@ -60,6 +60,25 @@ pub type SubagentPersisterFn = Arc<
     dyn Fn(&str, String, broadcast::Receiver<SessionEvent>) + Send + Sync,
 >;
 
+/// Everything needed to materialize a sub-agent tool from an [`MdAgent`],
+/// grouped so callers pass one value instead of a long positional list.
+pub struct SubagentSetup {
+    /// Provider the child agent runs on.
+    pub provider: Arc<dyn Provider>,
+    /// Parent tool pool the child's `allowed_tools` resolve against.
+    pub parent_pool: Arc<ToolRegistry>,
+    /// Parent skill registry, scoped to the child's allowed skills.
+    pub parent_skills: Arc<SkillRegistry>,
+    /// Storage backend the child's filesystem / skill tools bind to.
+    pub storage: Arc<dyn StorageBackend>,
+    /// Root key under which skills live in `storage`.
+    pub skills_root: &'static str,
+    /// Optional persister, invoked once per child spawn.
+    pub persister: Option<SubagentPersisterFn>,
+    /// Cross-cutting hooks installed on every child agent (e.g. a call cap).
+    pub hooks: Vec<Arc<dyn Hook>>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("missing or malformed frontmatter (expected '---' delimiters)")]
@@ -111,15 +130,15 @@ impl MdAgent {
     /// is needed). For coral-style sub-agents that need scoped tools and
     /// skills, call [`make_subagent_tool_with_context`] directly.
     pub fn make_subagent_tool(&self, provider: Arc<dyn Provider>) -> SubagentTool {
-        self.make_subagent_tool_with_context(
+        self.make_subagent_tool_with_context(SubagentSetup {
             provider,
-            Arc::new(ToolRegistry::new()),
-            Arc::new(SkillRegistry::new()),
-            Arc::new(runic_storage_backend::MemoryBackend::new()),
-            "skills",
-            None,
-            Vec::new(),
-        )
+            parent_pool: Arc::new(ToolRegistry::new()),
+            parent_skills: Arc::new(SkillRegistry::new()),
+            storage: Arc::new(runic_storage_backend::MemoryBackend::new()),
+            skills_root: "skills",
+            persister: None,
+            hooks: Vec::new(),
+        })
     }
 
     /// Turn this markdown agent into a runnable [`SubagentTool`] with a
@@ -140,16 +159,10 @@ impl MdAgent {
     /// The factory closure clones the precomputed handles each call —
     /// every sub-agent spawn produces a fresh child `Agent` with the
     /// same scoped surface.
-    pub fn make_subagent_tool_with_context(
-        &self,
-        provider: Arc<dyn Provider>,
-        parent_pool: Arc<ToolRegistry>,
-        parent_skills: Arc<SkillRegistry>,
-        storage: Arc<dyn StorageBackend>,
-        skills_root: &'static str,
-        persister: Option<SubagentPersisterFn>,
-        hooks: Vec<Arc<dyn Hook>>,
-    ) -> SubagentTool {
+    pub fn make_subagent_tool_with_context(&self, setup: SubagentSetup) -> SubagentTool {
+        let SubagentSetup {
+            provider, parent_pool, parent_skills, storage, skills_root, persister, hooks,
+        } = setup;
         let agent_name = self.def.name.clone();
         let description = self.def.description.clone();
         let max_turns = self.def.max_turns.unwrap_or(16);
@@ -222,16 +235,10 @@ impl MdAgent {
     /// Description gets a one-line prefix telling the parent model the
     /// call is fire-and-forget so it knows to expect a task_id and use
     /// `background_status` to check on it.
-    pub fn make_async_subagent_tool_with_context(
-        &self,
-        provider: Arc<dyn Provider>,
-        parent_pool: Arc<ToolRegistry>,
-        parent_skills: Arc<SkillRegistry>,
-        storage: Arc<dyn StorageBackend>,
-        skills_root: &'static str,
-        persister: Option<SubagentPersisterFn>,
-        hooks: Vec<Arc<dyn Hook>>,
-    ) -> AsyncSubagentTool {
+    pub fn make_async_subagent_tool_with_context(&self, setup: SubagentSetup) -> AsyncSubagentTool {
+        let SubagentSetup {
+            provider, parent_pool, parent_skills, storage, skills_root, persister, hooks,
+        } = setup;
         let agent_name = self.def.name.clone();
         let description = augment_async_description(&self.def.description);
         let max_turns = self.def.max_turns.unwrap_or(16);

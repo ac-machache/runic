@@ -453,9 +453,8 @@ fn App() -> impl IntoView {
                                 <label class="apv-label">{name.clone()}</label>
                                 <input class="apv-input" value=val.clone()
                                     on:input=move |e| pending.update(|opt| {
-                                        if let Some(p) = opt {
-                                            if let Some(f) = p.fields.get_mut(i) { f.1 = event_target_value(&e); }
-                                        }
+                                        if let Some(p) = opt
+                                            && let Some(f) = p.fields.get_mut(i) { f.1 = event_target_value(&e); }
                                     }) />
                             }
                         }).collect_view();
@@ -882,8 +881,8 @@ fn cluster_runs(events: &[Value]) -> Vec<RunCluster> {
             }
             "Message" => ingest_persisted(&mut runs, ev.get("msg")),
             "turn_complete" | "TurnBoundary" => {
-                if let Some(run) = runs.last_mut() {
-                    if let Some(turn) = run.turns.last_mut() {
+                if let Some(run) = runs.last_mut()
+                    && let Some(turn) = run.turns.last_mut() {
                         turn.closed = true;
                         if let Some(sr) = ev.get("stop_reason").and_then(|v| v.as_str()) {
                             turn.stop_reason = Some(sr.to_string());
@@ -894,7 +893,6 @@ fn cluster_runs(events: &[Value]) -> Vec<RunCluster> {
                             None => {}
                         }
                     }
-                }
             }
             "run_end" | "RunEnd" | "done" => {
                 if let Some(run) = runs.last_mut() {
@@ -989,17 +987,15 @@ fn ingest_persisted(runs: &mut Vec<RunCluster>, msg: Option<&Value>) {
     } else if role == "user" {
         // Plain user text is the run's prompt; tool_result blocks attach to
         // the tool they answer.
-        if let Some(run) = runs.last_mut() {
-            if run.prompt.is_empty() {
+        if let Some(run) = runs.last_mut()
+            && run.prompt.is_empty() {
                 for b in &blocks {
-                    if b.get("type").and_then(|v| v.as_str()) == Some("text") {
-                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                    if b.get("type").and_then(|v| v.as_str()) == Some("text")
+                        && let Some(t) = b.get("text").and_then(|v| v.as_str()) {
                             run.prompt = t.to_string();
                         }
-                    }
                 }
             }
-        }
         for b in &blocks {
             if b.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
                 let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1181,18 +1177,15 @@ fn apply_event(items: &mut Vec<Item>, ev: &Value) {
             if let Some(msg) = ev.get("msg") {
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 if role == "user" {
-                    if let Some(text) = first_text(msg) {
-                        if !matches!(items.last(), Some(Item::User(u)) if *u == text) {
+                    if let Some(text) = first_text(msg)
+                        && !matches!(items.last(), Some(Item::User(u)) if *u == text) {
                             items.push(Item::User(text));
                         }
-                    }
-                } else if role == "assistant" {
-                    if let Some(text) = first_text(msg) {
-                        if !matches!(items.last(), Some(Item::Assistant(_))) {
+                } else if role == "assistant"
+                    && let Some(text) = first_text(msg)
+                        && !matches!(items.last(), Some(Item::Assistant(_))) {
                             items.push(Item::Assistant(text));
                         }
-                    }
-                }
             }
         }
         _ => {}

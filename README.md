@@ -3,21 +3,22 @@
 A personal Rust agent harness. Inspired by the simplicity of pi and the
 speed and type-safety of Rust.
 
-Built as a library first — no TUI, no CLI, no UI. The `runic` binary
-ships two surfaces over one shared harness: a minimal REPL (`runic`) and
-an HTTP server (`runic serve`). Drop the agent into your own surface
-(desktop app, custom CLI, whatever) the same way they do.
+Built as a library first — no TUI, no CLI, no UI. You compose an `Agent`
+from a provider, tools, hooks, and a context engine, then drop it into
+your own surface. The `runic` binary is one such surface: a reference
+**HTTP server** (the coral "Maia" agent) that streams runs over SSE and is
+driven by the `runic-web` Leptos dev console.
 
 ```
-$ ANTHROPIC_API_KEY=sk-... cargo run --bin runic
-[runic-home] /Users/you/.runic
-[skills] 3 total skill(s) registered: ["code-review", "greeter", "optimize"]
-[agents] 1 total markdown agent(s) registered: ["researcher"]
-[mcp] connecting to 1 server(s) from /Users/you/.runic/mcp.json
-[context] compact_threshold=100000 tokens, spillover_threshold=8192 bytes
-> hi
-hello! how can I help today?
+$ cargo run -p runic
+  ╭─ runic serving (Maia) on http://127.0.0.1:8920
+  │  health:  curl -s http://127.0.0.1:8920/healthz
+  │  chat (SSE stream): POST /threads/{id}/runs/stream
+  ╰─ Ctrl-C to stop.
 ```
+
+The fastest way to see the library itself is an example:
+`ANTHROPIC_API_KEY=sk-... cargo run --example minimal -- "hi there"`.
 
 ## What you get
 
@@ -27,6 +28,9 @@ hello! how can I help today?
 | Tool calls (plain, HITL-gated, background) | ✅ |
 | Async subagents (sync + background variants) | ✅ |
 | Six-point hook system (`before/after` × agent/model/tool) | ✅ |
+| Per-run context (`RunContext` — open config map + provider override) | ✅ |
+| Tool interceptors (guards/bindings that ride with the tool to sub-agents) | ✅ |
+| Per-run, per-tool call limits (`CallLimitHook`) | ✅ |
 | Pluggable storage backends (FS, in-memory, overlay, namespaced) | ✅ |
 | Composable context engine (layers + decorator engines) | ✅ |
 | Skills (Claude Code-compatible `SKILL.md` files) | ✅ |
@@ -36,42 +40,33 @@ hello! how can I help today?
 | Spillover (huge tool outputs → disk) | ✅ |
 | Compactor (summarize old messages when context fills) | ✅ |
 | Reminder (peripheral vision via pluggable sources) | ✅ |
-| Persistence (pluggable `SessionStore` trait, multi-tenant) | ✅ |
-| HTTP server (`runic serve` — threads, SSE runs, resume, replay-on-restart) | ✅ |
+| Persistence (pluggable `SessionStore` — file or Postgres, multi-tenant) | ✅ |
+| HTTP server (threads, SSE runs, resume, replay-on-restart) + Leptos dev console | ✅ |
 
 ## 60-second quickstart
 
-1. **Set an API key.**
-   ```sh
-   export ANTHROPIC_API_KEY=sk-...
-   # or
-   export RUNIC_PROVIDER=gemini GEMINI_API_KEY=...
-   ```
+**As a library** (the smallest possible agent):
+```sh
+export ANTHROPIC_API_KEY=sk-...
+cargo run --example minimal -- "what's the capital of France?"
+```
+Then read `crates/runic-examples/` for tools, hooks, per-run context,
+interceptors, and call limits. To build your own agent, see
+[docs/extending.md](./docs/extending.md).
 
-2. **(Optional) Personalize the agent.** Drop a SOUL.md and a memory file:
-   ```sh
-   mkdir -p ~/.runic/memory
-   echo "You are warm, terse, and very curious." > ~/.runic/SOUL.md
-   echo "- machache prefers concise answers" > ~/.runic/memory/USER.md
-   ```
+**As a server** (the reference coral "Maia" agent + web console):
+```sh
+# 1. terminal one — the HTTP server (binds 127.0.0.1:8920)
+export ANTHROPIC_API_KEY=sk-...        # + GEMINI/MISTRAL keys for sub-agents
+# optional: export DATABASE_URL=postgres://…   (else a file store is used)
+cargo run -p runic
 
-3. **(Optional) Ship a skill.**
-   ```sh
-   mkdir -p ~/.runic/skills/greet
-   cat > ~/.runic/skills/greet/SKILL.md <<'EOF'
-   ---
-   name: greet
-   description: Greet the user warmly by name
-   ---
-   When invoked, respond with a 1-2 sentence personalized greeting.
-   EOF
-   ```
-
-4. **Run.**
-   ```sh
-   cargo run --bin runic
-   ```
-   Type messages. `/state` for a summary, `/dump` for full JSON, `/quit` to exit.
+# 2. terminal two — the Leptos dev console at http://127.0.0.1:8080
+cd crates/runic-web && trunk serve --port 8080
+```
+The console drives the server over HTTP+SSE: thread list, streaming chat
+with tool-call cards, a run/turn-clustered event inspector, and a
+"Configurable" panel for per-run context (`user_id`, `provider`, …).
 
 ## Documentation
 
@@ -93,6 +88,9 @@ hello! how can I help today?
 cargo run --example minimal             # ~30-line agent loop
 cargo run --example with_tools          # custom Tool impl
 cargo run --example with_hooks          # custom Hook impl
+cargo run --example with_run_context    # per-run RunContext (config + provider override)
+cargo run --example with_interceptor    # ToolInterceptor that stamps per-run identity
+cargo run --example with_call_limit     # CallLimitHook caps per-tool calls per run
 cargo run --example custom_reminder     # write your own Reminder
 cargo run --example with_mcp            # connect to a local MCP server
 cargo run --example with_blob -- IMG    # upload a file as a blob + ask the model about it
@@ -117,13 +115,13 @@ runic-commands            COMMAND.md parser + registry (slash-command prompt tem
 runic-agents              AGENT.md parser, registry, conversion to SubagentTool
 runic-plugins             ~/.runic/plugins/{name}/ discovery, aggregate registries
 runic-mcp                 MCP client (stdio + Streamable HTTP transports)
-runic-sessions            SessionStore trait + FileSessionStore + spawn_persister + replay
+runic-sessions            SessionStore trait + File + Postgres stores + spawn_persister + replay
 runic-blobs               BlobStore trait + FileBlobStore (sha256, dedup) + materializing provider
 runic-memory              bounded MEMORY.md / USER.md stores + memory tool (threat-scanned)
 runic-shell-tools         read/write/edit/ls/glob/grep tools over any StorageBackend
 runic-serve               axum HTTP server — threads, runs, SSE streaming, resume, HITL
-runic-web                 Leptos dev console (WASM) for `runic serve`
-runic                     binary: REPL + `serve` over one shared harness
+runic-web                 Leptos dev console (WASM) for the runic HTTP server
+runic                     binary: reference HTTP server (the coral "Maia" agent)
 runic-examples            runnable examples
 ```
 
@@ -144,37 +142,39 @@ The dependency DAG is documented in [ARCHITECTURE.md](./ARCHITECTURE.md#crate-de
 | `RUNIC_SPILLOVER_THRESHOLD` | Bytes above which a tool result gets spilled | `8192` |
 | `RUNIC_COMPACT_THRESHOLD` | Token count above which to compact | `100000` |
 | `RUNIC_SPILLOVER_RETENTION_DAYS` | Spillover files older than this are deleted at startup (`0` disables) | `14` |
-| `RUNIC_PERSIST` | Set to `1` to persist session events under `sessions/{tenant}/{session_id}/events.jsonl` | unset |
-| `RUNIC_TENANT` | Tenant id used when persistence is enabled | `default` |
-| `RUNIC_SERVE_ADDR` | Bind address for `runic serve` | `127.0.0.1:8080` |
+| `DATABASE_URL` | Postgres connection string; when set, runs persist to Postgres (else a file store under `~/.runic/sessions`) | unset |
+| `RUNIC_DATA_DIR` | Root for per-user memory (`{dir}/{user_id}/memory/…`) | `<workspace>/runic-data` |
+| `RUNIC_ADDR` | Bind address for the HTTP server binary | `127.0.0.1:8920` |
 
 ## Serving over HTTP
 
 ```sh
-RUNIC_PERSIST=1 runic serve         # bind 127.0.0.1:8080
+cargo run -p runic                  # binds 127.0.0.1:8920 (override with RUNIC_ADDR)
 ```
 
 The server exposes threads (== sessions) and SSE-streamed runs; the
 tenant comes from the `X-Runic-Tenant` header (defaults to `default`).
+Per-run context (identity, web opt-in, a provider override) rides in the
+request body's `context` object — see [docs/extending.md](./docs/extending.md#per-run-context-runcontext).
 
 ```sh
-curl -XPOST localhost:8080/threads -H 'x-runic-tenant: alice' -d '{"thread_id":"t1"}'
+curl -XPOST localhost:8920/threads -H 'x-runic-tenant: alice' -d '{"thread_id":"t1"}'
 
-# Stream a run. Body is either a text shorthand or full content blocks:
-curl -N -XPOST localhost:8080/threads/t1/runs/stream \
-  -H 'x-runic-tenant: alice' -d '{"message":"hi"}'
-curl -N -XPOST localhost:8080/threads/t1/runs/stream -H 'x-runic-tenant: alice' \
-  -d '{"content":[{"type":"text","text":"describe this"},
-                  {"type":"blob","id":"<sha256>","mime":"image/png","size":1234}]}'
+# Stream a run. `context` is an open map the server interprets (model never sees it):
+curl -N -XPOST localhost:8920/threads/t1/runs/stream -H 'x-runic-tenant: alice' \
+  -d '{"message":"hi","context":{"user_id":"u1","provider":"haiku"}}'
 
 # Resume a run from where a dropped connection left off:
-curl -N localhost:8080/threads/t1/runs/<run_id>/stream -H 'last-event-id: 42'
+curl -N localhost:8920/threads/t1/runs/<run_id>/stream -H 'last-event-id: 42'
 ```
 
-With `RUNIC_PERSIST=1`, a thread that goes cold (server restart, eviction)
-is rebuilt from its persisted events on the next request — full history
-intact. A client disconnect mid-run never bricks the thread: the run
-finishes server-side and the agent returns to the pool.
+Runs persist automatically (Postgres when `DATABASE_URL` is set, else a
+file store). A thread that goes cold (server restart, eviction) is rebuilt
+from its persisted events on the next request — full history intact. A
+client disconnect mid-run never bricks the thread: the run finishes
+server-side and the agent returns to the pool. The `runic-web` Leptos
+console (`cd crates/runic-web && trunk serve`) is a richer alternative to
+curl.
 
 ## What's not built yet
 

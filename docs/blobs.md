@@ -180,28 +180,20 @@ Same pattern as `tower::Layer` or our `ContextEngine` decorators.
 
 ## Binary integration
 
-The reference REPL wraps the provider in `BlobMaterializingProvider`
-automatically. By default it uses tenant `"default"`; override with:
+Wrap the provider in `BlobMaterializingProvider` so any
+`ContentBlock::Blob` in a message — crafted programmatically or received
+from a client — is resolved to bytes on the way to the provider, keyed by
+the run's tenant. The `with_blob` example shows this end to end:
 
 ```sh
-RUNIC_TENANT=alice cargo run --bin runic
+ANTHROPIC_API_KEY=sk-... cargo run --example with_blob -- path/to/image.png
 ```
-
-You'll see `[blobs] materializing blob references via tenant 'alice'`
-at startup. Any `ContentBlock::Blob` in messages — whether you crafted
-them programmatically or received them from a server endpoint — gets
-materialized on the way to the provider.
-
-The REPL itself doesn't currently support `/upload` (no REPL surgery
-yet — see roadmap). For now, programmatic usage via the example is the
-way to exercise blobs end-to-end.
 
 ## What's deferred
 
 | Deferred | When to revisit |
 |---|---|
-| `/upload` REPL slash command | When we build slash commands in general |
-| Multi-part HTTP upload endpoint | When we build serve mode |
+| Multi-part HTTP upload endpoint on the server | When clients need to send files directly |
 | Garbage collection of unreferenced blobs | When storage costs start mattering |
 | Provider-specific Files API offloading (Anthropic/Gemini) | When inline base64 hits provider size limits |
 | Vector indexing of blob contents | Different concern; would be a separate crate |

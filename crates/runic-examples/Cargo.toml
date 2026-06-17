@@ -49,3 +49,15 @@ path = "examples/with_mcp.rs"
 [[example]]
 name = "with_blob"
 path = "examples/with_blob.rs"
+
+[[example]]
+name = "with_run_context"
+path = "examples/with_run_context.rs"
+
+[[example]]
+name = "with_interceptor"
+path = "examples/with_interceptor.rs"
+
+[[example]]
+name = "with_call_limit"
+path = "examples/with_call_limit.rs"

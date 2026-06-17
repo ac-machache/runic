@@ -155,8 +155,7 @@ names/values are rejected at config-load time.
 ```
 
 - `shared: true` (default) — server is reusable across sessions via
-  `SharedMcpPool` (currently only relevant in serve mode; the REPL
-  doesn't use the pool yet)
+  `SharedMcpPool` (the HTTP server shares one pool across threads)
 - `shared: false` — server is per-session; never pooled. Use for
   stateful servers (browser drivers, IDE handles, etc.) where two
   sessions sharing one process would corrupt state.

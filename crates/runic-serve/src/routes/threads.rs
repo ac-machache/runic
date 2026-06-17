@@ -137,8 +137,8 @@ pub async fn thread_state(
     Path(thread_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-    if let Ok(slot) = agent_arc.try_lock() {
-        if let Some(agent) = slot.as_ref() {
+    if let Ok(slot) = agent_arc.try_lock()
+        && let Some(agent) = slot.as_ref() {
             let base_system_prompt = agent.state().system_prompt.clone();
             let messages = agent.state().messages_for_provider();
             let event_count = agent.state().events.len();
@@ -170,7 +170,6 @@ pub async fn thread_state(
                 "run_count": run_count,
             })));
         }
-    }
     // Busy (run in progress) or empty slot — reconstruct messages from store.
     let messages = runic_sessions::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
         .await

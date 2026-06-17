@@ -27,7 +27,7 @@ pub struct FileLock {
 pub async fn acquire(data_path: PathBuf) -> std::io::Result<Option<FileLock>> {
     tokio::task::spawn_blocking(move || acquire_blocking(&data_path))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }
 
 fn lock_path_for(data_path: &Path) -> PathBuf {

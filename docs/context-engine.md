@@ -160,6 +160,7 @@ pub struct TurnContext<'a> {
     pub messages: &'a [Message],
     pub run_id: &'a str,
     pub turn: u32,
+    pub config: &'a serde_json::Map<String, serde_json::Value>,
 }
 ```
 
@@ -169,9 +170,31 @@ pub struct TurnContext<'a> {
   turn. Layers can scan them for context-aware rendering.
 - `run_id`: stable for the duration of one `Agent::run` call.
 - `turn`: monotonically increasing within a run.
+- `config`: the **per-run config map** for this run (see below). Empty
+  on runs started without a `RunContext`.
 
 `maybe_compact` ALSO gets `&mut Vec<Message>` (the actual list, not a
 snapshot) so it can mutate.
+
+### Per-run config
+
+`config` is the open map set by [`RunContext`](./extending.md#per-run-context-runcontext)
+for the current run — request-scoped values like `user_id`,
+`allow_web_search`, a tenant or locale. It lets a layer personalize the
+prompt without a typed schema, and without baking request data into the
+pooled agent. It's overwritten every run, so it never leaks.
+
+```rust
+async fn render(&self, ctx: &TurnContext<'_>) -> Option<String> {
+    // Render this layer only for runs that carry a user_id.
+    let user = ctx.config.get("user_id").and_then(|v| v.as_str())?;
+    Some(format!("You are assisting user `{user}`."))
+}
+```
+
+The same map is reachable from tools (`ctx.config(key)`) and hooks
+(`state.config(key)`). Runnable example: `cargo run --example
+with_run_context`.
 
 ## AmbientNote
 

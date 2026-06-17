@@ -357,11 +357,10 @@ impl StreamState {
         let mut out: Vec<StreamEvent> = Vec::new();
 
         for choice in chunk.choices {
-            if let Some(text) = choice.delta.content {
-                if !text.is_empty() {
+            if let Some(text) = choice.delta.content
+                && !text.is_empty() {
                     out.push(StreamEvent::TextDelta(text));
                 }
-            }
 
             for tc in choice.delta.tool_calls {
                 // A new index → close the previous call, open this one.
@@ -378,13 +377,11 @@ impl StreamState {
                     out.push(StreamEvent::ToolUseStart { id, name });
                     self.open_tool = Some(tc.index);
                 }
-                if let Some(func) = tc.function {
-                    if let Some(args) = func.arguments {
-                        if !args.is_empty() {
+                if let Some(func) = tc.function
+                    && let Some(args) = func.arguments
+                        && !args.is_empty() {
                             out.push(StreamEvent::ToolInputDelta(args));
                         }
-                    }
-                }
             }
 
             if let Some(reason) = choice.finish_reason {

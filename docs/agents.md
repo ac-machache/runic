@@ -81,11 +81,31 @@ for md_agent in registry.list() {
 }
 ```
 
-`make_subagent_tool` takes an `Arc<dyn Provider>` because sub-agents
-need a provider to run. By default, sub-agents use the SAME provider as
-the parent. If you want sub-agents to use a different provider (e.g.
-Haiku for cheap exploration, Opus for the parent), construct multiple
-providers and pass the appropriate one.
+`make_subagent_tool` takes just an `Arc<dyn Provider>` — the minimal case
+(textual prompt, no tools/skills). Sub-agents run on whatever provider
+you pass, so give a child a cheaper model than the parent by passing a
+different one.
+
+For scoped tools/skills, a persister, or cross-cutting hooks, use
+`make_subagent_tool_with_context`, which takes a single `SubagentSetup`:
+
+```rust
+use runic_agents::SubagentSetup;
+use runic_agent_core::CallLimitHook;
+
+let tool = md_agent.make_subagent_tool_with_context(SubagentSetup {
+    provider: cheap_provider.clone(),     // child's model
+    parent_pool: pool.clone(),            // child's allowed_tools resolve against this
+    parent_skills: skills.clone(),        // scoped to the child's `skills:` list
+    storage: backend.clone(),             // filesystem / skill tools bind here
+    skills_root: "skills",
+    persister: None,                      // Some(fn) to persist the child's events
+    hooks: vec![Arc::new(CallLimitHook::default().limit("search", 3))],
+});
+```
+
+`hooks` are installed on the child agent, so a cross-cutting cap (or any
+`Hook`) applies inside sub-agents too — each caps its own run.
 
 ## Sub-agent from a plugin
 

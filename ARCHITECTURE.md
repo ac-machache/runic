@@ -6,8 +6,9 @@ fit together, and how a single turn flows through the system.
 ## Design principles
 
 1. **Headless library first.** No TUI, no CLI, no UI in the core. The
-   `runic` binary is a sample REPL; build your own surface on top of the
-   library.
+   `runic` binary is one reference surface — an HTTP server (the coral
+   "Maia" agent) driven by the `runic-web` Leptos console; build your own
+   surface on top of the library.
 
 2. **Traits, not enums, for cross-cutting concerns.** Storage, providers,
    transports, context engines, tools — all are traits with multiple
@@ -63,9 +64,9 @@ fit together, and how a single turn flows through the system.
         │                            │              │              │                     │
 ┌───────▼──────┐  ┌─────────▼──┐  ┌──▼────────┐  ┌─▼──────────┐  ┌▼──────────────┐
 │ runic-skills │  │ runic-agents │  │ runic-mcp │  │ runic-     │  │ runic         │
-│ (SKILL.md +  │  │ (AGENT.md +  │  │ (stdio +  │  │  plugins   │  │  (REPL binary │
-│  registry +  │  │  registry +  │  │  http     │  │ (bundles)  │  │   that wires  │
-│  layer +tool)│  │  conversion) │  │  client)  │  │            │  │   everything) │
+│ (SKILL.md +  │  │ (AGENT.md +  │  │ (stdio +  │  │  plugins   │  │  (HTTP server │
+│  registry +  │  │  registry +  │  │  http     │  │ (bundles)  │  │   = the Maia  │
+│  layer +tool)│  │  conversion) │  │  client)  │  │            │  │   agent)      │
 └──────────────┘  └──────────────┘  └───────────┘  └────────────┘  └───────────────┘
 ```
 
@@ -79,10 +80,15 @@ Rules baked into the DAG:
 
 ## A single turn, end to end
 
-When you type a message into the REPL:
+When a request arrives (an HTTP `POST /threads/{id}/runs/stream`, or a
+direct `agent.run_with(input, run_ctx)` call):
 
 ```
-1. User input → agent.run_streaming("text")
+0. Per-run context: the request body's `context` map + provider override
+   become a RunContext; `agent.run_with` installs it on AgentState.config
+   for this run (overwritten each run, so it never leaks) and swaps the
+   provider if one was supplied.
+1. User input → agent.run_streaming_message_with(msg, run_ctx)
 2. ContextEngine::process_user_input(msg)
    ├─ Inner engines first, then outer wrappers
    └─ Returns a (possibly rewritten) Message that goes into state
@@ -287,27 +293,39 @@ The provider message list is **derived** from this event log via
 rewrites history — it replaces the accumulated `Message` events with a
 single curated set.
 
+## Built since the early roadmap
+
+These were once "not built" and now are:
+
+- **Persistence** — `SessionStore` with file + Postgres backends;
+  `spawn_persister` writes the event log, threads replay on restart. See
+  [docs/persistence.md](./docs/persistence.md).
+- **Blob / file uploads** — content-addressed `BlobStore` + `BlobRef`
+  blocks + provider materialization. See [docs/blobs.md](./docs/blobs.md).
+- **Serve mode** — `runic-serve` (axum), SSE streaming, resume/replay,
+  HITL approval over the stream, plus the `runic-web` Leptos console.
+- **Slash commands** — `runic-commands` (`COMMAND.md` prompt templates),
+  expanded by a `CommandExpansionEngine` context layer.
+- **Per-run context** — `RunContext` (open config map + provider
+  override), tool interceptors, and `CallLimitHook`. See
+  [docs/extending.md](./docs/extending.md).
+
 ## What's not built
 
 Listed in the order I'd build them next:
 
-1. **Persistence** — write the `SessionEvent` log to disk via
-   `StorageBackend`; resume by replaying. Foundation already exists
-   (events are serializable; storage backend is abstracted).
+1. **Serve-mode hardening** — auth/token verification, run cancellation,
+   pool eviction policy, a persistent run queue.
 
-2. **Blob / file uploads** — multipart upload + `BlobRef` content
-   blocks + content-addressed storage under `blobs/`. Required for
-   serve mode if you want clients to send files.
+2. **Cross-session MemoryStore** — a first-class memory abstraction
+   distinct from `SessionStore` (today per-user memory is files under
+   `runic-data/{user_id}`).
 
-3. **Serve mode** — HTTP daemon, session identity, blob handling,
-   probably WebSocket for streaming. Biggest single chunk.
-
-4. **Slash commands** — `~/.runic/commands/{name}/COMMAND.md` files
-   that the REPL intercepts in user input. Smaller than the above;
-   completes the Claude-Code parity story.
-
-5. **More reminder sources** — file watch, MCP events, provider
+3. **More reminder sources** — file watch, MCP events, provider
    errors, compaction notifications. Each one is ~50-80 lines.
+
+4. **Per-run tool filtering** — hide tool defs (not just gate calls)
+   based on per-run context.
 
 ## Reading the code
 

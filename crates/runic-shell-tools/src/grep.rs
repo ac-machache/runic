@@ -30,17 +30,14 @@ pub const DEFAULT_MAX_WALK: usize = 5_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum GrepOutputMode {
+    #[default]
     FilesWithMatches,
     Content,
     Count,
 }
 
-impl Default for GrepOutputMode {
-    fn default() -> Self {
-        Self::FilesWithMatches
-    }
-}
 
 const DESCRIPTION: &str = "Search file contents under a storage subtree with a regex.\n\
 \n\

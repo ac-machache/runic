@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use runic_agents::{DispatchMode, FilesystemConfig, FilesystemMode, MdAgent};
+use runic_agents::{DispatchMode, FilesystemConfig, FilesystemMode, MdAgent, SubagentSetup};
 use runic_provider_core::Provider;
 use runic_skills::SkillRegistry;
 use runic_storage_backend::{LocalFsBackend, RootedBackend, StorageBackend};
@@ -97,27 +97,27 @@ pub fn register_subagents(
 
         match def.dispatch {
             DispatchMode::Sync => {
-                let tool = agent.make_subagent_tool_with_context(
+                let tool = agent.make_subagent_tool_with_context(SubagentSetup {
                     provider,
-                    pool,
-                    skills.clone(),
-                    backend,
-                    "skills",
-                    None,
-                    hooks.to_vec(),
-                );
+                    parent_pool: pool,
+                    parent_skills: skills.clone(),
+                    storage: backend,
+                    skills_root: "skills",
+                    persister: None,
+                    hooks: hooks.to_vec(),
+                });
                 out.register(Arc::new(tool));
             }
             DispatchMode::Async => {
-                let tool = agent.make_async_subagent_tool_with_context(
+                let tool = agent.make_async_subagent_tool_with_context(SubagentSetup {
                     provider,
-                    pool,
-                    skills.clone(),
-                    backend,
-                    "skills",
-                    None,
-                    hooks.to_vec(),
-                );
+                    parent_pool: pool,
+                    parent_skills: skills.clone(),
+                    storage: backend,
+                    skills_root: "skills",
+                    persister: None,
+                    hooks: hooks.to_vec(),
+                });
                 out.register_background(Arc::new(tool));
             }
         }

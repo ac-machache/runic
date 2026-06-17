@@ -132,39 +132,35 @@ let tenants = store.list_tenants().await?;
 Optional — backends that can't enumerate (some auth-context-driven
 schemes) return `StoreError::Unsupported`.
 
-## Adding your own backend
+## Built-in backends
 
-Implement the trait. Example skeleton for Postgres:
+Two ship in `runic-sessions`:
+
+- **`FileSessionStore`** — appends to
+  `sessions/{tenant}/{session_id}/events.jsonl` over any `StorageBackend`.
+  Zero infra; the default for local runs.
+- **`PostgresSessionStore`** — behind the `postgres` feature. One
+  `session_events` table keyed by `(tenant, session_id)` with a `seq`
+  column for atomic per-session ordering. Connect with
+  `PostgresSessionStore::connect(&database_url).await?` (creates the
+  schema if absent).
+
+The reference server picks between them at boot: **Postgres when
+`DATABASE_URL` is set, else the file store**.
 
 ```rust
-pub struct PostgresSessionStore {
-    pool: PgPool,
-}
-
-#[async_trait]
-impl SessionStore for PostgresSessionStore {
-    async fn append(&self, tenant: &str, session_id: &str, event: &SessionEvent)
-        -> Result<u64, StoreError>
-    {
-        let payload = serde_json::to_value(event)?;
-        let row = sqlx::query!(
-            "INSERT INTO session_events (tenant, session_id, event)
-             VALUES ($1, $2, $3)
-             RETURNING seq",
-            tenant, session_id, payload
-        )
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| StoreError::Storage(e.to_string()))?;
-        Ok(row.seq as u64)
-    }
-
-    // ... read, list_sessions, etc.
-}
+let store: Arc<dyn SessionStore> = match std::env::var("DATABASE_URL") {
+    Ok(url) => Arc::new(PostgresSessionStore::connect(&url).await?),
+    Err(_)  => Arc::new(FileSessionStore::new(fs_backend)),
+};
 ```
 
-The Postgres table would have an `seq SERIAL` column to make ordering
-atomic and per-session sequencing trivial.
+## Adding your own backend
+
+Implement the four-method `SessionStore` trait (append / read /
+list_sessions / delete) over whatever store you like — Redis, S3, a
+managed log. `PostgresSessionStore` (`crates/runic-sessions/src/postgres.rs`)
+is the reference for a real database backend.
 
 ## Composability: store decorators
 
@@ -209,36 +205,27 @@ let store: Arc<dyn SessionStore> = Arc::new(CachingSessionStore::new(store, 1024
 Same pattern as Tower middleware in the HTTP world, or `ContextEngine`
 decorators in this crate.
 
-## Binary integration
+## Binary / server integration
 
-The reference REPL gains opt-in persistence behind an env var:
+The reference HTTP server (`cargo run -p runic`) persists every run with
+no flag: it picks Postgres when `DATABASE_URL` is set, else the file
+store under `~/.runic/sessions`. `runic-serve`'s `ThreadPool` spawns a
+`spawn_persister` once per agent — it subscribes to the agent's event
+broadcast and appends each `SessionEvent` to the store keyed by
+`(tenant, thread)`. A thread that goes cold is rebuilt from its persisted
+events on the next request.
 
-```sh
-RUNIC_PERSIST=1 cargo run --bin runic
-# Default tenant is "default". Override with:
-RUNIC_PERSIST=1 RUNIC_TENANT=alice cargo run --bin runic
-```
-
-When enabled, every event the agent emits during the session is written
-to `~/.runic/sessions/{tenant}/{session_id}/events.jsonl`. You can
-`cat`/`jq` the file mid-session to see live activity.
-
-## Server-mode shape (future)
-
-Persistence is the foundation server mode is built on:
+`runic-serve` already wraps these `SessionStore` primitives as HTTP:
 
 ```
-HTTP/WebSocket server (future)
-  - POST   /users/:id/threads               ← start new thread
-  - GET    /users/:id/threads               ← list_sessions(user_id)
-  - GET    /users/:id/threads/:tid/events   ← store.read(user_id, tid)
-  - POST   /users/:id/threads/:tid/messages ← spawn agent + persister
-  - DELETE /users/:id/threads/:tid          ← store.delete_session(user_id, tid)
+- POST   /threads                          ← create thread
+- GET    /threads                          ← list_sessions(tenant)
+- GET    /threads/:tid/events              ← store.read(tenant, tid)
+- POST   /threads/:tid/runs/stream         ← spawn run + persister (SSE)
+- DELETE /threads/:tid                     ← store.delete_session(tenant, tid)
 ```
 
-Each HTTP handler is a thin wrapper around the SessionStore primitives
-plus the agent lifecycle. Server mode is a separate crate (when built),
-not a concern of `runic-sessions`.
+The tenant comes from the `X-Runic-Tenant` header.
 
 ## What's deferred
 

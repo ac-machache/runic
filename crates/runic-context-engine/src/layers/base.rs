@@ -45,6 +45,7 @@ mod tests {
             messages: &[] as &[Message],
             run_id: "r1",
             turn: 0,
+            config: crate::empty_config(),
         }
     }
 

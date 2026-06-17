@@ -477,11 +477,35 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<serde_json::Value>
             // metadata is client-facing only — deliberately NOT copied into
             // the API payload (no token cost, invisible to the model).
             metadata: _,
+            images,
         } => {
+            // Text-only results send `content` as a plain string. When the
+            // tool returned images, `content` becomes an array of blocks —
+            // the text first, then each image — which is how Anthropic lets
+            // a tool_result carry pictures the model can actually see.
+            let content_field = if images.is_empty() {
+                serde_json::Value::String(content.clone())
+            } else {
+                let mut blocks = vec![serde_json::json!({
+                    "type": "text",
+                    "text": content,
+                })];
+                for img in images {
+                    blocks.push(serde_json::json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.media_type,
+                            "data": img.data,
+                        },
+                    }));
+                }
+                serde_json::Value::Array(blocks)
+            };
             let mut obj = serde_json::json!({
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": content,
+                "content": content_field,
             });
             if let Some(err) = is_error {
                 obj["is_error"] = serde_json::Value::Bool(*err);
@@ -545,6 +569,35 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_with_images_encodes_content_as_block_array() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_1".into(),
+                content: "Image: doc/p1.png".into(),
+                is_error: None,
+                metadata: None,
+                images: vec![runic_message_types::ToolResultImage {
+                    media_type: "image/png".into(),
+                    data: "QUJD".into(),
+                }],
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let json = message_to_anthropic(&msg).unwrap();
+        let tr = &json["content"][0];
+        assert_eq!(tr["type"], "tool_result");
+        // content is now an array: text block first, image block second.
+        assert_eq!(tr["content"][0]["type"], "text");
+        assert_eq!(tr["content"][0]["text"], "Image: doc/p1.png");
+        assert_eq!(tr["content"][1]["type"], "image");
+        assert_eq!(tr["content"][1]["source"]["type"], "base64");
+        assert_eq!(tr["content"][1]["source"]["media_type"], "image/png");
+        assert_eq!(tr["content"][1]["source"]["data"], "QUJD");
+    }
+
+    #[test]
     fn tool_result_metadata_never_reaches_the_api_payload() {
         let msg = Message {
             role: Role::User,
@@ -553,6 +606,7 @@ mod tests {
                 content: "3 results".into(),
                 is_error: None,
                 metadata: Some(serde_json::json!({ "sources": ["https://a.example"] })),
+                images: Vec::new(),
             }],
             timestamp: None,
             tool_duration_ms: None,

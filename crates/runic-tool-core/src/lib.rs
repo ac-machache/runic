@@ -21,6 +21,6 @@ pub use background::{
     BackgroundStatusTool, BackgroundTool, TaskStatusView,
 };
 pub use tool::{
-    HitlAdapter, PlainAdapter, Tool, ToolContext, ToolDispatch, ToolDispatchError, ToolRegistry,
-    ToolResult,
+    HitlAdapter, InterceptedTool, PlainAdapter, Tool, ToolContext, ToolDispatch,
+    ToolDispatchError, ToolInterceptor, ToolRegistry, ToolResult,
 };

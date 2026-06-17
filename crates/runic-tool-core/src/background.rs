@@ -50,6 +50,9 @@ impl<T: BackgroundTool + 'static> ToolDispatch for BackgroundAdapter<T> {
     fn input_schema(&self) -> serde_json::Value {
         self.0.input_schema()
     }
+    fn is_background(&self) -> bool {
+        true
+    }
     async fn dispatch(&self, call: &ToolCall, ctx: &ToolContext) -> ToolResult {
         let Some(manager) = ctx.get::<BackgroundManager>() else {
             return ToolResult::error(format!(
@@ -68,9 +71,12 @@ impl<T: BackgroundTool + 'static> ToolDispatch for BackgroundAdapter<T> {
         });
 
         ToolResult::ok(format!(
-            "task started: id={task_id}, tool={tool_name}\n\
-             Use `background_status` with this id to check progress, or \
-             `background_cancel` to abort."
+            "Started '{tool_name}' in the background (id={task_id}) — it runs \
+             WITHOUT blocking you. Do other useful work now: reply to the user, \
+             call other tools, or start other tasks. Fetch the result with \
+             `background_status` using this id when you need it; if it's still \
+             running, move on and check back later rather than polling in a loop. \
+             `background_cancel` aborts it."
         ))
     }
 }
@@ -275,7 +281,9 @@ impl Tool for BackgroundStatusTool {
         "background_status"
     }
     fn description(&self) -> &str {
-        "Check on a background task. Returns running / done / cancelled plus the result when ready."
+        "Fetch a background task's result by id — returns running / done / cancelled \
+         (the result comes with 'done'). If it's still running, don't loop on it: do \
+         other work and check back later."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({

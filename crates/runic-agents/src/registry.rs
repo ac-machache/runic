@@ -128,6 +128,7 @@ mod tests {
                 name: name.into(),
                 description: description.into(),
                 max_turns: None,
+                provider: None,
                 allowed_tools: Vec::new(),
                 skills: Vec::new(),
                 filesystem: crate::FilesystemConfig::default(),

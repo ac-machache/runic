@@ -132,6 +132,14 @@ pub enum ContentBlock {
         /// provider API payloads (adapters copy fields explicitly).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        /// Inline images the tool wants the MODEL to see (e.g. a wiki
+        /// diagram fetched by `get_image`). Unlike `metadata`, these DO
+        /// reach the provider: adapters fold them into the tool_result on
+        /// the wire (Anthropic image blocks in the result `content` array;
+        /// Gemini sibling `inlineData` parts). Empty for the common
+        /// text-only result.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolResultImage>,
     },
     Image {
         media_type: String,
@@ -146,6 +154,18 @@ pub enum ContentBlock {
     /// Use this for any user-uploaded file — images, PDFs, audio, video,
     /// CSV uploads — anything that's too big or persistent to inline.
     Blob(BlobRef),
+}
+
+/// A base64-encoded image a tool returns for the model to look at,
+/// carried inside a [`ContentBlock::ToolResult`]'s `images` field. The
+/// data is inlined (not a [`BlobRef`]) because tool results are produced
+/// mid-loop and consumed immediately — there's no upload/dedup story.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ToolResultImage {
+    /// MIME type, e.g. "image/png", "image/jpeg".
+    pub media_type: String,
+    /// Base64-encoded image bytes (no data-URI prefix).
+    pub data: String,
 }
 
 /// A reference to a blob stored in a [`crate::BlobStore`]-style backend.
@@ -230,6 +250,7 @@ impl Message {
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
                 metadata: None,
+                images: Vec::new(),
             }],
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms,
@@ -623,6 +644,7 @@ mod tests {
             content: "3 results".into(),
             is_error: None,
             metadata: Some(serde_json::json!({ "sources": [{ "url": "https://a.example" }] })),
+            images: Vec::new(),
         };
         let json = serde_json::to_string(&block).unwrap();
         assert!(json.contains("\"metadata\""));
@@ -645,6 +667,7 @@ mod tests {
             content: "ok".into(),
             is_error: None,
             metadata: None,
+            images: Vec::new(),
         };
         let json = serde_json::to_string(&block).unwrap();
         assert!(!json.contains("metadata"), "None must not serialize: {json}");

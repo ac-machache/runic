@@ -288,6 +288,7 @@ mod tests {
             messages: &[],
             run_id: "test-run",
             turn: 0,
+            config: crate::empty_config(),
         }
     }
 
@@ -299,6 +300,7 @@ mod tests {
                 content: content.into(),
                 is_error: None,
                 metadata: None,
+                images: Vec::new(),
             }],
             timestamp: None,
             tool_duration_ms: None,

@@ -37,8 +37,8 @@ pub struct ServeConfig {
 /// this crate just produces the route surface.
 pub fn router(config: ServeConfig) -> Router {
     let state = AppState {
-        session_store: config.session_store,
-        pool: Arc::new(ThreadPool::new(config.agent_factory)),
+        session_store: config.session_store.clone(),
+        pool: Arc::new(ThreadPool::new(config.agent_factory, config.session_store)),
         approval_hub: config.approval_hub,
     };
 

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use runic_agent_core::Agent;
+use runic_sessions::{spawn_persister, SessionStore};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::factory::BoxedAgentFactory;
@@ -33,14 +34,27 @@ pub struct ThreadPool {
     /// only first-insert takes the write lock briefly.
     agents: RwLock<HashMap<ThreadKey, Arc<Mutex<Option<Agent>>>>>,
     factory: BoxedAgentFactory,
+    /// Where each agent's event stream gets persisted. A persister is
+    /// spawned ONCE per agent (at build), subscribing to the agent's
+    /// long-lived broadcast — so events from every run on the thread land
+    /// in the store without double-writing.
+    session_store: Arc<dyn SessionStore>,
 }
 
 impl ThreadPool {
-    pub fn new(factory: BoxedAgentFactory) -> Self {
+    pub fn new(factory: BoxedAgentFactory, session_store: Arc<dyn SessionStore>) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
             factory,
+            session_store,
         }
+    }
+
+    /// The agent factory backing this pool. The runs handler uses it to
+    /// build a per-request [`runic_agent_core::RunContext`] via
+    /// [`crate::AgentFactory::build_run_context`].
+    pub fn factory(&self) -> &BoxedAgentFactory {
+        &self.factory
     }
 
     /// Get (or lazily build) the Agent for this thread. The caller
@@ -78,6 +92,18 @@ impl ThreadPool {
         // and "the session under which events get persisted" —
         // sessions/<tenant>/<thread_id>/events.jsonl.
         let agent = self.factory.build(tenant, thread_id).await;
+
+        // Persist this agent's events for the life of the thread. Subscribe
+        // BEFORE the first run so the opening RunStart is captured; one
+        // persister per agent (not per run) so events aren't double-written.
+        let rx = agent.subscribe_events();
+        spawn_persister(
+            rx,
+            self.session_store.clone(),
+            tenant.to_string(),
+            thread_id.to_string(),
+        );
+
         let arc = Arc::new(Mutex::new(Some(agent)));
         map.insert(key, arc.clone());
         arc

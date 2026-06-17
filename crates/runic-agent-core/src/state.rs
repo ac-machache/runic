@@ -116,6 +116,15 @@ pub struct AgentState {
     #[serde(skip, default)]
     pub runtime: RunTimeContext,
 
+    /// Open per-run config map for the CURRENT run (user_id, org_id,
+    /// allow_web_search, …). Set at the start of every run from the run's
+    /// `RunContext` and overwritten each run, so it never leaks across runs.
+    /// Read by hooks via [`Self::config`], by tools via the `ToolContext`
+    /// snapshot, and by context layers via `TurnContext.config`. Not
+    /// persisted — it's request-scoped, not conversation state.
+    #[serde(skip, default)]
+    pub config: serde_json::Map<String, serde_json::Value>,
+
     /// Broadcast sender for `SessionEvent`s. Populated by `AgentBuilder`
     /// at construction. `push_event` fans events out to every subscriber
     /// in addition to appending them to `events`.
@@ -134,8 +143,16 @@ impl AgentState {
             system_prompt: system_prompt.into(),
             events: Vec::new(),
             runtime: RunTimeContext::default(),
+            config: serde_json::Map::new(),
             events_tx: None,
         }
+    }
+
+    /// Read a per-run config value (set from this run's `RunContext`). Used
+    /// by hooks to reach request-scoped values like `user_id` / `org_id` /
+    /// `allow_web_search`.
+    pub fn config(&self, key: &str) -> Option<&serde_json::Value> {
+        self.config.get(key)
     }
 
     /// Install a broadcast sender so `push_event` will fan out to
@@ -335,6 +352,8 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 usage: TokenUsage::default(),
                 structured_result: None,
+                model: None,
+                provider: None,
             },
             at: Utc::now(),
         };
@@ -479,6 +498,8 @@ mod tests {
                 stop_reason: None,
                 usage: TokenUsage::default(),
                 structured_result: None,
+                model: None,
+                provider: None,
             },
             at: Utc::now(),
         });
@@ -506,6 +527,8 @@ mod tests {
                 stop_reason: None,
                 usage: TokenUsage::default(),
                 structured_result: None,
+                model: None,
+                provider: None,
             },
             at: Utc::now(),
         });

@@ -1,9 +1,14 @@
 //! runic dev console — a Leptos CSR app for driving `runic serve`.
 //!
-//! Three panes: thread list (left), chat transcript with streaming text +
-//! tool-call cards (center), live state/event inspector (right). Talks to
-//! the server over HTTP + SSE; events are parsed leniently as JSON so the
-//! UI never hard-couples to the server's internal `WireEvent` type.
+//! Layout: a collapsible sidebar (connection + threads), then a chat pane and
+//! an inspector pane split 50/50 by a draggable splitter. The inspector has
+//! two tabs: **Events** (the run/turn-clustered activity tree — NOT a raw
+//! token firehose) and **State** (assembled prompt, tools, messages). Talks to
+//! the server over HTTP + SSE; events are parsed leniently as JSON so the UI
+//! never hard-couples to the server's internal `WireEvent` type.
+//!
+//! Visual design ported from Claude Design (warm "paper" aesthetic, light +
+//! dark themes via a `.dark` class on the root).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -13,10 +18,9 @@ mod api;
 use api::ApiClient;
 
 /// The actively-streaming tail. Tokens append here (one reactive text node)
-/// instead of mutating the `items` list, so per-token cost is O(1) DOM
-/// instead of re-rendering the whole transcript. On a boundary (a non-text
-/// event) or run end it flushes into `items` as a finalized, markdown-
-/// rendered message.
+/// instead of mutating the `items` list, so per-token cost is O(1) DOM. On a
+/// boundary (a non-text event) or run end it flushes into `items` as a
+/// finalized, markdown-rendered message.
 #[derive(Clone, Default, PartialEq)]
 struct LiveBuf {
     kind: LiveKind,
@@ -35,13 +39,9 @@ enum LiveKind {
 #[derive(Clone, Debug)]
 enum Item {
     User(String),
-    /// Assistant text, accumulated across `assistant_text_delta` events.
     Assistant(String),
-    /// Hidden reasoning, accumulated across `assistant_thinking_delta`.
     Thinking(String),
     Tool(ToolView),
-    /// Schema-valid structured output from the finish tool (pretty JSON).
-    Structured(String),
     Warning(String),
 }
 
@@ -53,7 +53,6 @@ struct ToolView {
     status: String,
     result: String,
     duration_ms: u64,
-    /// Client-facing grounding sources pulled from tool-result `metadata`.
     sources: Vec<Source>,
 }
 
@@ -63,20 +62,40 @@ struct Source {
     url: String,
 }
 
-/// A HITL tool waiting for the operator's decision. Only one is live at a
-/// time (HITL dispatch serializes), so the app holds a single `Option`.
-/// Field edits are written back into the `pending` signal by index, so we
-/// don't create per-field signals from the (owner-less) stream callback.
+/// A HITL tool waiting for the operator's decision.
 #[derive(Clone)]
 struct PendingApproval {
     call_id: String,
     tool_name: String,
     summary: String,
-    /// Full current input, used as the base when submitting; edited fields
-    /// are overlaid on top.
     current_input: serde_json::Value,
-    /// Editable `(name, value)` pairs, prefilled from `current_input`.
     fields: Vec<(String, String)>,
+}
+
+// ── Events tab clustering (Run → Turn → details) ─────────────────────────
+
+/// A run = one user message and the agent's answer to it. Holds the model
+/// turns that happened in between.
+#[derive(Clone, Default)]
+struct RunCluster {
+    id: String,
+    prompt: String,
+    running: bool,
+    ended: bool,
+    errored: bool,
+    turns: Vec<TurnCluster>,
+    stop_reason: Option<String>,
+    usage: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Default)]
+struct TurnCluster {
+    text: String,
+    thinking: String,
+    tools: Vec<ToolView>,
+    stop_reason: Option<String>,
+    tool_calls: u32,
+    closed: bool,
 }
 
 fn main() {
@@ -96,24 +115,30 @@ fn App() -> impl IntoView {
     let items = RwSignal::new(Vec::<Item>::new());
     let live = RwSignal::new(LiveBuf::default());
     let events = RwSignal::new(Vec::<Value>::new());
-    let usage = RwSignal::new(None::<(u64, u64)>); // (input, output)
+    let usage = RwSignal::new(None::<(u64, u64)>);
     let input = RwSignal::new(String::new());
     let streaming = RwSignal::new(false);
-    // Raw JSON schema text; when non-empty + valid, sent as output_schema.
     let output_schema = RwSignal::new(String::new());
+    let context_json = RwSignal::new(String::new());
     let pending = RwSignal::new(None::<PendingApproval>);
-    // Gate the card on presence only, so per-keystroke field edits (which
-    // update `pending`) don't rebuild the card and steal input focus.
     let has_pending = Memo::new(move |_| pending.get().is_some());
 
-    // Cancel: the active run's AbortController, so a stop button can abort
-    // the fetch stream.
     let abort = RwSignal::new(None::<web_sys::AbortController>);
-    // Right pane: "events" (live log) vs "state" (prompt + messages).
     let inspect_tab = RwSignal::new("events");
     let state_json = RwSignal::new(None::<Value>);
 
-    // Auto-scroll the transcript to the bottom as content arrives.
+    // ── chrome / UI state ──────────────────────────────────────────────
+    let dark = RwSignal::new(false);
+    let collapsed = RwSignal::new(false);
+    let config_open = RwSignal::new(false);
+    let split = RwSignal::new(50.0_f64); // chat % of the main area
+    let dragging = RwSignal::new(false);
+    let show_thinking = RwSignal::new(false);
+    let prompt_assembled = RwSignal::new(true); // state tab: assembled vs base
+    let main_ref = NodeRef::<leptos::html::Div>::new();
+    let splitter_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Auto-scroll the transcript as content arrives.
     let transcript_ref = NodeRef::<leptos::html::Div>::new();
     Effect::new(move |_| {
         items.track();
@@ -125,7 +150,6 @@ fn App() -> impl IntoView {
 
     let client = move || ApiClient::new(api_base.get_untracked(), tenant.get_untracked());
 
-    // Refresh the thread list from the server.
     let refresh_threads = move || {
         let c = client();
         spawn_local(async move {
@@ -136,7 +160,6 @@ fn App() -> impl IntoView {
         });
     };
 
-    // Load a thread's history into the transcript + inspector.
     let load_thread = move |id: String| {
         current.set(Some(id.clone()));
         items.set(Vec::new());
@@ -147,8 +170,6 @@ fn App() -> impl IntoView {
         spawn_local(async move {
             match c.thread_events(&id).await {
                 Ok(evs) => {
-                    // Persisted events are `{seq, event:{kind:"Message", …}}`
-                    // (NOT the live wire format), so reconstruct from those.
                     items.set(items_from_events(&evs));
                     events.set(evs);
                 }
@@ -177,7 +198,6 @@ fn App() -> impl IntoView {
         });
     };
 
-    // Send the composer text as a run and stream the reply.
     let send = move || {
         let text = input.get_untracked();
         if text.trim().is_empty() || streaming.get_untracked() {
@@ -188,7 +208,6 @@ fn App() -> impl IntoView {
             Some(id) => id,
             None => return,
         };
-        // Parse the schema box (if any). Bad JSON → warn and abort the send.
         let schema_text = output_schema.get_untracked();
         let schema_val: Option<Value> = if schema_text.trim().is_empty() {
             None
@@ -201,12 +220,27 @@ fn App() -> impl IntoView {
                 }
             }
         };
+        let context_text = context_json.get_untracked();
+        let context_val: Option<Value> = if context_text.trim().is_empty() {
+            None
+        } else {
+            match serde_json::from_str::<Value>(&context_text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    items.update(|its| its.push(Item::Warning(format!("invalid context JSON: {e}"))));
+                    return;
+                }
+            }
+        };
 
         input.set(String::new());
         items.update(|its| its.push(Item::User(text.clone())));
+        // The live SSE stream carries only agent deltas (no run_start / user
+        // message), so mark the run boundary + prompt ourselves for the
+        // Events clusterer.
+        events.update(|e| e.push(serde_json::json!({ "type": "run_begin", "prompt": text })));
         streaming.set(true);
 
-        // Fresh AbortController so the stop button can cancel this run.
         let controller = web_sys::AbortController::new().ok();
         let signal = controller.as_ref().map(|c| c.signal());
         abort.set(controller);
@@ -233,23 +267,16 @@ fn App() -> impl IntoView {
                             pending.set(Some(p));
                         }
                     }
-                    "structured_output" => {
-                        flush_live(live, items);
-                        let pretty = ev.get("result")
-                            .map(|r| serde_json::to_string_pretty(r).unwrap_or_default())
-                            .unwrap_or_default();
-                        items.update(|its| its.push(Item::Structured(pretty)));
-                    }
+                    // structured_output is intentionally not surfaced.
                     _ => {
                         flush_live(live, items);
                         items.update(|its| apply_event(its, &ev));
                     }
                 }
             };
-            let result = c.stream_run(&thread_id, &text, schema_val, signal.as_ref(), on_event).await;
+            let result = c.stream_run(&thread_id, &text, schema_val, context_val, signal.as_ref(), on_event).await;
             flush_live(live, items);
             if let Err(e) = result {
-                // An aborted fetch isn't an error worth surfacing.
                 if !e.to_lowercase().contains("abort") {
                     items.update(|its| its.push(Item::Warning(format!("stream error: {e}"))));
                 } else {
@@ -258,20 +285,16 @@ fn App() -> impl IntoView {
             }
             streaming.set(false);
             abort.set(None);
-            // The run is over; any unanswered approval is moot.
             pending.set(None);
         });
     };
 
-    // Stop the active run: aborts the fetch stream client-side. (The server
-    // run finishes its current turn; this just stops the UI waiting.)
     let stop = move || {
         if let Some(c) = abort.get_untracked() {
             c.abort();
         }
     };
 
-    // Fetch the full thread state (system prompt + messages) for the state tab.
     let fetch_state = move || {
         let Some(id) = current.get_untracked() else { return };
         let c = client();
@@ -283,247 +306,732 @@ fn App() -> impl IntoView {
         });
     };
 
-    // Initial population.
+    // ── splitter drag (pointer capture keeps events on the handle) ──────
+    let on_split_down = move |e: web_sys::PointerEvent| {
+        e.prevent_default();
+        dragging.set(true);
+        if let Some(el) = splitter_ref.get() {
+            let _ = el.set_pointer_capture(e.pointer_id());
+        }
+    };
+    let on_split_move = move |e: web_sys::PointerEvent| {
+        if !dragging.get_untracked() {
+            return;
+        }
+        if let Some(m) = main_ref.get_untracked() {
+            let rect = m.get_bounding_client_rect();
+            if rect.width() > 0.0 {
+                let pct = (e.client_x() as f64 - rect.left()) / rect.width() * 100.0;
+                split.set(pct.clamp(28.0, 72.0));
+            }
+        }
+    };
+    let on_split_up = move |_e: web_sys::PointerEvent| dragging.set(false);
+
     refresh_threads();
 
     view! {
-        <div class="app">
-            <aside class="threads">
-                <div class="brand">"⟡ runic"<span class="brand-sub">"dev console"</span></div>
-                <div class="conn">
-                    <label class="conn-label">"server"</label>
-                    <input class="mini" prop:value=move || api_base.get()
-                        on:input=move |e| api_base.set(event_target_value(&e)) placeholder="http://127.0.0.1:8920" />
-                    <label class="conn-label">"tenant"</label>
-                    <input class="mini" prop:value=move || tenant.get()
-                        on:input=move |e| tenant.set(event_target_value(&e)) placeholder="default" />
+        <div class="app" class:dark=move || dark.get()>
+
+            // ░░ SIDEBAR ░░
+            <aside class="sidebar" style:width=move || if collapsed.get() { "0px".to_string() } else { "264px".to_string() }>
+                <div class="sidebar-inner">
+                    <div class="brand">
+                        <div class="brand-l">
+                            <span class="brand-mark">"⟡"</span>
+                            <div>
+                                <div class="brand-name">"runic"</div>
+                                <div class="brand-sub">"dev console"</div>
+                            </div>
+                        </div>
+                        <button class="collapse-btn" title="Collapse sidebar" on:click=move |_| collapsed.set(true)>"«"</button>
+                    </div>
+
+                    <div class="conn">
+                        <div class="section-cap conn-cap">"Connection"</div>
+                        <label class="conn-label">"server URL"</label>
+                        <input class="conn-input" spellcheck="false" prop:value=move || api_base.get()
+                            on:input=move |e| api_base.set(event_target_value(&e)) />
+                        <div class="conn-label row"><span>"tenant"</span><span class="conn-hint">"X-Runic-Tenant"</span></div>
+                        <input class="conn-input" spellcheck="false" prop:value=move || tenant.get()
+                            on:input=move |e| tenant.set(event_target_value(&e)) />
+                        <div class="conn-status"><span class="status-dot"></span><span>"connected"</span></div>
+                    </div>
+
+                    <div class="threads-head">
+                        <span class="section-cap">"Threads"</span>
+                        <button class="icon-btn" title="Refresh" on:click=move |_| refresh_threads()>"⟳"</button>
+                    </div>
+                    <div class="newthread-wrap">
+                        <button class="newthread" on:click=move |_| new_thread()><span>"＋"</span>"New thread"</button>
+                    </div>
+
+                    <div class="thread-list">
+                        {move || threads.get().into_iter().map(|id| {
+                            let id_active = id.clone();
+                            let id_click = id.clone();
+                            let label = short_id(&id);
+                            view! {
+                                <div class="thread"
+                                    class:active=move || current.get().as_deref() == Some(id_active.as_str())
+                                    on:click=move |_| load_thread(id_click.clone())>
+                                    <span class="thread-accent"></span>
+                                    <div class="thread-row1">
+                                        <span class="thread-id">{label}</span>
+                                    </div>
+                                    <div class="thread-title untitled">"untitled"</div>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+
+                    <div class="theme-bar">
+                        <span class="theme-label">{move || if dark.get() { "Warm dark" } else { "Paper light" }}</span>
+                        <button class="theme-btn" on:click=move |_| dark.update(|d| *d = !*d)>
+                            {move || if dark.get() { "☀ Theme".to_string() } else { "☾ Theme".to_string() }}
+                        </button>
+                    </div>
                 </div>
-                <div class="threads-head">
-                    <span>"threads"</span>
-                    <button class="icon-btn" title="refresh" on:click=move |_| refresh_threads()>"⟳"</button>
-                </div>
-                <button class="newthread" on:click=move |_| new_thread()>"+ new thread"</button>
-                <ul>
-                    {move || threads.get().into_iter().map(|id| {
-                        let id2 = id.clone();
-                        let is_cur = move || current.get().as_deref() == Some(id2.as_str());
-                        let id3 = id.clone();
-                        let short = short_id(&id);
-                        view! {
-                            <li class:active=is_cur on:click=move |_| load_thread(id3.clone())>
-                                {short}
-                            </li>
-                        }
-                    }).collect_view()}
-                </ul>
             </aside>
 
-            <main class="chat">
-                <div class="pane-head">
-                    {move || current.get().map(|id| short_id(&id)).unwrap_or_else(|| "no thread selected".into())}
-                    {move || streaming.get().then(|| view! { <span class="spin">" ● streaming"</span> })}
-                </div>
-                <div class="transcript" node_ref=transcript_ref>
-                    {move || (items.get().is_empty() && live.get().text.is_empty()).then(|| {
-                        let msg = if current.get().is_some() {
-                            "Send a message to start the conversation."
-                        } else {
-                            "Create or select a thread to begin."
-                        };
-                        view! { <div class="empty">{msg}</div> }
-                    })}
-                    {move || items.get().into_iter().map(render_item).collect_view()}
-                    // Live streaming tail — plain text, updated per token.
-                    {move || {
-                        let lb = live.get();
-                        if lb.text.is_empty() {
-                            ().into_any()
-                        } else if matches!(lb.kind, LiveKind::Thinking) {
-                            view! { <div class="msg thinking-live">{lb.text}</div> }.into_any()
-                        } else {
+            // ░░ MAIN: chat | splitter | inspector ░░
+            <div class="main" node_ref=main_ref>
+
+                <section class="chat" style:flex=move || format!("1 1 {}%", split.get())>
+                    <div class="topbar">
+                        {move || collapsed.get().then(|| view! {
+                            <button class="rail-btn" title="Open sidebar" on:click=move |_| collapsed.set(false)>"»"</button>
+                        })}
+                        <span class="topbar-title">"Chat"</span>
+                        {move || current.get().map(|id| view! { <span class="thread-chip">{short_id(&id)}</span> })}
+                        {move || streaming.get().then(|| view! {
+                            <span class="stream-ind"><span class="stream-dot"></span>"streaming"</span>
+                        })}
+                    </div>
+
+                    <div class="transcript" node_ref=transcript_ref>
+                        <div class="transcript-inner">
+                            {move || (items.get().is_empty() && live.get().text.is_empty()).then(|| {
+                                let msg = if current.get().is_some() {
+                                    "Send a message to start the conversation."
+                                } else {
+                                    "Create or select a thread to begin."
+                                };
+                                view! { <div class="empty">{msg}</div> }
+                            })}
+                            {move || items.get().into_iter().map(render_item).collect_view()}
+                            {move || {
+                                let lb = live.get();
+                                if lb.text.is_empty() {
+                                    ().into_any()
+                                } else if matches!(lb.kind, LiveKind::Thinking) {
+                                    view! {
+                                        <div class="msg-assistant">
+                                            <div class="avatar">"⟡"</div>
+                                            <div class="assistant-body"><div class="thinking-body">{lb.text}</div></div>
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <div class="msg-assistant">
+                                            <div class="avatar">"⟡"</div>
+                                            <div class="assistant-body">
+                                                <div class="prose"><p style="margin:0">{lb.text}<span class="caret"></span></p></div>
+                                            </div>
+                                        </div>
+                                    }.into_any()
+                                }
+                            }}
+                        </div>
+                    </div>
+
+                    // approval card (HITL)
+                    {move || has_pending.get().then(|| {
+                        let p = pending.get_untracked().expect("has_pending implies Some");
+                        let field_views = p.fields.iter().enumerate().map(|(i, (name, val))| {
                             view! {
-                                <div class="msg assistant">
-                                    <div class="avatar bot-av">"ai"</div>
-                                    <div class="body live">{lb.text}</div>
-                                </div>
-                            }.into_any()
-                        }
-                    }}
-                </div>
-                {move || has_pending.get().then(|| {
-                    let p = pending.get_untracked().expect("has_pending implies Some");
-                    let field_views = p.fields.iter().enumerate().map(|(i, (name, val))| {
-                        view! {
-                            <label class="apv-field">
-                                <span>{name.clone()}</span>
-                                <input value=val.clone()
+                                <label class="apv-label">{name.clone()}</label>
+                                <input class="apv-input" value=val.clone()
                                     on:input=move |e| pending.update(|opt| {
                                         if let Some(p) = opt {
                                             if let Some(f) = p.fields.get_mut(i) { f.1 = event_target_value(&e); }
                                         }
                                     }) />
-                            </label>
-                        }
-                    }).collect_view();
-                    let approve = move |_| {
-                        let Some(p) = pending.get_untracked() else { return };
-                        let mut fi = p.current_input.clone();
-                        if !fi.is_object() { fi = serde_json::json!({}); }
-                        if let Some(obj) = fi.as_object_mut() {
-                            for (name, val) in &p.fields { obj.insert(name.clone(), Value::String(val.clone())); }
-                        }
-                        let decision = serde_json::json!({ "decision": "submit", "final_input": fi });
-                        let c = client();
-                        let thread = current.get_untracked().unwrap_or_default();
-                        let call_id = p.call_id.clone();
-                        pending.set(None);
-                        spawn_local(async move { let _ = c.submit_approval(&thread, &call_id, decision).await; });
-                    };
-                    let cancel = move |_| {
-                        let Some(p) = pending.get_untracked() else { return };
-                        let decision = serde_json::json!({ "decision": "cancel", "reason": "declined by operator" });
-                        let c = client();
-                        let thread = current.get_untracked().unwrap_or_default();
-                        pending.set(None);
-                        spawn_local(async move { let _ = c.submit_approval(&thread, &p.call_id, decision).await; });
-                    };
-                    view! {
-                        <div class="approval">
-                            <div class="apv-head">"⚠ approval required · " {p.tool_name.clone()}</div>
-                            <div class="apv-summary">{p.summary.clone()}</div>
-                            {field_views}
-                            <div class="apv-actions">
-                                <button class="apv-approve" on:click=approve>"approve"</button>
-                                <button class="apv-cancel" on:click=cancel>"cancel"</button>
+                            }
+                        }).collect_view();
+                        let approve = move |_| {
+                            let Some(p) = pending.get_untracked() else { return };
+                            let mut fi = p.current_input.clone();
+                            if !fi.is_object() { fi = serde_json::json!({}); }
+                            if let Some(obj) = fi.as_object_mut() {
+                                for (name, val) in &p.fields { obj.insert(name.clone(), Value::String(val.clone())); }
+                            }
+                            let decision = serde_json::json!({ "decision": "submit", "final_input": fi });
+                            let c = client();
+                            let thread = current.get_untracked().unwrap_or_default();
+                            let call_id = p.call_id.clone();
+                            pending.set(None);
+                            spawn_local(async move { let _ = c.submit_approval(&thread, &call_id, decision).await; });
+                        };
+                        let cancel = move |_| {
+                            let Some(p) = pending.get_untracked() else { return };
+                            let decision = serde_json::json!({ "decision": "cancel", "reason": "declined by operator" });
+                            let c = client();
+                            let thread = current.get_untracked().unwrap_or_default();
+                            pending.set(None);
+                            spawn_local(async move { let _ = c.submit_approval(&thread, &p.call_id, decision).await; });
+                        };
+                        view! {
+                            <div class="composer">
+                                <div class="composer-inner">
+                                    <div class="approval">
+                                        <div class="apv-head">
+                                            <span class="ic">"⏸"</span>
+                                            <span class="apv-name">{p.tool_name.clone()}</span>
+                                            <span class="apv-badge">"approval required"</span>
+                                        </div>
+                                        <div class="apv-body">
+                                            <div class="apv-summary">{p.summary.clone()}</div>
+                                            {field_views}
+                                            <div class="apv-actions">
+                                                <button class="apv-submit" on:click=approve>"Submit"</button>
+                                                <button class="apv-cancel" on:click=cancel>"Cancel"</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
-                    }
-                })}
-                <details class="schema-box">
-                    <summary>
-                        "structured output schema"
-                        {move || (!output_schema.get().trim().is_empty()).then(|| view! { <span class="schema-on">" ● on"</span> })}
-                    </summary>
-                    <textarea
-                        class="schema-input"
-                        placeholder=r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#
-                        prop:value=move || output_schema.get()
-                        on:input=move |e| output_schema.set(event_target_value(&e))
-                    ></textarea>
-                </details>
-                <div class="composer">
-                    <input
-                        prop:value=move || input.get()
-                        on:input=move |e| input.set(event_target_value(&e))
-                        on:keydown=move |e| if e.key() == "Enter" { send() }
-                        placeholder=move || if current.get().is_some() { "type a message…".to_string() } else { "create or pick a thread first".to_string() }
-                        disabled=move || current.get().is_none() || streaming.get()
-                    />
-                    {move || if streaming.get() {
-                        view! { <button class="stop" on:click=move |_| stop()>"stop"</button> }.into_any()
-                    } else {
-                        view! { <button on:click=move |_| send()>"send"</button> }.into_any()
-                    }}
-                </div>
-            </main>
+                        }
+                    })}
 
-            <aside class="inspect">
-                <div class="tabs">
-                    <button class="tab" class:on=move || inspect_tab.get() == "events"
-                        on:click=move |_| inspect_tab.set("events")>"events"</button>
-                    <button class="tab" class:on=move || inspect_tab.get() == "state"
-                        on:click=move |_| { inspect_tab.set("state"); fetch_state(); }>"state"</button>
-                    <span class="tab-usage">
-                        {move || match usage.get() {
-                            Some((i, o)) => format!("in {i} · out {o}"),
-                            None => "—".into(),
-                        }}
-                    </span>
-                </div>
+                    // composer
+                    <div class="composer">
+                        <div class="composer-inner">
+                            {move || config_open.get().then(|| view! {
+                                <div class="config-pop">
+                                    <div class="config-head">
+                                        <div class="config-head-l">
+                                            <span>"⚙"</span>
+                                            <span class="config-title">"Configurable"</span>
+                                            <span class="config-sub">"per-run context"</span>
+                                        </div>
+                                        <button class="config-x" on:click=move |_| config_open.set(false)>"✕"</button>
+                                    </div>
+                                    <div class="config-body">
+                                        <div class="config-row">
+                                            <label class="section-cap">"context"</label>
+                                            <span class="conn-hint">"open map · sent verbatim"</span>
+                                            {move || {
+                                                let t = context_json.get();
+                                                if t.trim().is_empty() {
+                                                    ().into_any()
+                                                } else if serde_json::from_str::<Value>(&t).is_ok() {
+                                                    view! { <span class="config-valid ok">"● valid"</span> }.into_any()
+                                                } else {
+                                                    view! { <span class="config-valid bad">"● invalid"</span> }.into_any()
+                                                }
+                                            }}
+                                        </div>
+                                        <textarea class="config-ta" spellcheck="false"
+                                            placeholder=r#"{ "user_id": "u1", "provider": "sonnet", "allow_web_search": true }"#
+                                            prop:value=move || context_json.get()
+                                            on:input=move |e| context_json.set(event_target_value(&e))></textarea>
+                                        <details class="config-schema">
+                                            <summary>"output schema (optional JSON)"</summary>
+                                            <textarea class="config-schema-ta" spellcheck="false"
+                                                placeholder=r#"{ "type": "object", "properties": ... }"#
+                                                prop:value=move || output_schema.get()
+                                                on:input=move |e| output_schema.set(event_target_value(&e))></textarea>
+                                        </details>
+                                    </div>
+                                </div>
+                            })}
 
-                {move || if inspect_tab.get() == "events" {
-                    view! {
-                        <div class="events">
-                            {move || events.get().into_iter().rev().map(|ev| {
-                                let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                                let body = serde_json::to_string(&ev).unwrap_or_default();
-                                view! { <div class="evt"><span class="evt-kind">{kind}</span><code>{truncate(&body, 240)}</code></div> }
-                            }).collect_view()}
+                            <div class="input-row">
+                                <textarea class="composer-input" spellcheck="false"
+                                    rows=move || input.get().lines().count().clamp(1, 6).to_string()
+                                    prop:value=move || input.get()
+                                    on:input=move |e| input.set(event_target_value(&e))
+                                    on:keydown=move |e| {
+                                        if e.key() == "Enter" && !e.shift_key() {
+                                            e.prevent_default();
+                                            send();
+                                        }
+                                    }
+                                    prop:disabled=move || current.get().is_none() || streaming.get()
+                                    placeholder=move || if current.get().is_some() {
+                                        "Message the agent…  (Enter to send)".to_string()
+                                    } else {
+                                        "Create or pick a thread first".to_string()
+                                    }></textarea>
+                                <button class="gear-btn" title="Configurable" on:click=move |_| config_open.update(|c| *c = !*c)>
+                                    "⚙"
+                                    {move || (!context_json.get().trim().is_empty()).then(|| view! { <span class="gear-dot"></span> })}
+                                </button>
+                                {move || if streaming.get() {
+                                    view! { <button class="send-btn stop" on:click=move |_| stop()>"◼ Stop"</button> }.into_any()
+                                } else {
+                                    view! {
+                                        <button class="send-btn" on:click=move |_| send()
+                                            prop:disabled=move || current.get().is_none()>"Send ↵"</button>
+                                    }.into_any()
+                                }}
+                            </div>
+                            <div class="composer-hint">"Enter to send · Shift+Enter for newline"</div>
                         </div>
-                    }.into_any()
-                } else {
-                    view! {
-                        <div class="state-view">
-                            <button class="refresh-state" on:click=move |_| fetch_state()>"⟳ refresh"</button>
-                            {move || match state_json.get() {
-                                None => view! { <div class="empty small">"Loading state…"</div> }.into_any(),
-                                Some(s) => render_state(&s).into_any(),
-                            }}
+                    </div>
+                </section>
+
+                // splitter
+                <div class="splitter" class:dragging=move || dragging.get() node_ref=splitter_ref
+                    on:pointerdown=on_split_down on:pointermove=on_split_move on:pointerup=on_split_up
+                    on:dblclick=move |_| split.set(50.0)
+                    title="Drag to resize · double-click to reset"></div>
+
+                // ░░ INSPECTOR ░░
+                <section class="inspector" style:flex=move || format!("1 1 {}%", 100.0 - split.get())>
+                    <div class="topbar">
+                        <span class="topbar-title dim">"Inspector"</span>
+                        <div class="tabs">
+                            <button class="tab" class:on=move || inspect_tab.get() == "events"
+                                on:click=move |_| inspect_tab.set("events")>"Events"</button>
+                            <button class="tab" class:on=move || inspect_tab.get() == "state"
+                                on:click=move |_| { inspect_tab.set("state"); fetch_state(); }>"State"</button>
                         </div>
-                    }.into_any()
-                }}
-            </aside>
+                    </div>
+
+                    <div class="tab-body">
+                        // EVENTS
+                        {move || (inspect_tab.get() == "events").then(|| {
+                            let st = show_thinking.get();
+                            // Top level = RUN (one user message + its answer); each run
+                            // expands to its model turns, each turn to text + tool args
+                            // + result.
+                            let runs = cluster_runs(&events.get());
+                            let total = runs.len();
+                            view! {
+                                <div class="ev-filter">
+                                    <button class="filter-btn" on:click=move |_| show_thinking.update(|t| *t = !*t)>
+                                        {move || if show_thinking.get() { "hide thinking" } else { "show thinking" }}
+                                    </button>
+                                </div>
+                                <div class="ev-list">
+                                    {if total == 0 {
+                                        view! { <div class="empty">"No runs yet."</div> }.into_any()
+                                    } else {
+                                        runs.into_iter().enumerate().rev()
+                                            .map(|(i, r)| render_run(i, total, r, st))
+                                            .collect_view().into_any()
+                                    }}
+                                </div>
+                            }
+                        })}
+
+                        // STATE
+                        {move || (inspect_tab.get() == "state").then(|| {
+                            match state_json.get() {
+                                None => view! { <div class="empty">"Loading state…"</div> }.into_any(),
+                                Some(s) => render_state(&s, prompt_assembled.get(), prompt_assembled, fetch_state).into_any(),
+                            }
+                        })}
+                    </div>
+                </section>
+            </div>
         </div>
     }
 }
 
+// ── chat transcript rendering ────────────────────────────────────────────
+
 fn render_item(item: Item) -> AnyView {
     match item {
         Item::User(text) => view! {
-            <div class="msg user">
-                <div class="avatar user-av">"you"</div>
-                <div class="bubble">{text}</div>
-            </div>
+            <div class="msg-user"><div class="bubble-user">{text}</div></div>
         }.into_any(),
         Item::Assistant(text) => view! {
-            <div class="msg assistant">
-                <div class="avatar bot-av">"ai"</div>
-                <div class="body md" inner_html=md_to_html(&text)></div>
+            <div class="msg-assistant">
+                <div class="avatar">"⟡"</div>
+                <div class="assistant-body"><div class="prose" inner_html=md_to_html(&text)></div></div>
             </div>
         }.into_any(),
         Item::Thinking(text) => view! {
-            <details class="msg thinking">
-                <summary>"thinking"</summary>
-                <div class="body md" inner_html=md_to_html(&text)></div>
-            </details>
-        }.into_any(),
-        Item::Structured(json) => view! {
-            <div class="structured">
-                <div class="structured-head">"⬢ structured output"</div>
-                <pre>{json}</pre>
+            <div class="msg-assistant">
+                <div class="avatar">"⟡"</div>
+                <div class="assistant-body">
+                    <details class="thinking"><summary>"thinking"</summary><div class="thinking-body">{text}</div></details>
+                </div>
             </div>
         }.into_any(),
-        Item::Warning(text) => view! { <div class="msg warn">{text}</div> }.into_any(),
-        Item::Tool(t) => {
-            let badge = if t.status == "done" { "✓" } else if t.status == "error" { "✗" } else { "⟳" };
-            let dur = if t.duration_ms > 0 { format!(" {}ms", t.duration_ms) } else { String::new() };
-            let sources = t.sources.clone();
-            view! {
-                <div class="tool" class:err=move || t.status == "error">
-                    <div class="tool-head">
-                        <span class="tool-badge">{badge}</span>
-                        <span class="tool-name">{t.name.clone()}</span>
-                        <span class="tool-dur">{dur}</span>
-                    </div>
-                    {(!t.input.is_empty()).then(|| view! { <code class="tool-io">{format!("→ {}", t.input)}</code> })}
-                    {(!t.result.is_empty()).then(|| view! { <code class="tool-io result">{t.result.clone()}</code> })}
-                    {(!sources.is_empty()).then(move || view! {
+        Item::Warning(text) => view! {
+            <div class="warn"><span class="ic">"⚠"</span><span class="tx">{text}</span></div>
+        }.into_any(),
+        Item::Tool(t) => render_tool_card(t),
+    }
+}
+
+fn render_tool_card(t: ToolView) -> AnyView {
+    let dot_cls = format!("tool-dot {}", t.status);
+    let status_cls = format!("tool-status {}", t.status);
+    let dur = if t.duration_ms > 0 { format!("· {}ms", t.duration_ms) } else { String::new() };
+    let label = clean_tool_name(&t.name);
+    let has_input = !t.input.is_empty();
+    let input = t.input.clone();
+    let has_result = !t.result.is_empty();
+    let is_err = t.status == "error";
+    let result = t.result.clone();
+    let res_cls = if is_err { "jsonpre error" } else { "jsonpre" };
+    let sources = t.sources.clone();
+    view! {
+        <div class="tool">
+            <div class="tool-head">
+                <span class=dot_cls></span>
+                <span class="tool-name">{label}</span>
+                <span class=status_cls>{t.status.clone()}</span>
+                <span class="tool-dur">{dur}</span>
+            </div>
+            {has_input.then(|| view! {
+                <details class="tool-sec"><summary>"args"</summary><pre class="jsonpre">{input}</pre></details>
+            })}
+            {has_result.then(move || view! {
+                <details class="tool-sec" open=true>
+                    <summary>"result"</summary>
+                    <pre class=res_cls>{result}</pre>
+                    {(!sources.is_empty()).then(|| view! {
                         <div class="sources">
                             {sources.iter().map(|s| {
                                 let url = s.url.clone();
-                                view! { <a class="chip" href=url.clone() target="_blank">{format!("🔗 {}", if s.title.is_empty() { s.url.clone() } else { s.title.clone() })}</a> }
+                                let title = if s.title.is_empty() { s.url.clone() } else { s.title.clone() };
+                                view! { <a class="chip" href=url target="_blank">{title}<span class="lk">"🔗"</span></a> }
                             }).collect_view()}
                         </div>
                     })}
-                </div>
-            }.into_any()
+                </details>
+            })}
+        </div>
+    }.into_any()
+}
+
+// ── events tab: run/turn cluster rendering ───────────────────────────────
+
+/// Render one RUN (top level) — a user message + its answer — expanding to
+/// the model turns that happened in between.
+fn render_run(idx: usize, total: usize, r: RunCluster, show_thinking: bool) -> AnyView {
+    let dot_cls = if r.running { "run-dot running" } else if r.errored { "run-dot error" } else { "run-dot" };
+    let has_prompt = !r.prompt.is_empty();
+    let prompt = r.prompt.clone();
+    let label = if has_prompt {
+        truncate(r.prompt.lines().next().unwrap_or(""), 46)
+    } else if r.id.is_empty() {
+        format!("run {}", idx + 1)
+    } else {
+        format!("run · {}", short_id(&r.id))
+    };
+    let n = r.turns.len();
+    let turns_label = format!("{n} turn{}", if n == 1 { "" } else { "s" });
+    let time = if r.running { "live" } else { "done" };
+    let stop = r.stop_reason.clone();
+    let usage = r.usage;
+    let open = r.running || idx + 1 == total; // newest / live run expanded
+    let turn_views = r.turns.into_iter().enumerate()
+        .map(|(i, t)| render_turn(i, t, show_thinking))
+        .collect_view();
+    view! {
+        <details class="run" open=open>
+            <summary>
+                <span class=dot_cls></span>
+                <span class="run-prompt-preview">{label}</span>
+                <span class="run-meta">
+                    <span class="run-time">{time}</span>
+                    {stop.map(|s| view! { <span class="mono">{s}</span> })}
+                    <span>{turns_label}</span>
+                    {usage.map(|(i, o)| view! { <span class="mono">{format!("↑{i} ↓{o}")}</span> })}
+                </span>
+            </summary>
+            <div class="run-body">
+                {has_prompt.then(|| view! {
+                    <div class="blk blk-user"><span class="blk-tag tag-user">"user"</span><span class="blk-tx">{prompt}</span></div>
+                })}
+                {turn_views}
+            </div>
+        </details>
+    }.into_any()
+}
+
+/// Render one model TURN (nested inside a run): assistant text, optional
+/// thinking, and the tool calls (args + result) for that step.
+fn render_turn(idx: usize, t: TurnCluster, show_thinking: bool) -> AnyView {
+    let running = !t.closed;
+    let calls = t.tool_calls.max(t.tools.len() as u32);
+    let has_text = !t.text.is_empty();
+    let text = t.text.clone();
+    let show_think = show_thinking && !t.thinking.is_empty();
+    let thinking = t.thinking.clone();
+    let tool_views = t.tools.iter().map(render_turn_tool).collect_view();
+    let foot = t.closed.then(|| {
+        format!("stop_reason: {} · tool_calls: {}",
+            t.stop_reason.clone().unwrap_or_else(|| "—".into()), calls)
+    });
+    view! {
+        <details class="turn" open=true>
+            <summary>
+                <span class="turn-name">{format!("Turn {}", idx + 1)}</span>
+                {if running {
+                    view! { <span class="turn-meta running"><span class="rdot"></span>"streaming"</span> }.into_any()
+                } else {
+                    view! { <span class="turn-meta">{format!("{calls} call(s)")}</span> }.into_any()
+                }}
+            </summary>
+            <div class="turn-body">
+                {show_think.then(|| view! {
+                    <div class="blk blk-think"><span class="blk-tag tag-think">"thinking"</span><span class="blk-tx">{thinking}</span></div>
+                })}
+                {has_text.then(|| view! {
+                    <div class="blk blk-ai"><span class="blk-tag tag-ai">"AI"</span><span class="blk-tx">{text}</span></div>
+                })}
+                {tool_views}
+                {foot.map(|f| view! { <div class="turn-foot">{f}</div> })}
+            </div>
+        </details>
+    }.into_any()
+}
+
+fn render_turn_tool(t: &ToolView) -> AnyView {
+    let dot_cls = format!("dot {}", t.status);
+    let pill_cls = format!("status-pill {}", t.status);
+    let status = t.status.clone();
+    let label = clean_tool_name(&t.name);
+    let dur = if t.duration_ms > 0 { format!("{}ms", t.duration_ms) } else { String::new() };
+    let mut body = String::new();
+    if !t.input.is_empty() {
+        body.push_str(&t.input);
+    }
+    if !t.result.is_empty() {
+        if !body.is_empty() { body.push('\n'); }
+        body.push_str("→ ");
+        body.push_str(&t.result);
+    }
+    let has_body = !body.is_empty();
+    view! {
+        <div class="blk blk-tool">
+            <div class="blk-head">
+                <span class="blk-tag tag-tool">"tool"</span>
+                <span class=dot_cls></span>
+                <span class="nm">{label}</span>
+                <span class=pill_cls>{status}</span>
+                <span class="dur">{dur}</span>
+            </div>
+            {has_body.then(|| view! {
+                <details class="blk-tool-sec"><summary>"args · result"</summary><pre class="jsonpre">{body}</pre></details>
+            })}
+        </div>
+    }.into_any()
+}
+
+/// Cluster a flat event list (live wire events OR persisted `{seq,event}`
+/// entries) into Run → Turn → details. Coalesces token deltas; never one row
+/// per token.
+fn cluster_runs(events: &[Value]) -> Vec<RunCluster> {
+    let mut runs: Vec<RunCluster> = Vec::new();
+    for entry in events {
+        let (disc, ev): (String, &Value) = match entry.get("event") {
+            Some(inner) => (inner.get("kind").and_then(|v| v.as_str()).unwrap_or("").to_string(), inner),
+            None => (entry.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(), entry),
+        };
+        match disc.as_str() {
+            // UI-injected boundary for live runs (carries the user prompt).
+            "run_begin" => {
+                let prompt = ev.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                runs.push(RunCluster { prompt, running: true, ..Default::default() });
+            }
+            "run_start" | "RunStart" => {
+                let id = ev.get("run_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                runs.push(RunCluster { id, running: true, ..Default::default() });
+            }
+            "assistant_text_delta" => {
+                let t = ev.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                cur_turn(&mut runs).text.push_str(t);
+            }
+            "assistant_thinking_delta" => {
+                let t = ev.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                cur_turn(&mut runs).thinking.push_str(t);
+            }
+            "tool_start" => {
+                let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = ev.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string();
+                cur_turn(&mut runs).tools.push(ToolView { id, name, status: "running".into(), ..Default::default() });
+            }
+            "tool_dispatching" => {
+                let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let input = ev.get("input").map(pretty_json).unwrap_or_default();
+                if let Some(t) = find_tool(&mut runs, &id) {
+                    t.input = input;
+                }
+            }
+            "tool_finish" => {
+                let id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let is_err = ev.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let preview = ev.get("preview").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let dur = ev.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let sources = parse_sources(ev.get("metadata"));
+                if let Some(t) = find_tool(&mut runs, &id) {
+                    t.status = if is_err { "error".into() } else { "done".into() };
+                    t.result = preview;
+                    t.duration_ms = dur;
+                    t.sources = sources;
+                }
+            }
+            "Message" => ingest_persisted(&mut runs, ev.get("msg")),
+            "turn_complete" | "TurnBoundary" => {
+                if let Some(run) = runs.last_mut() {
+                    if let Some(turn) = run.turns.last_mut() {
+                        turn.closed = true;
+                        if let Some(sr) = ev.get("stop_reason").and_then(|v| v.as_str()) {
+                            turn.stop_reason = Some(sr.to_string());
+                        }
+                        match ev.get("tool_calls_this_turn").and_then(|v| v.as_u64()) {
+                            Some(tc) => turn.tool_calls = tc as u32,
+                            None if turn.tool_calls == 0 => turn.tool_calls = turn.tools.len() as u32,
+                            None => {}
+                        }
+                    }
+                }
+            }
+            "run_end" | "RunEnd" | "done" => {
+                if let Some(run) = runs.last_mut() {
+                    run.running = false;
+                    run.ended = true;
+                    if let Some(sr) = ev.get("stop_reason").and_then(|v| v.as_str()) {
+                        run.stop_reason = Some(sr.to_string());
+                    }
+                    if let Some(t) = run.turns.last_mut() {
+                        t.closed = true;
+                        if t.tool_calls == 0 { t.tool_calls = t.tools.len() as u32; }
+                    }
+                }
+            }
+            "usage" => {
+                if let Some(run) = runs.last_mut() {
+                    let i = ev.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let o = ev.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    run.usage = Some((i, o));
+                }
+            }
+            "warning" => {
+                if let Some(run) = runs.last_mut() {
+                    run.errored = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    runs
+}
+
+/// Current open turn of the current run, creating a run/turn as needed.
+fn cur_turn(runs: &mut Vec<RunCluster>) -> &mut TurnCluster {
+    let need_new_run = match runs.last() {
+        Some(r) => r.ended,
+        None => true,
+    };
+    if need_new_run {
+        runs.push(RunCluster { running: true, ..Default::default() });
+    }
+    let run = runs.last_mut().unwrap();
+    let need_new = match run.turns.last() {
+        Some(t) => t.closed,
+        None => true,
+    };
+    if need_new {
+        run.turns.push(TurnCluster::default());
+    }
+    run.turns.last_mut().unwrap()
+}
+
+/// Find a tool (by id) in the current run, searching newest-first.
+fn find_tool<'a>(runs: &'a mut [RunCluster], id: &str) -> Option<&'a mut ToolView> {
+    let run = runs.last_mut()?;
+    for turn in run.turns.iter_mut().rev() {
+        if let Some(t) = turn.tools.iter_mut().rev().find(|t| t.id == id) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Fold a persisted `Message` into the run/turn clusters.
+fn ingest_persisted(runs: &mut Vec<RunCluster>, msg: Option<&Value>) {
+    let Some(msg) = msg else { return };
+    let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+    let blocks = msg.get("content").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if role == "assistant" {
+        let turn = cur_turn(runs);
+        for b in &blocks {
+            match b.get("type").and_then(|v| v.as_str()) {
+                Some("text") => {
+                    if let Some(t) = b.get("text").and_then(|v| v.as_str()) { turn.text.push_str(t); }
+                }
+                Some("reasoning") => {
+                    if let Some(t) = b.get("text").and_then(|v| v.as_str()) { turn.thinking.push_str(t); }
+                }
+                Some("tool_use") => {
+                    turn.tools.push(ToolView {
+                        id: b.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        name: b.get("name").and_then(|v| v.as_str()).unwrap_or("tool").to_string(),
+                        input: b.get("input").map(pretty_json).unwrap_or_default(),
+                        status: "done".into(),
+                        ..Default::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+        turn.tool_calls = turn.tools.len() as u32;
+    } else if role == "user" {
+        // Plain user text is the run's prompt; tool_result blocks attach to
+        // the tool they answer.
+        if let Some(run) = runs.last_mut() {
+            if run.prompt.is_empty() {
+                for b in &blocks {
+                    if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                            run.prompt = t.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        for b in &blocks {
+            if b.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
+                let id = b.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                let is_err = b.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let content = b.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let sources = parse_sources(b.get("metadata"));
+                if let Some(t) = find_tool(runs, id) {
+                    t.status = if is_err { "error".into() } else { "done".into() };
+                    t.result = truncate(&content, 400);
+                    t.sources = sources;
+                }
+            }
         }
     }
 }
 
-/// Append a streaming token to the live buffer. On a kind change (text →
-/// thinking or vice-versa) the existing buffer is finalized into `items`
-/// first.
+fn clean_tool_name(n: &str) -> String {
+    if let Some(rest) = n.strip_prefix("mcp__") {
+        let parts: Vec<&str> = rest.splitn(2, "__").collect();
+        if parts.len() == 2 {
+            return format!("{} · {}", parts[0], parts[1]);
+        }
+    }
+    n.to_string()
+}
+
+fn pretty_json(v: &Value) -> String {
+    truncate(&serde_json::to_string_pretty(v).unwrap_or_default(), 600)
+}
+
+// ── live → items folding (chat pane) ─────────────────────────────────────
+
 fn append_live(live: RwSignal<LiveBuf>, items: RwSignal<Vec<Item>>, kind: LiveKind, text: &str) {
     live.update(|lb| {
         if lb.kind != kind && !lb.text.is_empty() {
@@ -535,7 +1043,6 @@ fn append_live(live: RwSignal<LiveBuf>, items: RwSignal<Vec<Item>>, kind: LiveKi
     });
 }
 
-/// Flush any buffered live text into `items` as a finalized message.
 fn flush_live(live: RwSignal<LiveBuf>, items: RwSignal<Vec<Item>>) {
     live.update(|lb| {
         if !lb.text.is_empty() {
@@ -553,10 +1060,6 @@ fn finalize(kind: LiveKind, text: &str) -> Item {
     }
 }
 
-/// Rebuild the transcript from a thread's persisted event log. These come
-/// from `GET /events` as `{seq, event:{kind, …}}` (the `SessionEvent`
-/// shape), distinct from the live wire format — so we read `kind` and the
-/// full `msg`, not streaming deltas.
 fn items_from_events(events: &[Value]) -> Vec<Item> {
     let mut items = Vec::new();
     for entry in events {
@@ -567,7 +1070,6 @@ fn items_from_events(events: &[Value]) -> Vec<Item> {
                     ingest_message(&mut items, msg);
                 }
             }
-            // Compaction snapshot replaces the prior history wholesale.
             Some("StateSnapshot") => {
                 if let Some(msgs) = event.get("messages").and_then(|v| v.as_array()) {
                     items.clear();
@@ -582,8 +1084,6 @@ fn items_from_events(events: &[Value]) -> Vec<Item> {
     items
 }
 
-/// Convert one persisted `Message` (role + content blocks) into transcript
-/// items, pairing tool results back onto their tool-use cards.
 fn ingest_message(items: &mut Vec<Item>, msg: &Value) {
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
     let blocks = msg.get("content").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -629,7 +1129,6 @@ fn ingest_message(items: &mut Vec<Item>, msg: &Value) {
     }
 }
 
-/// Fold one parsed event into the transcript items.
 fn apply_event(items: &mut Vec<Item>, ev: &Value) {
     let kind = ev.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match kind {
@@ -678,8 +1177,6 @@ fn apply_event(items: &mut Vec<Item>, ev: &Value) {
             let m = ev.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
             items.push(Item::Warning(m));
         }
-        // history replay carries full `message` events; surface user turns
-        // that we didn't originate locally (assistant text already streamed).
         "message" => {
             if let Some(msg) = ev.get("msg") {
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -757,30 +1254,33 @@ fn usage_of(ev: &Value) -> Option<(&'static str, (u64, u64))> {
     }
 }
 
-/// Render the full thread-state snapshot as collapsible sections: assembled
-/// + base system prompt, tool schemas, and the message list as sent to the
-/// model. Collapsed by default so you open only what you want to read.
-fn render_state(s: &Value) -> AnyView {
+// ── state tab ────────────────────────────────────────────────────────────
+
+fn render_state(
+    s: &Value,
+    assembled: bool,
+    prompt_assembled: RwSignal<bool>,
+    refresh: impl Fn() + Copy + 'static,
+) -> AnyView {
     let busy = s.get("busy").and_then(|v| v.as_bool()).unwrap_or(false);
-    let assembled = s.get("assembled_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let base = s.get("base_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let events = s.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let runs = s.get("run_count").and_then(|v| v.as_u64());
+    let assembled_prompt = s.get("assembled_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let base_prompt = s.get("base_system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let event_count = s.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let run_count = s.get("run_count").and_then(|v| v.as_u64()).map(|r| r.to_string()).unwrap_or_else(|| "—".into());
     let messages = s.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let tools = s.get("tools").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let msg_count = messages.len();
+    let tool_count = tools.len();
+    let prompt = if assembled { assembled_prompt } else { base_prompt };
 
     let tool_views = tools.iter().map(|t| {
         let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let schema = t.get("input_schema")
-            .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-            .unwrap_or_default();
+        let schema = t.get("input_schema").map(|v| serde_json::to_string_pretty(v).unwrap_or_default()).unwrap_or_default();
         view! {
             <details class="state-tool">
-                <summary>{name}</summary>
-                <div class="state-tool-desc">{desc}</div>
-                <pre class="state-code">{schema}</pre>
+                <summary><span class="nm">{name}</span><span class="desc">{desc}</span></summary>
+                <pre class="jsonpre">{schema}</pre>
             </details>
         }
     }).collect_view();
@@ -790,47 +1290,62 @@ fn render_state(s: &Value) -> AnyView {
         let body = m.get("content").and_then(|v| v.as_array()).map(|blocks| {
             blocks.iter().map(render_block_summary).collect::<Vec<_>>().join("\n")
         }).unwrap_or_default();
-        let cls = format!("state-role role-{}", role.to_lowercase());
+        let preview = truncate(body.lines().next().unwrap_or(""), 80);
+        let chip_cls = format!("role-chip {}", role.to_lowercase());
         view! {
-            <div class="state-msg">
-                <span class=cls>{role}</span>
-                <code>{body}</code>
-            </div>
+            <details class="state-msg">
+                <summary><span class=chip_cls>{role}</span><span class="preview">{preview}</span></summary>
+                <div class="state-msg-body">{body}</div>
+            </details>
         }
     }).collect_view();
 
-    let runs_str = runs.map(|r| r.to_string()).unwrap_or_else(|| "?".into());
-    let tool_count = tools.len();
-
     view! {
         <div>
-            {busy.then(|| view! { <div class="state-busy">"⏳ agent busy (run in progress) — prompt/tools unavailable; messages from store"</div> })}
-            <div class="state-counts">{format!("{runs_str} runs · {events} events · {msg_count} messages")}</div>
+            <div class="state-counts">
+                <span class="count"><strong>{run_count}</strong>" runs"</span>
+                <span class="count-sep">"·"</span>
+                <span class="count"><strong>{event_count.to_string()}</strong>" events"</span>
+                <span class="count-sep">"·"</span>
+                <span class="count"><strong>{msg_count.to_string()}</strong>" messages"</span>
+                {busy.then(|| view! { <span class="busy-badge"><span class="d"></span>"busy"</span> })}
+                <button class="copy-btn" title="Refresh" on:click=move |_| refresh()>"⟳"</button>
+            </div>
 
-            <details class="state-fold" open=true>
-                <summary>"assembled system prompt"</summary>
-                <pre class="state-code prompt">{assembled}</pre>
-            </details>
+            <div class="state-body">
+                <div>
+                    <div class="state-section-head">
+                        <span class="state-section-cap">"System prompt"</span>
+                        <div class="seg">
+                            <button class:on=move || prompt_assembled.get()
+                                on:click=move |_| prompt_assembled.set(true)>"assembled"</button>
+                            <button class:on=move || !prompt_assembled.get()
+                                on:click=move |_| prompt_assembled.set(false)>"base"</button>
+                        </div>
+                    </div>
+                    <div class="prompt-view">{prompt}</div>
+                </div>
 
-            <details class="state-fold">
-                <summary>"base system prompt"</summary>
-                <pre class="state-code prompt">{base}</pre>
-            </details>
+                <div>
+                    <div class="state-section-head">
+                        <span class="state-section-cap">"Tools"</span>
+                        <span class="state-count">{tool_count.to_string()}</span>
+                    </div>
+                    <div class="state-tools">{tool_views}</div>
+                </div>
 
-            <details class="state-fold">
-                <summary>{format!("tools ({tool_count})")}</summary>
-                <div class="state-tools">{tool_views}</div>
-            </details>
-
-            <details class="state-fold" open=true>
-                <summary>{format!("messages ({msg_count})")}</summary>
-                <div class="state-msgs">{msg_views}</div>
-            </details>
+                <div>
+                    <div class="state-section-head">
+                        <span class="state-section-cap">"Messages"</span>
+                        <span class="state-count">{format!("{msg_count} · as sent to model")}</span>
+                    </div>
+                    <div class="msg-list">{msg_views}</div>
+                </div>
+            </div>
         </div>
     }.into_any()
 }
 
-/// One-line summary of a content block for the state view.
 fn render_block_summary(b: &Value) -> String {
     match b.get("type").and_then(|v| v.as_str()) {
         Some("text") => b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -850,9 +1365,8 @@ fn render_block_summary(b: &Value) -> String {
     }
 }
 
-/// Render assistant/thinking markdown to HTML. pulldown-cmark escapes raw
-/// text, so model output can't inject arbitrary tags — adequate for a local
-/// dev tool. Tables + strikethrough enabled on top of CommonMark.
+// ── misc helpers ─────────────────────────────────────────────────────────
+
 fn md_to_html(src: &str) -> String {
     use pulldown_cmark::{html, Options, Parser};
     let mut opts = Options::empty();
@@ -887,7 +1401,6 @@ mod tests {
 
     #[test]
     fn reconstructs_history_with_lowercase_roles() {
-        // Persisted Role serializes lowercase ("user"/"assistant").
         let events = vec![
             ev("RunStart", Value::Null),
             ev("Message", serde_json::json!({ "role": "user", "content": [{ "type": "text", "text": "hi" }] })),
@@ -919,6 +1432,56 @@ mod tests {
             }
             other => panic!("expected Tool, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clusters_live_run_into_turns() {
+        let events = vec![
+            serde_json::json!({ "type": "run_start", "run_id": "r1" }),
+            serde_json::json!({ "type": "assistant_text_delta", "text": "Look" }),
+            serde_json::json!({ "type": "assistant_text_delta", "text": "ing." }),
+            serde_json::json!({ "type": "tool_start", "id": "c1", "name": "mcp__tavily__search" }),
+            serde_json::json!({ "type": "tool_dispatching", "id": "c1", "input": { "q": "x" } }),
+            serde_json::json!({ "type": "tool_finish", "id": "c1", "is_error": false, "preview": "ok", "duration_ms": 12 }),
+            serde_json::json!({ "type": "turn_complete", "stop_reason": "tool_use", "tool_calls_this_turn": 1 }),
+            serde_json::json!({ "type": "assistant_text_delta", "text": "Done" }),
+            serde_json::json!({ "type": "run_end", "run_id": "r1", "total_turns": 2, "stop_reason": "end_turn" }),
+            serde_json::json!({ "type": "usage", "input_tokens": 100, "output_tokens": 20 }),
+        ];
+        let runs = cluster_runs(&events);
+        assert_eq!(runs.len(), 1);
+        let r = &runs[0];
+        assert_eq!(r.id, "r1");
+        assert!(!r.running);
+        assert_eq!(r.usage, Some((100, 20)));
+        // text coalesced, not one turn per token
+        assert_eq!(r.turns.len(), 2);
+        assert_eq!(r.turns[0].text, "Looking.");
+        assert_eq!(r.turns[0].tools.len(), 1);
+        assert_eq!(r.turns[0].tools[0].status, "done");
+        assert_eq!(r.turns[0].stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(r.turns[1].text, "Done");
+    }
+
+    #[test]
+    fn run_begin_separates_live_runs_and_keeps_prompt() {
+        // Two send cycles: each run_begin..done is its own run; the synthetic
+        // marker carries the user prompt (the live stream omits it).
+        let events = vec![
+            serde_json::json!({ "type": "run_begin", "prompt": "first question" }),
+            serde_json::json!({ "type": "assistant_text_delta", "text": "answer one" }),
+            serde_json::json!({ "type": "done", "total_turns": 1 }),
+            serde_json::json!({ "type": "run_begin", "prompt": "second question" }),
+            serde_json::json!({ "type": "assistant_text_delta", "text": "answer two" }),
+            serde_json::json!({ "type": "done", "total_turns": 1 }),
+        ];
+        let runs = cluster_runs(&events);
+        assert_eq!(runs.len(), 2, "each run_begin..done is a distinct run");
+        assert_eq!(runs[0].prompt, "first question");
+        assert_eq!(runs[0].turns[0].text, "answer one");
+        assert!(runs[0].ended);
+        assert_eq!(runs[1].prompt, "second question");
+        assert_eq!(runs[1].turns[0].text, "answer two");
     }
 
     #[test]

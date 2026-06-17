@@ -53,6 +53,14 @@ pub struct RunOutcome {
     /// called the finish tool with schema-valid arguments, those arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_result: Option<Value>,
+    /// Model id that handled this run (e.g. "claude-sonnet-4-6") — for
+    /// traceability and cost attribution, esp. with per-request provider
+    /// switching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Provider name that handled this run (e.g. "anthropic", "mistral").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// Returned by `Agent::run_streaming`: the event channel plus a join handle
@@ -141,6 +149,7 @@ impl Agent {
             messages: &messages,
             run_id: "inspect",
             turn: 0,
+            config: &self.state.config,
         };
         self.context_engine.assemble_system_prompt(&ctx).await
     }
@@ -173,10 +182,20 @@ impl Agent {
     /// Use this when the turn carries more than plain text — image or
     /// blob content blocks (e.g. an upload arriving over HTTP). The
     /// text-only [`Self::run_streaming`] is a thin wrapper over this.
-    pub fn run_streaming_message(mut self, user_msg: Message) -> RunStreamingHandle {
+    pub fn run_streaming_message(self, user_msg: Message) -> RunStreamingHandle {
+        self.run_streaming_message_with(user_msg, RunContext::default())
+    }
+
+    /// Like [`Self::run_streaming_message`] but with a per-run [`RunContext`]
+    /// (request-scoped config + optional provider override).
+    pub fn run_streaming_message_with(
+        mut self,
+        user_msg: Message,
+        rc: RunContext,
+    ) -> RunStreamingHandle {
         let (tx, rx) = mpsc::channel::<AgentEvent>(128);
         let handle = tokio::spawn(async move {
-            let result = self.run_inner(user_msg, &tx).await;
+            let result = self.run_inner(user_msg, rc, &tx).await;
             (self, result)
         });
         (ReceiverStream::new(rx), handle)
@@ -184,15 +203,51 @@ impl Agent {
 
     /// Convenience: drive a user input to completion, discarding intermediate events.
     pub async fn run(&mut self, user_input: impl Into<String>) -> Result<RunOutcome, AgentError> {
+        self.run_with(user_input, RunContext::default()).await
+    }
+
+    /// Like [`Self::run`] but with a per-run [`RunContext`].
+    pub async fn run_with(
+        &mut self,
+        user_input: impl Into<String>,
+        rc: RunContext,
+    ) -> Result<RunOutcome, AgentError> {
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(128);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let result = self.run_inner(Message::user(&user_input.into()), &tx).await;
+        let result = self
+            .run_inner(Message::user(&user_input.into()), rc, &tx)
+            .await;
         drop(tx);
         let _ = drain.await;
         result
     }
 
+    /// Install the per-run context (config map + optional provider override),
+    /// run the body, then restore the provider. The config map is overwritten
+    /// every run so a bare `run()` cannot inherit a prior run's context; the
+    /// provider is saved/restored so a per-run override doesn't clobber the
+    /// agent's built-in model.
     async fn run_inner(
+        &mut self,
+        raw_user_msg: Message,
+        rc: RunContext,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<RunOutcome, AgentError> {
+        let saved_provider = match rc.provider {
+            Some(p) => Some(std::mem::replace(&mut self.provider, p)),
+            None => None,
+        };
+        self.state.config = rc.config;
+
+        let result = self.run_inner_body(raw_user_msg, events).await;
+
+        if let Some(prev) = saved_provider {
+            self.provider = prev;
+        }
+        result
+    }
+
+    async fn run_inner_body(
         &mut self,
         raw_user_msg: Message,
         events: &mpsc::Sender<AgentEvent>,
@@ -213,6 +268,7 @@ impl Agent {
                 messages: &messages_so_far,
                 run_id: &run_id,
                 turn: 0,
+                config: &self.state.config,
             };
             self.context_engine
                 .process_user_input(&ctx, raw_user_msg)
@@ -338,6 +394,8 @@ impl Agent {
             structured_result,
             stop_reason: final_stop_reason,
             usage: total_usage,
+            model: Some(self.provider.model()),
+            provider: Some(self.provider.name().to_string()),
         };
 
         self.state.push_event(SessionEvent::RunEnd {
@@ -375,6 +433,7 @@ impl Agent {
                 messages: &[],
                 run_id,
                 turn,
+                config: &self.state.config,
             };
             self.context_engine
                 .maybe_compact(&ctx_for_compact, &mut messages_owned)
@@ -388,6 +447,7 @@ impl Agent {
                 messages: &messages_owned,
                 run_id,
                 turn,
+                config: &self.state.config,
             };
             let sp = self.context_engine.assemble_system_prompt(&ctx).await;
             let notes = self.context_engine.ambient_notes(&ctx).await;
@@ -563,7 +623,8 @@ impl Agent {
             run_id.to_string(),
             turn,
             bag,
-        );
+        )
+        .with_config(self.state.config.clone());
 
         // ─── Phase 1: serial before_tool hooks + per-call planning ──────────
         let mut plans: Vec<CallPlan> = Vec::with_capacity(calls.len());
@@ -730,6 +791,7 @@ impl Agent {
                 content: result.content.clone(),
                 is_error: if result.is_error { Some(true) } else { None },
                 metadata: result.metadata.clone(),
+                images: result.images.clone(),
             });
 
             for hook in self.hooks.clone() {
@@ -899,6 +961,53 @@ fn merge_usage(acc: &mut TokenUsage, next: &TokenUsage) {
     );
 }
 
+/// Per-run context: request-scoped values injected at `run` time instead
+/// of baked at build. Merged onto the agent for ONE run, then removed — so
+/// a pooled agent reused across requests carries the right per-request
+/// context without rebuilding. Mirrors the "build once, inject per-request"
+/// shape of langgraph/deepagents, but with one open map + an optional
+/// provider override (no separate typed `context_schema` channel).
+#[derive(Default, Clone)]
+pub struct RunContext {
+    /// Open, app-defined per-run keys (user_id, org_id, allow_web_search,
+    /// collection_id, …). Read by tools via [`runic_tool_core::ToolContext::config`],
+    /// by hooks via [`crate::AgentState::config`], and by context layers via
+    /// `TurnContext.config`.
+    pub config: serde_json::Map<String, Value>,
+    /// Optional main-model override for this run only — swaps the agent's
+    /// provider for the run, then restores. `None` keeps the built-in one.
+    pub provider: Option<Arc<dyn Provider>>,
+}
+
+impl RunContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set a per-run config key (builder-style).
+    pub fn with_config(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
+        self.config.insert(key.into(), value.into());
+        self
+    }
+
+    /// Override the main model for this run only.
+    pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+
+    /// Build from a JSON object (non-object input yields an empty map).
+    pub fn from_json(value: Value) -> Self {
+        Self {
+            config: match value {
+                Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            },
+            provider: None,
+        }
+    }
+}
+
 /// Fluent builder for `Agent`.
 pub struct AgentBuilder {
     provider: Arc<dyn Provider>,
@@ -1062,6 +1171,22 @@ impl AgentBuilder {
     }
 
     pub fn build(self) -> Agent {
+        // Boot-time sanity check: a background/async tool needs a
+        // BackgroundManager in runtime, otherwise its calls fail mid-run with
+        // "BackgroundManager not in runtime context". Surface it here instead.
+        if self.tools.has_background_tool()
+            && self
+                .runtime
+                .get::<runic_tool_core::BackgroundManager>()
+                .is_none()
+        {
+            tracing::warn!(
+                "agent has a background/async tool but no BackgroundManager in \
+                 runtime — async tool calls will fail; install one via \
+                 AgentBuilder::background_manager(...) or background_tool(...)"
+            );
+        }
+
         // A restored state keeps its event history and session_id; an
         // explicit session_id() on the builder still wins if both are set
         // (lets a caller re-key a resumed conversation). The system prompt

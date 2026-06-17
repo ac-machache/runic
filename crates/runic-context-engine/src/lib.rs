@@ -41,6 +41,11 @@ pub struct TurnContext<'a> {
     pub messages: &'a [Message],
     pub run_id: &'a str,
     pub turn: u32,
+    /// Open per-run config map for this run (user_id, allow_web_search,
+    /// tc_name, …). Lets context layers personalize the prompt from
+    /// request-scoped values without a typed schema. Empty on runs with no
+    /// per-run context.
+    pub config: &'a serde_json::Map<String, serde_json::Value>,
 }
 
 #[async_trait]
@@ -63,6 +68,16 @@ pub struct NoopEngine;
 #[async_trait]
 impl ContextEngine for NoopEngine {}
 
+/// A shared empty per-run config map, for constructing a [`TurnContext`]
+/// when there is no per-run context (tests, the system-prompt inspection
+/// path, callers that don't use the per-run channel).
+pub fn empty_config() -> &'static serde_json::Map<String, serde_json::Value> {
+    use std::sync::LazyLock;
+    static EMPTY: LazyLock<serde_json::Map<String, serde_json::Value>> =
+        LazyLock::new(serde_json::Map::new);
+    &EMPTY
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +88,7 @@ mod tests {
             messages: &[],
             run_id: "run-1",
             turn: 0,
+            config: empty_config(),
         }
     }
 

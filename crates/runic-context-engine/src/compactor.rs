@@ -372,6 +372,7 @@ mod tests {
             messages: &[],
             run_id: "run-1",
             turn: 0,
+            config: crate::empty_config(),
         }
     }
 

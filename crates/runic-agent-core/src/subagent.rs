@@ -77,8 +77,8 @@ impl Tool for SubagentTool {
         })
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-        run_subagent(&self.name, input, self.factory.as_ref()).await
+    async fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        run_subagent(&self.name, input, self.factory.as_ref(), ctx).await
     }
 }
 
@@ -134,24 +134,38 @@ impl BackgroundTool for AsyncSubagentTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-        run_subagent(&self.name, input, self.factory.as_ref()).await
+    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        run_subagent(&self.name, input, self.factory.as_ref(), ctx).await
     }
 }
 
 /// Shared body: pull the prompt, build a fresh child via the factory, run it,
 /// return the final assistant text (or a useful error / empty-response note).
+///
+/// The child gets a **fresh conversation** (its own messages) but **inherits
+/// the parent's per-run context** (`ctx.config_map()`): identity, web opt-in,
+/// etc. flow down so the child's tool interceptors / hooks see the same
+/// request-scoped values the parent did. The child's model never sees the
+/// config — it's code-only state read by interceptors. The provider override
+/// is deliberately NOT inherited; a sub-agent runs on its own configured
+/// provider.
 async fn run_subagent(
     name: &str,
     input: serde_json::Value,
     factory: &(dyn Fn() -> Agent + Send + Sync),
+    ctx: &ToolContext,
 ) -> ToolResult {
     let Some(prompt) = input.get("prompt").and_then(|v| v.as_str()) else {
         return ToolResult::error("missing required field 'prompt'");
     };
 
+    let rc = crate::agent::RunContext {
+        config: ctx.config_map().clone(),
+        provider: None,
+    };
+
     let mut child = factory();
-    match child.run(prompt).await {
+    match child.run_with(prompt, rc).await {
         Ok(_outcome) => match child.state().last_assistant_text() {
             Some(text) => ToolResult::ok(text),
             None => ToolResult::ok(format!("(subagent '{name}' produced no text response)")),

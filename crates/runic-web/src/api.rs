@@ -120,6 +120,7 @@ impl ApiClient {
         thread: &str,
         message: &str,
         output_schema: Option<Value>,
+        context: Option<Value>,
         abort: Option<&web_sys::AbortSignal>,
         mut on_event: impl FnMut(Value),
     ) -> Result<(), String> {
@@ -127,6 +128,11 @@ impl ApiClient {
         let mut body = serde_json::json!({ "message": message });
         if let Some(schema) = output_schema {
             body["output_schema"] = schema;
+        }
+        // Per-run context (user_id, provider, allow_web_search, …) — sent
+        // verbatim; the server's build_run_context decides what keys mean.
+        if let Some(ctx) = context {
+            body["context"] = ctx;
         }
         let resp = Request::post(&url)
             .header("x-runic-tenant", &self.tenant)

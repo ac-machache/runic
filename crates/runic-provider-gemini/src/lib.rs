@@ -483,7 +483,7 @@ fn message_to_gemini(msg: &Message) -> Option<serde_json::Value> {
     };
 
     let parts: Vec<serde_json::Value> =
-        msg.content.iter().filter_map(content_block_to_part).collect();
+        msg.content.iter().flat_map(content_block_to_parts).collect();
 
     if parts.is_empty() {
         return None;
@@ -492,16 +492,21 @@ fn message_to_gemini(msg: &Message) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "role": role_str, "parts": parts }))
 }
 
-fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
+/// One content block maps to ZERO, ONE, or SEVERAL Gemini parts. Most
+/// blocks are 1:1, but a tool result that carries images becomes the
+/// `functionResponse` part plus one `inlineData` part per image —
+/// Gemini can't nest image bytes inside the JSON response, so they ride
+/// as sibling parts in the same turn.
+fn content_block_to_parts(block: &ContentBlock) -> Vec<serde_json::Value> {
     match block {
-        ContentBlock::Text { text, .. } => Some(serde_json::json!({ "text": text })),
-        ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+        ContentBlock::Text { text, .. } => vec![serde_json::json!({ "text": text })],
+        ContentBlock::ToolUse { id, name, input } => vec![serde_json::json!({
             "functionCall": {
                 "name": name,
                 "args": input,
                 "id": id,
             }
-        })),
+        })],
         ContentBlock::ToolResult {
             tool_use_id,
             content,
@@ -509,27 +514,34 @@ fn content_block_to_part(block: &ContentBlock) -> Option<serde_json::Value> {
             // metadata is client-facing only — deliberately NOT copied into
             // the API payload (no token cost, invisible to the model).
             metadata: _,
+            images,
         } => {
             let mut response = serde_json::json!({ "content": content });
             if matches!(is_error, Some(true)) {
                 response["error"] = serde_json::Value::Bool(true);
             }
-            Some(serde_json::json!({
+            let mut parts = vec![serde_json::json!({
                 "functionResponse": {
                     "name": tool_use_id,
                     "response": response,
                     "id": tool_use_id,
                 }
-            }))
+            })];
+            for img in images {
+                parts.push(serde_json::json!({
+                    "inlineData": { "mimeType": img.media_type, "data": img.data }
+                }));
+            }
+            parts
         }
-        ContentBlock::Image { media_type, data } => Some(serde_json::json!({
+        ContentBlock::Image { media_type, data } => vec![serde_json::json!({
             "inlineData": { "mimeType": media_type, "data": data }
-        })),
+        })],
         // Gemini's thinking format differs and isn't required for replay.
-        ContentBlock::Reasoning { .. } => None,
+        ContentBlock::Reasoning { .. } => vec![],
         // Blobs must be materialized to inline data before reaching the
         // provider — see note in the Anthropic adapter.
-        ContentBlock::Blob(_) => None,
+        ContentBlock::Blob(_) => vec![],
     }
 }
 
@@ -577,6 +589,32 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_with_images_emits_sibling_inline_data_parts() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_7".into(),
+                content: "Image: doc/p1.png".into(),
+                is_error: None,
+                metadata: None,
+                images: vec![runic_message_types::ToolResultImage {
+                    media_type: "image/png".into(),
+                    data: "QUJD".into(),
+                }],
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let json = message_to_gemini(&msg).unwrap();
+        let parts = json["parts"].as_array().unwrap();
+        // functionResponse part + one inlineData sibling part.
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["functionResponse"]["name"], "call_7");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "QUJD");
+    }
+
+    #[test]
     fn tool_result_metadata_never_reaches_the_api_payload() {
         let msg = Message {
             role: Role::User,
@@ -585,6 +623,7 @@ mod tests {
                 content: "3 results".into(),
                 is_error: None,
                 metadata: Some(serde_json::json!({ "sources": ["https://a.example"] })),
+                images: Vec::new(),
             }],
             timestamp: None,
             tool_duration_ms: None,

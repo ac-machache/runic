@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use futures::stream;
 use futures::StreamExt;
 use runic_agent_core::{
-    Agent, AgentError, AgentEvent, AgentState, Hook, HookOutcome, Tool, ToolContext, ToolResult,
+    Agent, AgentError, AgentEvent, AgentState, Hook, HookOutcome, RunContext, Tool, ToolContext,
+    ToolResult,
 };
 use runic_message_types::{Message, StreamEvent, ToolCall, ToolDefinition};
 use runic_provider_core::{EventStream, Provider, ProviderError};
@@ -21,12 +22,18 @@ use runic_provider_core::{EventStream, Provider, ProviderError};
 
 struct ScriptedProvider {
     turns: Mutex<VecDeque<Vec<StreamEvent>>>,
+    model: String,
 }
 
 impl ScriptedProvider {
     fn new(turns: Vec<Vec<StreamEvent>>) -> Arc<Self> {
+        Self::named("test-model", turns)
+    }
+
+    fn named(model: &str, turns: Vec<Vec<StreamEvent>>) -> Arc<Self> {
         Arc::new(Self {
             turns: Mutex::new(turns.into()),
+            model: model.into(),
         })
     }
 }
@@ -55,7 +62,7 @@ impl Provider for ScriptedProvider {
     }
 
     fn model(&self) -> String {
-        "test-model".into()
+        self.model.clone()
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -646,4 +653,120 @@ async fn structured_output_invalid_args_retries_then_succeeds() {
         outcome.structured_result,
         Some(serde_json::json!({ "answer": "fixed" }))
     );
+}
+
+// ─── Per-run context (RunContext) ─────────────────────────────────────────────
+
+/// Records the `user_id` per-run config value it saw on each dispatch.
+struct ConfigProbeTool {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+#[async_trait]
+impl Tool for ConfigProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn description(&self) -> &str {
+        "Records the per-run user_id it was given."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {}, "additionalProperties": true })
+    }
+    async fn execute(&self, _input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(ctx.config_as::<String>("user_id"));
+        ToolResult::ok("ok")
+    }
+}
+
+#[tokio::test]
+async fn per_run_config_is_visible_to_tools_then_reset() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    // Two runs, each: call `probe`, then a plain text turn to finish.
+    let provider = ScriptedProvider::new(vec![
+        tool_call_turn("c1", "probe", "{}"),
+        text_turn("done"),
+        tool_call_turn("c2", "probe", "{}"),
+        text_turn("done"),
+    ]);
+    let mut agent = Agent::builder(provider)
+        .system_prompt("t")
+        .tool(Arc::new(ConfigProbeTool { seen: seen.clone() }))
+        .build();
+
+    // Run 1 carries a per-run user_id.
+    agent
+        .run_with("hi", RunContext::new().with_config("user_id", "u1"))
+        .await
+        .expect("run 1");
+    // Run 2 is bare — must NOT inherit run 1's context.
+    agent.run("hi").await.expect("run 2");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![Some("u1".to_string()), None],
+        "per-run config must be visible in run 1 and absent in the bare run 2"
+    );
+}
+
+#[tokio::test]
+async fn per_run_provider_override_then_restores() {
+    // Base provider handles bare runs; the override handles the one run that
+    // passes it. Each has its own one-turn script.
+    let base = ScriptedProvider::named("base-model", vec![text_turn("base")]);
+    let over = ScriptedProvider::named("override-model", vec![text_turn("over")]);
+    let mut agent = Agent::builder(base).system_prompt("t").build();
+
+    let o1 = agent
+        .run_with("hi", RunContext::new().with_provider(over))
+        .await
+        .expect("override run");
+    assert_eq!(o1.model.as_deref(), Some("override-model"));
+
+    // Next bare run must use the built-in provider again (override restored).
+    let o2 = agent.run("hi").await.expect("base run");
+    assert_eq!(o2.model.as_deref(), Some("base-model"));
+}
+
+#[tokio::test]
+async fn subagent_inherits_parent_per_run_config() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_child = seen.clone();
+
+    // Child agent: calls `probe` (which reads user_id from its config), then
+    // finishes. Built fresh each invocation by the factory.
+    let subagent = runic_agent_core::SubagentTool::new("worker", "delegates work", move || {
+        let child_provider = ScriptedProvider::new(vec![
+            tool_call_turn("c1", "probe", "{}"),
+            text_turn("child done"),
+        ]);
+        Agent::builder(child_provider)
+            .system_prompt("child")
+            .tool(Arc::new(ConfigProbeTool {
+                seen: seen_child.clone(),
+            }))
+            .build()
+    });
+
+    // Parent: delegates to the subagent, then finishes.
+    let parent_provider = ScriptedProvider::new(vec![
+        tool_call_turn("s1", "worker", r#"{"prompt":"do it"}"#),
+        text_turn("parent done"),
+    ]);
+    let mut parent = Agent::builder(parent_provider)
+        .system_prompt("parent")
+        .tool(Arc::new(subagent))
+        .build();
+
+    parent
+        .run_with("go", RunContext::new().with_config("user_id", "u-parent"))
+        .await
+        .expect("run");
+
+    // The child is a fresh agent, yet its tool saw the PARENT's per-run
+    // user_id — proving the run context flowed down into the sub-agent.
+    assert_eq!(*seen.lock().unwrap(), vec![Some("u-parent".to_string())]);
 }

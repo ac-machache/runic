@@ -19,6 +19,20 @@ pub struct AgentDef {
     #[serde(default)]
     pub max_turns: Option<u32>,
 
+    /// Optional key naming which provider this sub-agent runs on, looked
+    /// up in the host's keyed provider registry at spawn time (e.g.
+    /// `gemini`, `haiku`, `sonnet`, `mistral`). This is how coral runs
+    /// `ephy_expert`/`wikis_expert` on Gemini while `crm_expert`/
+    /// `purchase_expert` run on Haiku — each sub-agent picks its own
+    /// model instead of inheriting the parent's.
+    ///
+    /// `None` / missing means "inherit the parent's provider". The host
+    /// resolves the key; an unknown key is the host's call (fall back to
+    /// the parent, or fail at boot). `runic-agents` itself stays
+    /// provider-agnostic — it only carries the key.
+    #[serde(default)]
+    pub provider: Option<String>,
+
     /// Allowlist of tools (by name) this sub-agent can call. Looked up
     /// in the parent's tool pool at spawn time — names that aren't in
     /// the pool are skipped with a warning. Empty / missing = no tools.

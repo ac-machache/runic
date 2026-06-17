@@ -38,7 +38,9 @@ pub use types::{
 
 use std::sync::Arc;
 
-use runic_agent_core::{Agent, AgentConfig, AsyncSubagentTool, SessionEvent, SubagentTool};
+use runic_agent_core::{
+    Agent, AgentConfig, AsyncSubagentTool, Hook, SessionEvent, SubagentTool,
+};
 use runic_provider_core::Provider;
 use runic_skills::{SkillRegistry, SkillViewTool};
 use runic_storage_backend::StorageBackend;
@@ -116,6 +118,7 @@ impl MdAgent {
             Arc::new(runic_storage_backend::MemoryBackend::new()),
             "skills",
             None,
+            Vec::new(),
         )
     }
 
@@ -145,6 +148,7 @@ impl MdAgent {
         storage: Arc<dyn StorageBackend>,
         skills_root: &'static str,
         persister: Option<SubagentPersisterFn>,
+        hooks: Vec<Arc<dyn Hook>>,
     ) -> SubagentTool {
         let agent_name = self.def.name.clone();
         let description = self.def.description.clone();
@@ -188,6 +192,11 @@ impl MdAgent {
             if !child_tools.is_empty() {
                 builder = builder.tools(child_tools);
             }
+            // Cross-cutting hooks the parent wants enforced on children too
+            // (e.g. a per-run call-limit cap). Each child caps its own run.
+            for hook in &hooks {
+                builder = builder.hook(hook.clone());
+            }
             let agent = builder.build();
             // Subscribe BEFORE returning so the persister catches the
             // opening RunStart. The host's closure spawns the writer
@@ -221,6 +230,7 @@ impl MdAgent {
         storage: Arc<dyn StorageBackend>,
         skills_root: &'static str,
         persister: Option<SubagentPersisterFn>,
+        hooks: Vec<Arc<dyn Hook>>,
     ) -> AsyncSubagentTool {
         let agent_name = self.def.name.clone();
         let description = augment_async_description(&self.def.description);
@@ -262,6 +272,9 @@ impl MdAgent {
             if !child_tools.is_empty() {
                 builder = builder.tools(child_tools);
             }
+            for hook in &hooks {
+                builder = builder.hook(hook.clone());
+            }
             let agent = builder.build();
             if let Some(persister_fn) = persister.as_ref() {
                 let session_id = agent.state().session_id.clone();
@@ -279,8 +292,13 @@ impl MdAgent {
 /// and check progress with `background_status`. We can't trust the
 /// human-written description to spell this out; better to bake it in.
 fn augment_async_description(raw: &str) -> String {
-    let prefix = "[async] Returns a task_id immediately — check progress with \
-                  `background_status(task_id)` and read the final answer when status is 'done'. ";
+    let prefix = "[async / non-blocking] Returns a task_id IMMEDIATELY and keeps \
+                  running in the background — the whole point is that you do NOT \
+                  wait on it. After calling, keep working: reply to the user, call \
+                  other tools, or start other tasks (several can run at once). \
+                  Fetch the result later with `background_status(task_id)`, only \
+                  when you actually need it or have nothing else left to do — never \
+                  make repeated status checks your only action. ";
     format!("{prefix}{}", raw.trim_start())
 }
 
@@ -340,6 +358,33 @@ Investigate the topic.
 ";
         let agent = MdAgent::parse(raw).expect("should parse");
         assert_eq!(agent.def.max_turns, Some(8));
+    }
+
+    #[test]
+    fn parses_agent_with_provider_key() {
+        let raw = "\
+---
+name: ephy_expert
+description: phytosanitary lookups
+provider: gemini
+---
+Answer EPHY questions.
+";
+        let agent = MdAgent::parse(raw).expect("should parse");
+        assert_eq!(agent.def.provider.as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn provider_defaults_to_none_when_absent() {
+        let raw = "\
+---
+name: plain
+description: inherits parent provider
+---
+body
+";
+        let agent = MdAgent::parse(raw).expect("should parse");
+        assert!(agent.def.provider.is_none());
     }
 
     #[test]

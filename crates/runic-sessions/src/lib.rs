@@ -45,11 +45,15 @@
 pub mod error;
 pub mod file;
 pub mod persister;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod replay;
 pub mod store;
 
 pub use error::StoreError;
 pub use file::FileSessionStore;
 pub use persister::{spawn_persister, PersisterHandle};
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresSessionStore;
 pub use replay::{replay_into_state, replay_messages};
 pub use store::{SessionStore, StoredEvent};

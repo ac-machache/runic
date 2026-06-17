@@ -18,6 +18,23 @@ pub trait AgentFactory: Send + Sync {
     /// calls this once per thread on first use, then keeps the Agent
     /// alive in the [`crate::ThreadPool`] for subsequent runs.
     async fn build(&self, tenant: &str, session_id: &str) -> Agent;
+
+    /// Build the per-run context for a single request from the tenant, the
+    /// session id, and the request body's open `context` JSON. Called on
+    /// EVERY run (the pooled agent is reused), so request-varying values
+    /// (user_id, provider, allow_web_search, …) belong here — not in
+    /// [`Self::build`]. The serve crate stays agnostic to the keys; the app
+    /// decides what they mean and resolves things like a provider override.
+    ///
+    /// Default: an empty context, so existing factories keep working.
+    async fn build_run_context(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _context: &serde_json::Value,
+    ) -> runic_agent_core::RunContext {
+        runic_agent_core::RunContext::default()
+    }
 }
 
 /// Type alias for what `runic-serve` actually stores — `Arc<dyn ...>`

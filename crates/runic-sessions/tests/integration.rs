@@ -53,6 +53,8 @@ fn run_end(run_id: &str) -> SessionEvent {
             stop_reason: Some("end_turn".into()),
             usage: Default::default(),
             structured_result: None,
+            model: None,
+            provider: None,
         },
         at: Utc::now(),
     }

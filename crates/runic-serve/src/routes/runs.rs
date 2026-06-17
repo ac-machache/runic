@@ -54,6 +54,12 @@ pub struct RunMessageRequest {
     /// result arrives as a `structured_output` event.
     #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
+    /// Open per-request context, passed verbatim to the factory's
+    /// `build_run_context`. The app decides what keys mean (user_id,
+    /// provider, allow_web_search, collection_id, …); the serve crate is
+    /// agnostic to its contents.
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
 }
 
 impl RunMessageRequest {
@@ -94,9 +100,20 @@ pub async fn create_and_stream_run(
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
     // Per-request structured output schema (None clears it on the warm agent).
     let output_schema = req.output_schema.clone();
+    // Per-request context JSON (consumed by the factory below). Extract
+    // before `into_message` consumes the request.
+    let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     // Validate the body BEFORE building/locking anything, so a malformed
     // request gets a clean 400 instead of a half-open SSE stream.
     let user_msg = req.into_message()?;
+
+    // Turn the per-request context into a RunContext via the app's factory
+    // (the serve crate stays agnostic to its keys / provider resolution).
+    let run_ctx = state
+        .pool
+        .factory()
+        .build_run_context(&tenant, &thread_id, &ctx_json)
+        .await;
 
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
 
@@ -137,7 +154,7 @@ pub async fn create_and_stream_run(
         // Apply (or clear) structured output for this run.
         agent.set_structured_output(output_schema);
 
-        let (mut events, handle) = agent.run_streaming_message(user_msg);
+        let (mut events, handle) = agent.run_streaming_message_with(user_msg, run_ctx);
         while let Some(event) = events.next().await {
             // Ignore send errors (client gone) but keep draining so the
             // agent runs to completion and is returned below.
@@ -366,5 +383,69 @@ mod tests {
         assert!(matches!(parse(r#"{}"#).into_message(), Err(ServeError::BadRequest(_))));
         assert!(matches!(parse(r#"{"message":"   "}"#).into_message(), Err(ServeError::BadRequest(_))));
         assert!(matches!(parse(r#"{"content":[]}"#).into_message(), Err(ServeError::BadRequest(_))));
+    }
+
+    #[test]
+    fn per_request_context_parses_when_present() {
+        let req = parse(r#"{"message":"hi","context":{"user_id":"u1","allow_web_search":true}}"#);
+        let ctx = req.context.expect("context present");
+        assert_eq!(ctx["user_id"], "u1");
+        assert_eq!(ctx["allow_web_search"], true);
+    }
+
+    #[test]
+    fn context_is_none_when_absent() {
+        assert!(parse(r#"{"message":"hi"}"#).context.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_build_run_context_is_empty() {
+        use crate::AgentFactory;
+        use runic_agent_core::Agent;
+
+        struct BareFactory;
+        #[async_trait::async_trait]
+        impl crate::AgentFactory for BareFactory {
+            async fn build(&self, _t: &str, session_id: &str) -> Agent {
+                // Minimal agent; never run here — we only exercise the
+                // default build_run_context.
+                Agent::builder(unreachable_provider()).session_id(session_id).build()
+            }
+        }
+        // The default impl returns an empty RunContext.
+        let rc = BareFactory
+            .build_run_context("org", "thread", &serde_json::json!({"ignored": true}))
+            .await;
+        assert!(rc.config.is_empty());
+        assert!(rc.provider.is_none());
+    }
+
+    fn unreachable_provider() -> std::sync::Arc<dyn runic_provider_core::Provider> {
+        // Only constructed to satisfy the builder type; the test never runs
+        // the agent, so a panicking stub is fine.
+        struct Stub;
+        #[async_trait::async_trait]
+        impl runic_provider_core::Provider for Stub {
+            async fn complete(
+                &self,
+                _: &[runic_message_types::Message],
+                _: &[runic_message_types::ToolDefinition],
+                _: &str,
+                _: Option<&str>,
+            ) -> Result<runic_provider_core::EventStream, runic_provider_core::ProviderError>
+            {
+                unreachable!()
+            }
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn model(&self) -> String {
+                "stub".into()
+            }
+            fn fork(&self) -> std::sync::Arc<dyn runic_provider_core::Provider> {
+                std::sync::Arc::new(Stub)
+            }
+        }
+        std::sync::Arc::new(Stub)
     }
 }

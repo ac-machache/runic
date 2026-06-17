@@ -84,6 +84,7 @@ mod tests {
             messages: &[] as &[Message],
             run_id: "r1",
             turn: 0,
+            config: runic_context_engine::empty_config(),
         }
     }
 

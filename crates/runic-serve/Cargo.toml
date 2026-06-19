@@ -7,15 +7,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
-runic-agent-core = { workspace = true }
-runic-message-types = { workspace = true }
-runic-provider-core = { workspace = true }
-runic-sessions = { workspace = true }
+runic-agent = { path = "../runic-agent" }
+runic-state = { path = "../runic-state" }
+runic-tool = { path = "../runic-tool" }
+runic-types = { path = "../runic-types" }
+runic-substrate = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,6 +29,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-runic-storage-backend = { workspace = true }
+runic-provider = { path = "../runic-provider" }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }

@@ -49,6 +49,8 @@ impl HttpTransport {
         url: &str,
         headers: &HashMap<String, String>,
     ) -> Result<Self, McpError> {
+        guard_ssrf(server_name, url)?;
+
         let mut extra_headers = HeaderMap::new();
         for (k, v) in headers {
             let name = HeaderName::from_bytes(k.as_bytes())
@@ -139,6 +141,11 @@ impl Transport for HttpTransport {
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // A 404/410 on a request that carried a session id means the
+            // server dropped our session — recoverable by re-initializing.
+            if (status.as_u16() == 404 || status.as_u16() == 410) && session_id.is_some() {
+                return Err(McpError::StaleSession((*self.server_name).clone()));
+            }
             let body = resp.text().await.unwrap_or_default();
             return Err(McpError::protocol(format!(
                 "HTTP {status} from server '{}': {body}",
@@ -224,6 +231,31 @@ impl Transport for HttpTransport {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Reject MCP server URLs that point at cloud-metadata / link-local endpoints
+/// — a server config shouldn't be able to turn the agent into an SSRF vector
+/// against the host's instance-metadata service.
+fn guard_ssrf(server_name: &str, url: &str) -> Result<(), McpError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| McpError::protocol(format!("invalid MCP url '{url}': {e}")))?;
+    let host = parsed.host_str().unwrap_or("").to_lowercase();
+
+    const BLOCKED_HOSTS: &[&str] = &[
+        "169.254.169.254",              // AWS/GCP/Azure IMDS (link-local)
+        "metadata.google.internal",     // GCP metadata
+        "metadata.goog",                // GCP metadata (short)
+    ];
+    let blocked = BLOCKED_HOSTS.iter().any(|h| host == *h)
+        || host == "metadata"
+        || host.starts_with("169.254."); // link-local range
+
+    if blocked {
+        return Err(McpError::protocol(format!(
+            "refusing MCP server '{server_name}': url host '{host}' is a blocked metadata/link-local endpoint"
+        )));
+    }
+    Ok(())
+}
 
 fn jsonrpc_result(
     response: JsonRpcResponse,
@@ -328,6 +360,17 @@ mod tests {
         headers.insert("Bad\nName".into(), "v".into());
         let result = HttpTransport::new("h", "https://example.com/mcp", &headers);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn http_transport_blocks_metadata_ssrf() {
+        let h = HashMap::new();
+        // Cloud metadata / link-local endpoints must be refused.
+        assert!(HttpTransport::new("s", "http://169.254.169.254/latest/meta-data", &h).is_err());
+        assert!(HttpTransport::new("s", "http://metadata.google.internal/x", &h).is_err());
+        assert!(HttpTransport::new("s", "http://169.254.1.2/foo", &h).is_err());
+        // A normal remote endpoint is fine.
+        assert!(HttpTransport::new("s", "https://api.example.com/mcp", &h).is_ok());
     }
 
     #[tokio::test]

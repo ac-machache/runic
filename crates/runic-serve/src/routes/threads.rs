@@ -1,13 +1,12 @@
-//! Thread CRUD — backed by the `SessionStore`.
+//! Thread CRUD — backed by the [`runic_substrate::SessionStore`].
 //!
-//! A "thread" in the HTTP surface == a "session" in our internal
-//! `runic-sessions` vocabulary. We expose the resource with the more
-//! conventional HTTP name; internally it routes to the same store.
+//! A "thread" in the HTTP surface == a "session" internally. We expose the
+//! resource with the conventional HTTP name; it routes to the same store.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use runic_sessions::StoredEvent;
+use runic_substrate::StoredEvent;
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
@@ -33,19 +32,18 @@ pub struct ThreadSummary {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct CreateThreadRequest {
-    /// If provided, the thread is created with this id. Otherwise the
-    /// server generates a UUID. Either way the value is returned in the
-    /// response so the client can stash it.
+    /// If provided, the thread is created with this id; otherwise the server
+    /// generates a UUID. Either way the id is returned so the client can stash
+    /// it.
     #[serde(default)]
     pub thread_id: Option<String>,
 }
 
-/// `POST /threads` — create an empty thread. Idempotent on existing id.
+/// `POST /threads` — create an empty thread. Idempotent on an existing id.
 ///
-/// We don't materialise anything in the store for an empty thread —
-/// `runic-sessions::FileSessionStore` lazily creates the per-session
-/// directory on first event append. The response just confirms the id
-/// the client should use on subsequent calls.
+/// Nothing is materialised in the store for an empty thread — the store lazily
+/// creates per-session state on first event append. The response just confirms
+/// the id to use on subsequent calls.
 pub async fn create_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -78,11 +76,11 @@ pub async fn list_threads(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
 ) -> Result<Json<ThreadList>, ServeError> {
-    let ids: Vec<String> = state.session_store.list_sessions(&tenant).await?;
+    let metas = state.session_store.list_sessions(&tenant).await?;
     Ok(Json(ThreadList {
-        threads: ids
+        threads: metas
             .into_iter()
-            .map(|thread_id| ThreadSummary { thread_id })
+            .map(|m| ThreadSummary { thread_id: m.session_id })
             .collect(),
     }))
 }
@@ -94,9 +92,9 @@ pub async fn get_thread(
     Path(thread_id): Path<String>,
 ) -> Result<Json<Thread>, ServeError> {
     let events: Vec<StoredEvent> = state.session_store.read(&tenant, &thread_id).await?;
-    // No events yet → return empty shape rather than 404. A real prod
-    // server would have a separate "threads" metadata table to
-    // distinguish "created but empty" from "never existed".
+    // No events yet → empty shape rather than 404 (a real server would have a
+    // separate threads-metadata table to tell "created but empty" from "never
+    // existed").
     Ok(Json(Thread {
         thread_id,
         tenant,
@@ -104,11 +102,9 @@ pub async fn get_thread(
     }))
 }
 
-/// `GET /threads/:id/events` — the full stored event log as a JSON
-/// snapshot (not an SSE stream). Each entry is `{seq, event}`, where
-/// `event` is the raw `SessionEvent`. Powers a dev UI's history load and
-/// state inspector — the SSE replay endpoint is for *live* following; this
-/// is for "show me everything this thread has done."
+/// `GET /threads/:id/events` — the full stored event log as a JSON snapshot
+/// (not SSE). Each entry is `{seq, event}` with the raw `SessionEvent`. Powers
+/// a dev UI's history load.
 pub async fn thread_events(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -126,54 +122,34 @@ pub async fn thread_events(
     })))
 }
 
-/// `GET /threads/:id/state` — the full agent state for inspection: the
-/// system prompt, the message list exactly as sent to the model, and run /
-/// event counts. Reads the warm agent when it's idle; if a run is in
-/// flight (slot locked) it reports `busy` and falls back to the message
-/// list reconstructed from the event store.
+/// `GET /threads/:id/state` — agent state for inspection: the system prompt,
+/// the message list as sent to the model, and run / event counts. Reads the
+/// warm agent when idle; if a run is in flight (slot locked) it reports `busy`
+/// and reconstructs the message list from the event store.
 pub async fn thread_state(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-    if let Ok(slot) = agent_arc.try_lock()
-        && let Some(agent) = slot.as_ref() {
-            let base_system_prompt = agent.state().system_prompt.clone();
-            let messages = agent.state().messages_for_provider();
-            let event_count = agent.state().events.len();
-            let run_count = agent.state().runs().len();
-            // The fully assembled prompt (base + SOUL/USER/MEMORY/skills
-            // layers) — what the model actually receives — and the tool
-            // schemas as sent to the provider.
-            let assembled_system_prompt = agent.assembled_system_prompt().await;
-            let tools: Vec<serde_json::Value> = agent
-                .tool_definitions()
-                .into_iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.input_schema,
-                    })
-                })
-                .collect();
-            return Ok(Json(serde_json::json!({
-                "thread_id": thread_id,
-                "tenant": tenant,
-                "busy": false,
-                "base_system_prompt": base_system_prompt,
-                "assembled_system_prompt": assembled_system_prompt,
-                "tools": tools,
-                "messages": messages,
-                "event_count": event_count,
-                "run_count": run_count,
-            })));
-        }
-    // Busy (run in progress) or empty slot — reconstruct messages from store.
-    let messages = runic_sessions::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
-        .await
-        .unwrap_or_default();
+    if let Ok(agent) = agent_arc.try_lock() {
+        let st = agent.state();
+        return Ok(Json(serde_json::json!({
+            "thread_id": thread_id,
+            "tenant": tenant,
+            "busy": false,
+            "system_prompt": st.system_prompt,
+            "messages": st.messages_for_provider(),
+            "event_count": st.events.len(),
+            "run_count": st.runs().len(),
+        })));
+    }
+
+    // Busy (run in progress) — reconstruct messages from the store.
+    let messages =
+        runic_substrate::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
+            .await
+            .unwrap_or_default();
     let event_count = state
         .session_store
         .read(&tenant, &thread_id)
@@ -184,17 +160,15 @@ pub async fn thread_state(
         "thread_id": thread_id,
         "tenant": tenant,
         "busy": true,
-        "base_system_prompt": "",
-        "assembled_system_prompt": "",
-        "tools": serde_json::Value::Array(vec![]),
+        "system_prompt": "",
         "messages": messages,
         "event_count": event_count,
         "run_count": serde_json::Value::Null,
     })))
 }
 
-/// `DELETE /threads/:id` — drop the thread's session AND its in-pool
-/// Agent so the next run starts fresh.
+/// `DELETE /threads/:id` — drop the thread's session AND its in-pool Agent so
+/// the next run starts fresh.
 pub async fn delete_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,

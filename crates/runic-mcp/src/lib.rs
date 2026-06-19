@@ -1,7 +1,7 @@
 //! `runic-mcp` — Model Context Protocol client.
 //!
 //! Connects to MCP servers and wraps each one's tools as a
-//! [`runic_tool_core::Tool`] so the agent can call them uniformly alongside
+//! [`runic_tool::Tool`] so the agent can call them uniformly alongside
 //! native tools.
 //!
 //! ## Transports
@@ -28,7 +28,7 @@
 //! - [`protocol`] — JSON-RPC 2.0 + MCP message types
 //! - [`transport`] / [`transport_http`] — the transports
 //! - [`client`] — `McpClient` + `McpHandle`
-//! - [`tool`] — `McpTool` adapter (impls `runic_tool_core::Tool`)
+//! - [`tool`] — `McpTool` adapter (impls `runic_tool::Tool`)
 //! - [`manager`] — per-session multi-server orchestration
 //! - [`pool`] — daemon-wide shared pool for stateless servers
 //!
@@ -37,15 +37,21 @@
 
 pub mod client;
 pub mod config;
+pub mod deferred;
 pub mod error;
 pub mod manager;
 pub mod pool;
 pub mod protocol;
 pub mod tool;
+pub mod tool_search;
 pub mod transport;
 pub mod transport_http;
 
 pub use client::{McpClient, McpHandle};
+pub use deferred::{
+    deferred_tools_prompt_section, DeferredMcpToolSet, DeferredMcpToolStub, ToolAccessPolicy,
+};
+pub use tool_search::ToolSearchTool;
 pub use config::{HttpServerConfig, McpConfig, McpServerConfig, StdioServerConfig};
 pub use error::McpError;
 pub use manager::McpManager;

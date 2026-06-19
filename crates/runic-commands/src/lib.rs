@@ -1,96 +1,73 @@
-//! runic-commands — slash commands defined as markdown (`COMMAND.md`).
+//! `runic-commands` — user slash commands as Markdown (`COMMAND.md`).
 //!
-//! A command is a reusable prompt template the user invokes as `/name args`
-//! from whatever surface hosts the agent (REPL, HTTP, …). Like skills and
-//! agents, commands are purely declarative — a directory per command under
-//! some root, each holding a `COMMAND.md` with YAML frontmatter and a
-//! markdown body:
+//! A command is a reusable **prompt template** the user invokes as `/name args`
+//! from whatever surface hosts the agent (REPL, HTTP, …). It does NOT bypass
+//! the model and it is NOT a tool: the surface parses `/name args`, expands the
+//! template, and sends the result as the run's user input.
 //!
 //! ```text
-//! commands/
-//! └── review/
-//!     └── COMMAND.md
+//! commands/review/COMMAND.md
 //! ```
-//!
 //! ```markdown
 //! ---
 //! name: review
-//! description: review a diff with my preferences
+//! description: Review a file for bugs and style
 //! ---
-//! Review the following with an eye for unwrap() abuse and missing tests:
+//! Review the following file and list issues:
 //!
 //! $ARGUMENTS
 //! ```
-//!
-//! Invoking `/review src/lib.rs` expands the body with `$ARGUMENTS` replaced
-//! by `src/lib.rs` and sends the result to the agent as the user message.
-//! If the body has no `$ARGUMENTS` placeholder and arguments were given,
-//! they're appended on a new line so nothing the user typed is dropped.
-//!
-//! The frontmatter/body format and the registry's load behavior are
-//! deliberately identical to `runic-skills` — same `---` delimiters, same
-//! tolerance for Directory- vs File-listing backends, same hard error on a
-//! malformed file with the path in the payload.
 
-use runic_storage_backend::{EntryKind, StorageBackend};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::Path;
 
-/// Placeholder in a command body that gets replaced with everything the
-/// user typed after the command name.
-pub const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
+use serde::Deserialize;
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CommandMeta {
-    pub name: String,
-    pub description: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ParseError {
-    #[error("missing or malformed frontmatter (expected '---' delimeters)")]
-    MissingFrontMatter,
-
-    #[error("invalid YAML in frontmatter: {0}")]
-    InvalidYaml(#[from] serde_yml::Error),
-}
-
+/// A parsed command (a named prompt template).
 #[derive(Debug, Clone)]
 pub struct Command {
-    pub meta: CommandMeta,
+    pub name: String,
+    pub description: String,
+    /// The template body; `$ARGUMENTS` is substituted at expansion.
     pub body: String,
-    pub dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Frontmatter {
+    name: String,
+    #[serde(default)]
+    description: String,
 }
 
 impl Command {
-    pub fn parse(raw: &str) -> Result<Self, ParseError> {
-        let rest = raw
-            .strip_prefix("---\n")
-            .ok_or(ParseError::MissingFrontMatter)?;
-
-        let close = rest.find("\n---\n").ok_or(ParseError::MissingFrontMatter)?;
-
-        let descriptor = &rest[..close];
-        let body = &rest[close + "\n---\n".len()..];
-
-        let meta: CommandMeta = serde_yml::from_str(descriptor)?;
-
-        Ok(Command {
-            meta,
-            body: body.to_string(),
-            dir: String::new(),
+    /// Parse a `COMMAND.md` document.
+    pub fn parse(src: &str) -> anyhow::Result<Self> {
+        let src = src.trim_start_matches('\u{feff}').trim_start();
+        let rest = src
+            .strip_prefix("---")
+            .ok_or_else(|| anyhow::anyhow!("COMMAND.md must start with `---` frontmatter"))?;
+        let end = rest
+            .find("\n---")
+            .ok_or_else(|| anyhow::anyhow!("COMMAND.md frontmatter is not terminated by `---`"))?;
+        let fm: Frontmatter = serde_yml::from_str(&rest[..end])
+            .map_err(|e| anyhow::anyhow!("invalid COMMAND.md frontmatter: {e}"))?;
+        if fm.name.trim().is_empty() {
+            anyhow::bail!("COMMAND.md frontmatter is missing `name`");
+        }
+        let after = &rest[end + 4..];
+        let body = after.strip_prefix('\n').unwrap_or(after).trim().to_string();
+        Ok(Self {
+            name: fm.name,
+            description: fm.description,
+            body,
         })
     }
 
-    /// Expand the body with the user's arguments. `$ARGUMENTS` occurrences
-    /// are replaced; when the placeholder is absent but arguments were
-    /// given, they're appended on their own line so user input is never
-    /// silently dropped.
+    /// Expand the template with the user's arguments. `$ARGUMENTS` is replaced
+    /// if present; otherwise args (if any) are appended so they're never lost.
     pub fn expand(&self, args: &str) -> String {
-        let args = args.trim();
-        if self.body.contains(ARGUMENTS_PLACEHOLDER) {
-            self.body.replace(ARGUMENTS_PLACEHOLDER, args)
-        } else if args.is_empty() {
+        if self.body.contains("$ARGUMENTS") {
+            self.body.replace("$ARGUMENTS", args)
+        } else if args.trim().is_empty() {
             self.body.clone()
         } else {
             format!("{}\n\n{args}", self.body.trim_end())
@@ -98,248 +75,124 @@ impl Command {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum LoadError {
-    #[error("storage error: {0}")]
-    Storage(#[from] runic_storage_backend::StorageError),
-
-    #[error("failed to parse command at '{path}': {source}")]
-    Parse {
-        path: String,
-        #[source]
-        source: ParseError,
-    },
+/// Split a raw input into `(command_name, args)` if it's a `/name ...`
+/// invocation, else `None`.
+pub fn split_invocation(input: &str) -> Option<(&str, &str)> {
+    let rest = input.trim_start().strip_prefix('/')?;
+    let rest = rest.trim_start_matches('/'); // tolerate "//"
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((n, a)) => (n, a.trim()),
+        None => (rest, ""),
+    };
+    if name.is_empty() {
+        None
+    } else {
+        Some((name, args))
+    }
 }
 
-/// Pure-data index of parsed commands — holds no storage reference after
-/// loading, same contract as `SkillRegistry`.
+/// A set of commands.
 #[derive(Debug, Clone, Default)]
 pub struct CommandRegistry {
-    commands: HashMap<String, Command>,
+    commands: Vec<Command>,
 }
 
 impl CommandRegistry {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(commands: Vec<Command>) -> Self {
+        Self { commands }
     }
 
-    /// Scan `root` in `storage`, parse every `{dir}/COMMAND.md` found, and
-    /// return a populated registry. Directories without a `COMMAND.md` are
-    /// silently skipped; a malformed `COMMAND.md` is a hard error carrying
-    /// the offending path.
-    pub async fn load(storage: Arc<dyn StorageBackend>, root: &str) -> Result<Self, LoadError> {
-        let mut commands = HashMap::new();
-        let entries = storage.list(root).await?;
-
-        // Same dual-shape tolerance as SkillRegistry::load — hierarchical
-        // backends list Directory entries, flat KV backends list full File
-        // keys.
-        for entry in &entries {
-            let path = match entry.kind {
-                EntryKind::Directory => format!("{}/COMMAND.md", entry.key),
-                EntryKind::File if entry.key.ends_with("/COMMAND.md") => entry.key.clone(),
-                _ => continue,
-            };
-
-            let raw = match storage.read_to_string(&path).await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            let mut command = Command::parse(&raw).map_err(|e| LoadError::Parse {
-                path: path.clone(),
-                source: e,
-            })?;
-
-            command.dir = std::path::Path::new(&path)
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-
-            commands.insert(command.meta.name.clone(), command);
+    /// Load every `<root>/<name>/COMMAND.md` and any top-level `<root>/*.md`.
+    pub fn from_dir(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        let mut commands = Vec::new();
+        let mut consider = |path: &Path| {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                match Command::parse(&text) {
+                    Ok(cmd) => commands.push(cmd),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "skipping invalid COMMAND.md")
+                    }
+                }
+            }
+        };
+        for entry in std::fs::read_dir(root)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let cmd = path.join("COMMAND.md");
+                if cmd.is_file() {
+                    consider(&cmd);
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                consider(&path);
+            }
         }
-
         Ok(Self { commands })
-    }
-
-    /// Insert a command directly. Useful for tests.
-    pub fn insert(&mut self, command: Command) {
-        self.commands.insert(command.meta.name.clone(), command);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&Command> {
-        self.commands.get(name)
-    }
-
-    /// All commands sorted by name, for deterministic help listings.
-    pub fn list(&self) -> Vec<&Command> {
-        let mut out: Vec<&Command> = self.commands.values().collect();
-        out.sort_by(|a, b| a.meta.name.cmp(&b.meta.name));
-        out
-    }
-
-    pub fn len(&self) -> usize {
-        self.commands.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
-}
-
-/// Split a raw `/name the rest` invocation into `(name, args)`. Returns
-/// `None` when the input isn't a slash invocation at all (doesn't start
-/// with `/`, or has no name).
-pub fn split_invocation(input: &str) -> Option<(&str, &str)> {
-    let rest = input.strip_prefix('/')?;
-    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-        return None;
+    pub fn len(&self) -> usize {
+        self.commands.len()
     }
-    match rest.split_once(char::is_whitespace) {
-        Some((name, args)) => Some((name, args.trim())),
-        None => Some((rest, "")),
+    pub fn get(&self, name: &str) -> Option<&Command> {
+        self.commands.iter().find(|c| c.name == name)
+    }
+    pub fn names(&self) -> Vec<&str> {
+        self.commands.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    /// All commands (for aggregation, e.g. by the plugin manager).
+    pub fn all(&self) -> &[Command] {
+        &self.commands
+    }
+
+    /// Resolve a raw `/name args` input to its expanded prompt, if it's a
+    /// known command. Returns `None` for non-invocations and unknown commands
+    /// (so the surface can fall through to a plain message).
+    pub fn resolve(&self, input: &str) -> Option<String> {
+        let (name, args) = split_invocation(input)?;
+        self.get(name).map(|cmd| cmd.expand(args))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_storage_backend::MemoryBackend;
 
-    fn command_md(name: &str, description: &str, body: &str) -> Vec<u8> {
-        format!("---\nname: {name}\ndescription: {description}\n---\n{body}").into_bytes()
-    }
-
-    // ─── Parsing (delimiter strictness is covered exhaustively in
-    //     runic-skills; the parser here is the same shape) ──────────────────
-
-    #[test]
-    fn parses_a_minimal_command() {
-        let raw = "---\nname: review\ndescription: review a diff\n---\nReview this:\n\n$ARGUMENTS\n";
-        let cmd = Command::parse(raw).expect("should parse");
-        assert_eq!(cmd.meta.name, "review");
-        assert!(cmd.body.contains("$ARGUMENTS"));
+    fn cmd(src: &str) -> Command {
+        Command::parse(src).unwrap()
     }
 
     #[test]
-    fn rejects_missing_frontmatter() {
-        assert!(matches!(
-            Command::parse("no frontmatter here").unwrap_err(),
-            ParseError::MissingFrontMatter
-        ));
+    fn parses_and_expands_arguments() {
+        let c = cmd("---\nname: review\ndescription: review a file\n---\nReview this:\n\n$ARGUMENTS");
+        assert_eq!(c.name, "review");
+        assert_eq!(c.expand("src/lib.rs"), "Review this:\n\nsrc/lib.rs");
     }
 
     #[test]
-    fn rejects_missing_required_fields() {
-        let raw = "---\nname: lonely\n---\nbody";
-        assert!(matches!(
-            Command::parse(raw).unwrap_err(),
-            ParseError::InvalidYaml(_)
-        ));
-    }
-
-    // ─── Expansion ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn expand_replaces_arguments_placeholder() {
-        let cmd = Command::parse("---\nname: r\ndescription: d\n---\nReview: $ARGUMENTS!").unwrap();
-        assert_eq!(cmd.expand("src/lib.rs"), "Review: src/lib.rs!");
+    fn appends_args_when_no_placeholder() {
+        let c = cmd("---\nname: summarize\ndescription: x\n---\nSummarize the input.");
+        assert_eq!(c.expand("hello"), "Summarize the input.\n\nhello");
+        assert_eq!(c.expand(""), "Summarize the input.");
     }
 
     #[test]
-    fn expand_replaces_every_placeholder_occurrence() {
-        let cmd =
-            Command::parse("---\nname: r\ndescription: d\n---\n$ARGUMENTS and $ARGUMENTS").unwrap();
-        assert_eq!(cmd.expand("x"), "x and x");
-    }
-
-    #[test]
-    fn expand_with_empty_args_blanks_the_placeholder() {
-        let cmd = Command::parse("---\nname: r\ndescription: d\n---\nReview: $ARGUMENTS").unwrap();
-        assert_eq!(cmd.expand("  "), "Review: ");
-    }
-
-    #[test]
-    fn expand_appends_args_when_no_placeholder() {
-        let cmd = Command::parse("---\nname: r\ndescription: d\n---\nDo the thing.\n").unwrap();
-        assert_eq!(cmd.expand("with feeling"), "Do the thing.\n\nwith feeling");
-    }
-
-    #[test]
-    fn expand_without_placeholder_or_args_returns_body_verbatim() {
-        let cmd = Command::parse("---\nname: r\ndescription: d\n---\nDo the thing.\n").unwrap();
-        assert_eq!(cmd.expand(""), "Do the thing.\n");
-    }
-
-    // ─── Invocation splitting ───────────────────────────────────────────────
-
-    #[test]
-    fn split_invocation_handles_name_and_args() {
+    fn split_invocation_parses() {
         assert_eq!(split_invocation("/review src/lib.rs"), Some(("review", "src/lib.rs")));
-        assert_eq!(split_invocation("/review"), Some(("review", "")));
-        assert_eq!(split_invocation("/review   spaced   "), Some(("review", "spaced")));
+        assert_eq!(split_invocation("/help"), Some(("help", "")));
+        assert_eq!(split_invocation("not a command"), None);
+        assert_eq!(split_invocation("/"), None);
     }
 
     #[test]
-    fn split_invocation_rejects_non_commands() {
-        assert_eq!(split_invocation("plain text"), None);
-        assert_eq!(split_invocation("/"), None);
-        assert_eq!(split_invocation("/ leading space"), None);
-        assert_eq!(split_invocation(""), None);
-    }
-
-    // ─── Registry load ──────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn load_discovers_and_parses_commands() {
-        let storage: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
-        storage
-            .write(
-                "commands/review/COMMAND.md",
-                &command_md("review", "review a diff", "Review:\n$ARGUMENTS"),
-            )
-            .await
-            .unwrap();
-        storage
-            .write(
-                "commands/standup/COMMAND.md",
-                &command_md("standup", "summarize recent work", "Summarize."),
-            )
-            .await
-            .unwrap();
-        // Unrelated sibling must be ignored.
-        storage
-            .write("commands/notes/random.txt", b"unrelated")
-            .await
-            .unwrap();
-
-        let reg = CommandRegistry::load(storage, "commands").await.unwrap();
-        assert_eq!(reg.len(), 2);
-        assert_eq!(reg.get("review").unwrap().dir, "review");
-        let names: Vec<&str> = reg.list().iter().map(|c| c.meta.name.as_str()).collect();
-        assert_eq!(names, vec!["review", "standup"]);
-    }
-
-    #[tokio::test]
-    async fn load_from_empty_root_yields_empty_registry() {
-        let storage: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
-        let reg = CommandRegistry::load(storage, "commands").await.unwrap();
-        assert!(reg.is_empty());
-    }
-
-    #[tokio::test]
-    async fn load_errors_with_path_on_malformed_command() {
-        let storage: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
-        storage
-            .write("commands/broken/COMMAND.md", b"no frontmatter")
-            .await
-            .unwrap();
-
-        match CommandRegistry::load(storage, "commands").await.unwrap_err() {
-            LoadError::Parse { path, .. } => assert_eq!(path, "commands/broken/COMMAND.md"),
-            other => panic!("expected Parse error, got {other:?}"),
-        }
+    fn registry_resolves_known_only() {
+        let reg = CommandRegistry::new(vec![cmd(
+            "---\nname: review\ndescription: x\n---\nReview:\n$ARGUMENTS",
+        )]);
+        assert_eq!(reg.resolve("/review foo.rs").as_deref(), Some("Review:\nfoo.rs"));
+        assert!(reg.resolve("/unknown x").is_none());
+        assert!(reg.resolve("plain message").is_none());
     }
 }

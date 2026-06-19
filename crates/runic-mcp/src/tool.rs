@@ -1,4 +1,4 @@
-//! `McpTool` — adapts one remote MCP tool into a local [`runic_tool_core::Tool`].
+//! `McpTool` — adapts one remote MCP tool into a local [`runic_tool::Tool`].
 //!
 //! Names are prefixed `mcp__{server}__{tool}` so they can't collide with
 //! native tools or with tools from other MCP servers. The agent registers
@@ -6,7 +6,7 @@
 //! execution semantics.
 
 use async_trait::async_trait;
-use runic_tool_core::{Tool, ToolContext, ToolResult};
+use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::client::McpHandle;
 use crate::protocol::{content_blocks_to_text, McpToolDef};
@@ -57,14 +57,18 @@ impl Tool for McpTool {
         self.def.description.as_deref().unwrap_or("")
     }
 
-    fn input_schema(&self) -> serde_json::Value {
+    fn parameters_schema(&self) -> serde_json::Value {
         // Pass the server's JSON Schema through verbatim — that's exactly
         // what the agent/provider needs.
         self.def.input_schema.clone()
     }
 
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
-        match self.handle.call_tool(&self.def.name, input).await {
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        let result = match self.handle.call_tool(&self.def.name, input).await {
             Ok(result) => {
                 let text = content_blocks_to_text(&result.content);
                 if result.is_error.unwrap_or(false) {
@@ -73,12 +77,15 @@ impl Tool for McpTool {
                     ToolResult::ok(text)
                 }
             }
+            // A transport/protocol failure becomes an in-band error result so
+            // the model can read it and react, rather than aborting the run.
             Err(err) => ToolResult::error(format!(
                 "mcp tool '{}' on server '{}' failed: {err}",
                 self.def.name,
                 self.handle.server_name()
             )),
-        }
+        };
+        Ok(result)
     }
 }
 
@@ -163,7 +170,7 @@ mod tests {
         let mut def = make_def("t");
         def.input_schema = serde_json::json!({"type": "object", "x": 42});
         let tool = McpTool::new(handle, def);
-        assert_eq!(tool.input_schema(), serde_json::json!({"type": "object", "x": 42}));
+        assert_eq!(tool.parameters_schema(), serde_json::json!({"type": "object", "x": 42}));
     }
 
     #[test]

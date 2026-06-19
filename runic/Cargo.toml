@@ -12,33 +12,20 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-runic-provider-core = { workspace = true }
-runic-provider-anthropic = { workspace = true }
-runic-provider-gemini = { workspace = true }
-runic-provider-openai = { workspace = true }
-runic-mcp = {workspace = true }
-runic-agent-core = { workspace = true }
-runic-message-types = {workspace = true }
-runic-tool-core = { workspace = true }
-runic-storage-backend = { workspace = true }
-async-trait = { workspace =  true }
-base64 = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-runic-agents = { workspace = true }
-runic-skills = { workspace = true }
-runic-shell-tools = { workspace = true }
-runic-context-engine = { workspace = true }
-runic-commands = { workspace = true }
-runic-serve = { workspace = true }
-runic-sessions = { workspace = true, features = ["postgres"] }
-runic-memory = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
 axum = { workspace = true }
 dotenvy = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-[dev-dependencies]
-futures = { workspace = true }
+# New stack (path deps — not in workspace.dependencies yet).
+runic-agent = { path = "../crates/runic-agent" }
+runic-provider = { path = "../crates/runic-provider", features = ["anthropic"] }
+runic-filesystem = { path = "../crates/runic-filesystem" }
+runic-tools = { path = "../crates/runic-tools" }
+
+# New stack (already in workspace.dependencies).
+runic-memory = { workspace = true }
+runic-serve = { workspace = true }
+runic-substrate = { workspace = true }

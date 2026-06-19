@@ -4,18 +4,18 @@
 use std::sync::Arc;
 
 use runic_memory::{BoundedMemoryStore, MemoryTool, Target};
-use runic_storage_backend::{LocalFsBackend, StorageBackend};
-use runic_tool_core::{Tool, ToolContext};
+use runic_filesystem::{FilesystemBackend, LocalFs};
+use runic_tool::{Tool, ToolContext};
 use tempfile::tempdir;
 
 fn ctx() -> ToolContext {
-    ToolContext::new("session-1".into(), "run-1".into(), 0, Default::default())
+    ToolContext::new("user-1", "session-1", "run-1")
 }
 
 #[tokio::test]
 async fn writes_land_under_memory_subdir_on_disk() {
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(dir.path()));
+    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
     let store = BoundedMemoryStore::new(backend);
 
     store
@@ -31,7 +31,7 @@ async fn writes_land_under_memory_subdir_on_disk() {
 #[tokio::test]
 async fn second_entry_uses_section_sign_delimiter() {
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(dir.path()));
+    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
     let store = BoundedMemoryStore::new(backend);
 
     store.add(Target::Memory, "first").await.unwrap();
@@ -50,7 +50,7 @@ async fn tool_writes_show_up_when_a_separate_reader_reads() {
     // Models the REPL flow: the tool writes through one Arc<store>,
     // a separate read path picks up the changes.
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(dir.path()));
+    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
     let store = Arc::new(BoundedMemoryStore::new(backend.clone()));
     let tool = MemoryTool::new(store.clone());
 
@@ -59,8 +59,9 @@ async fn tool_writes_show_up_when_a_separate_reader_reads() {
             serde_json::json!({"action": "add", "target": "memory", "content": "shell is zsh"}),
             &ctx(),
         )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
+        .await
+        .unwrap();
+    assert!(result.success, "{}", result.output);
 
     let from_fs = tokio::fs::read_to_string(dir.path().join("memory/MEMORY.md"))
         .await
@@ -73,7 +74,7 @@ async fn concurrent_adds_dont_lose_writes() {
     // Hammer the same store from many tasks at once; every successful
     // add must show up in the final read.
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn StorageBackend> = Arc::new(LocalFsBackend::new(dir.path()));
+    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
     let store = Arc::new(BoundedMemoryStore::new(backend).with_limits(100_000, 100_000));
 
     let mut joins = Vec::new();

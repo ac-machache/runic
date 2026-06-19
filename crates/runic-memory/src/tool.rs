@@ -8,25 +8,32 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runic_tool_core::{Tool, ToolContext, ToolResult};
+use runic_tool::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
 use crate::error::MemoryError;
 use crate::store::{BoundedMemoryStore, Target};
 
-const DESCRIPTION: &str = "Persistent curated memory you control. Two stores:\n\
-- target='memory' (MEMORY.md): your own notes — environment facts, project conventions, tool quirks, things you learned. Cap 2200 chars.\n\
-- target='user' (USER.md): facts about the user — preferences, communication style, expectations, workflow habits. Cap 1375 chars.\n\
+/// Tool description — folds in hermes's MEMORY_GUIDANCE so an LLM authored
+/// against hermes uses this identically: *when* to save, declarative-not-
+/// imperative phrasing, and what NOT to store.
+const DESCRIPTION: &str = "Persistent curated memory you control, injected into your prompt every session. Two stores:\n\
+- target='memory' (MEMORY.md): your own notes — environment facts, project conventions, tool quirks, lessons learned. Cap 2200 chars.\n\
+- target='user' (USER.md): who the user is — preferences, role, communication style, pet peeves, workflow habits. Cap 1375 chars.\n\
 \n\
-Both files are auto-injected into your system prompt at the start of every turn. Mid-session writes are persisted to disk immediately; the next turn picks them up.\n\
+WHEN TO SAVE (proactively, don't wait to be asked): the user corrects you or says 'remember this'; shares a preference or personal detail; you discover an environment fact (OS, tooling, project layout); you learn a convention or API quirk. Priority: user preferences/corrections > environment facts > procedural knowledge — the best memory stops the user repeating themselves.\n\
+\n\
+DO NOT SAVE task progress, session outcomes, PR/issue numbers, commit SHAs, 'Phase N done', or anything stale within a week. If it will be stale in a week, it does not belong here. Procedures/workflows belong in skills, not memory.\n\
+\n\
+Write DECLARATIVE FACTS, not instructions: 'User prefers concise responses' OK — 'Always respond concisely' WRONG. Imperative phrasing gets re-read as a directive in later sessions and causes repeated work.\n\
 \n\
 Actions:\n\
 - action='read', target=<store>: list current entries.\n\
-- action='add', target=<store>, content='<single fact>': append a pithy single-fact entry. Idempotent (re-adding the same content does nothing). Errors if it would breach the cap — `remove` or `replace` first.\n\
-- action='remove', target=<store>, search='<unique substring>': delete one entry. The substring must match exactly one entry — narrow it on ambiguity.\n\
-- action='replace', target=<store>, search='<unique substring>', replacement='<new content>': swap one entry. Same uniqueness rule as remove.\n\
+- action='add', target=<store>, content='<single fact>': append a pithy single-fact line. Idempotent. Errors if it would breach the cap — `remove` or `replace` first.\n\
+- action='remove', target=<store>, search='<unique substring>': delete one entry (substring must match exactly one).\n\
+- action='replace', target=<store>, search='<unique substring>', replacement='<new content>': swap one entry (same uniqueness rule).\n\
 \n\
-Style: each entry is one short self-contained line. Don't write paragraphs. Don't add timestamps or dates — they age badly. Don't duplicate things already in your persona (SOUL.md).";
+Style: one short self-contained line per entry. No paragraphs, no timestamps/dates.";
 
 pub struct MemoryTool {
     store: Arc<BoundedMemoryStore>,
@@ -48,7 +55,7 @@ impl Tool for MemoryTool {
         DESCRIPTION
     }
 
-    fn input_schema(&self) -> Value {
+    fn parameters_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -80,11 +87,11 @@ impl Tool for MemoryTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
-        match self.dispatch(input).await {
+    async fn execute(&self, input: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(match self.dispatch(input).await {
             Ok(out) => ToolResult::ok(out),
             Err(err) => ToolResult::error(err.to_string()),
-        }
+        })
     }
 }
 
@@ -179,150 +186,91 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_storage_backend::{MemoryBackend, StorageBackend};
-    use runic_tool_core::ToolContext;
+    use runic_filesystem::{FilesystemBackend, MemoryFs};
+    use runic_tool::ToolContext;
     use std::sync::Arc;
 
     fn make() -> (MemoryTool, Arc<BoundedMemoryStore>) {
-        let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
         let store = Arc::new(BoundedMemoryStore::new(backend));
         (MemoryTool::new(store.clone()), store)
     }
 
     fn ctx() -> ToolContext {
-        ToolContext::new("session-1".into(), "run-1".into(), 0, Default::default())
+        ToolContext::new("user-1", "session-1", "run-1")
+    }
+
+    async fn run(tool: &MemoryTool, v: Value) -> ToolResult {
+        tool.execute(v, &ctx()).await.unwrap()
     }
 
     #[tokio::test]
     async fn add_then_read_via_tool() {
         let (tool, _) = make();
-        let add = tool
-            .execute(
-                serde_json::json!({"action": "add", "target": "user", "content": "lives in Paris"}),
-                &ctx(),
-            )
-            .await;
-        assert!(!add.is_error, "{:?}", add.content);
+        let add = run(&tool, serde_json::json!({"action": "add", "target": "user", "content": "lives in Paris"})).await;
+        assert!(add.success, "{:?}", add.output);
 
-        let read = tool
-            .execute(
-                serde_json::json!({"action": "read", "target": "user"}),
-                &ctx(),
-            )
-            .await;
-        assert!(!read.is_error);
-        assert!(read.content.contains("lives in Paris"));
-        assert!(read.content.contains("1 entries"));
+        let read = run(&tool, serde_json::json!({"action": "read", "target": "user"})).await;
+        assert!(read.success);
+        assert!(read.output.contains("lives in Paris"));
+        assert!(read.output.contains("1 entries"));
     }
 
     #[tokio::test]
     async fn add_missing_content_errors() {
         let (tool, _) = make();
-        let result = tool
-            .execute(
-                serde_json::json!({"action": "add", "target": "user"}),
-                &ctx(),
-            )
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("content"));
+        let result = run(&tool, serde_json::json!({"action": "add", "target": "user"})).await;
+        assert!(!result.success);
+        assert!(result.output.contains("content"));
     }
 
     #[tokio::test]
     async fn invalid_action_errors() {
         let (tool, _) = make();
-        let result = tool
-            .execute(
-                serde_json::json!({"action": "yeet", "target": "memory"}),
-                &ctx(),
-            )
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("yeet"));
+        let result = run(&tool, serde_json::json!({"action": "yeet", "target": "memory"})).await;
+        assert!(!result.success);
+        assert!(result.output.contains("yeet"));
     }
 
     #[tokio::test]
     async fn invalid_target_errors() {
         let (tool, _) = make();
-        let result = tool
-            .execute(
-                serde_json::json!({"action": "read", "target": "nope"}),
-                &ctx(),
-            )
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("nope"));
+        let result = run(&tool, serde_json::json!({"action": "read", "target": "nope"})).await;
+        assert!(!result.success);
+        assert!(result.output.contains("nope"));
     }
 
     #[tokio::test]
     async fn read_empty_reports_empty() {
         let (tool, _) = make();
-        let result = tool
-            .execute(
-                serde_json::json!({"action": "read", "target": "memory"}),
-                &ctx(),
-            )
-            .await;
-        assert!(!result.is_error);
-        assert!(result.content.contains("empty"));
+        let result = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        assert!(result.success);
+        assert!(result.output.contains("empty"));
     }
 
     #[tokio::test]
     async fn full_flow_add_replace_remove_read() {
         let (tool, _) = make();
-        tool.execute(
-            serde_json::json!({"action": "add", "target": "memory", "content": "uses fish shell"}),
-            &ctx(),
-        )
-        .await;
-        tool.execute(
-            serde_json::json!({"action": "replace", "target": "memory", "search": "fish", "replacement": "uses zsh shell"}),
-            &ctx(),
-        )
-        .await;
-        let read = tool
-            .execute(
-                serde_json::json!({"action": "read", "target": "memory"}),
-                &ctx(),
-            )
-            .await;
-        assert!(read.content.contains("zsh"));
-        assert!(!read.content.contains("fish"));
+        run(&tool, serde_json::json!({"action": "add", "target": "memory", "content": "uses fish shell"})).await;
+        run(&tool, serde_json::json!({"action": "replace", "target": "memory", "search": "fish", "replacement": "uses zsh shell"})).await;
+        let read = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        assert!(read.output.contains("zsh"));
+        assert!(!read.output.contains("fish"));
 
-        let removed = tool
-            .execute(
-                serde_json::json!({"action": "remove", "target": "memory", "search": "zsh"}),
-                &ctx(),
-            )
-            .await;
-        assert!(!removed.is_error);
-        let after = tool
-            .execute(
-                serde_json::json!({"action": "read", "target": "memory"}),
-                &ctx(),
-            )
-            .await;
-        assert!(after.content.contains("empty"));
+        let removed = run(&tool, serde_json::json!({"action": "remove", "target": "memory", "search": "zsh"})).await;
+        assert!(removed.success);
+        let after = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        assert!(after.output.contains("empty"));
     }
 
     #[tokio::test]
     async fn shared_store_is_visible_across_tool_invocations() {
-        // Same store passed twice → entries written by one tool clone are
+        // Same store passed twice -> entries written by one tool clone are
         // visible from the other (sanity check on Arc sharing).
         let (tool1, store) = make();
         let tool2 = MemoryTool::new(store);
-        tool1
-            .execute(
-                serde_json::json!({"action": "add", "target": "user", "content": "shared fact"}),
-                &ctx(),
-            )
-            .await;
-        let read = tool2
-            .execute(
-                serde_json::json!({"action": "read", "target": "user"}),
-                &ctx(),
-            )
-            .await;
-        assert!(read.content.contains("shared fact"));
+        run(&tool1, serde_json::json!({"action": "add", "target": "user", "content": "shared fact"})).await;
+        let read = run(&tool2, serde_json::json!({"action": "read", "target": "user"})).await;
+        assert!(read.output.contains("shared fact"));
     }
 }

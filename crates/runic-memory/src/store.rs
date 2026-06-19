@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use runic_storage_backend::{StorageBackend, StorageError};
+use runic_filesystem::{FilesystemBackend, FsError};
 use tokio::sync::Mutex;
 
 use crate::error::MemoryError;
@@ -75,7 +75,7 @@ impl Target {
 }
 
 pub struct BoundedMemoryStore {
-    storage: Arc<dyn StorageBackend>,
+    storage: Arc<dyn FilesystemBackend>,
     memory_limit: usize,
     user_limit: usize,
     /// In-process RMW serializer. Composes with the cross-process flock.
@@ -89,7 +89,7 @@ pub struct BoundedMemoryStore {
 }
 
 impl BoundedMemoryStore {
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    pub fn new(storage: Arc<dyn FilesystemBackend>) -> Self {
         Self {
             storage,
             memory_limit: DEFAULT_MEMORY_LIMIT,
@@ -131,9 +131,9 @@ impl BoundedMemoryStore {
 
     /// Read entries from disk. Missing file → empty list.
     pub async fn read(&self, target: Target) -> Result<Vec<String>, MemoryError> {
-        match self.storage.read_to_string(target.key()).await {
-            Ok(raw) => Ok(parse_entries(&raw)),
-            Err(StorageError::NotFound { .. }) => Ok(Vec::new()),
+        match self.storage.read(target.key(), 0, usize::MAX).await {
+            Ok(r) => Ok(parse_entries(&r.content)),
+            Err(FsError::NotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(MemoryError::Storage(e.to_string())),
         }
     }
@@ -271,9 +271,9 @@ impl BoundedMemoryStore {
     /// the raw bytes to `{key}.bak.<unix-ts>` and return `DriftDetected`.
     /// MUST be called with `write_lock` held.
     async fn check_drift_or_backup(&self, target: Target) -> Result<(), MemoryError> {
-        let raw = match self.storage.read_to_string(target.key()).await {
-            Ok(s) => s,
-            Err(StorageError::NotFound { .. }) => return Ok(()),
+        let raw = match self.storage.read(target.key(), 0, usize::MAX).await {
+            Ok(r) => r.content,
+            Err(FsError::NotFound(_)) => return Ok(()),
             Err(e) => return Err(MemoryError::Storage(e.to_string())),
         };
         let trimmed = raw.trim();
@@ -294,7 +294,7 @@ impl BoundedMemoryStore {
         // Drift detected — preserve the original bytes and refuse the write.
         let backup_key = format!("{}.bak.{}", target.key(), unix_ts());
         self.storage
-            .write(&backup_key, raw.as_bytes())
+            .write(&backup_key, &raw)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))?;
         Err(MemoryError::DriftDetected {
@@ -310,11 +310,83 @@ impl BoundedMemoryStore {
         entries: &[String],
     ) -> Result<(), MemoryError> {
         let content = render_entries(entries);
+        // The backend's `write` is create-only; delete first to overwrite. The
+        // surrounding lock (in-process mutex + optional flock) makes the
+        // delete+write safe against interleaving.
+        let _ = self.storage.delete(target.key()).await;
         self.storage
-            .write(target.key(), content.as_bytes())
+            .write(target.key(), &content)
             .await
             .map_err(|e| MemoryError::Storage(e.to_string()))
     }
+
+    /// Render one store as a system-prompt block (hermes `_render_block`):
+    /// a header with a usage gauge over a separator, then the entries. Empty
+    /// stores render to an empty string (no header).
+    pub async fn render_block(&self, target: Target) -> Result<String, MemoryError> {
+        let entries = self.read(target).await?;
+        Ok(render_block(target, &entries, self.limit_for(target)))
+    }
+
+    /// Capture both stores as a frozen [`MemorySnapshot`] for system-prompt
+    /// injection. Hermes takes this once per session and never mutates it mid-
+    /// session, keeping the prompt prefix byte-stable for caching; the caller
+    /// re-snapshots only on session boundary / compaction.
+    pub async fn snapshot(&self) -> Result<MemorySnapshot, MemoryError> {
+        Ok(MemorySnapshot {
+            memory_block: self.render_block(Target::Memory).await?,
+            user_block: self.render_block(Target::User).await?,
+        })
+    }
+}
+
+/// A frozen render of both stores for system-prompt injection.
+#[derive(Debug, Clone, Default)]
+pub struct MemorySnapshot {
+    /// Rendered MEMORY.md block (empty if the store is empty).
+    pub memory_block: String,
+    /// Rendered USER.md block (empty if the store is empty).
+    pub user_block: String,
+}
+
+impl MemorySnapshot {
+    /// The combined section to splice into the (volatile tier of the) system
+    /// prompt. `memory_enabled` / `user_enabled` gate each block independently,
+    /// mirroring hermes's `_memory_enabled` / `_user_profile_enabled` flags.
+    pub fn section(&self, memory_enabled: bool, user_enabled: bool) -> String {
+        let mut parts = Vec::new();
+        if memory_enabled && !self.memory_block.is_empty() {
+            parts.push(self.memory_block.as_str());
+        }
+        if user_enabled && !self.user_block.is_empty() {
+            parts.push(self.user_block.as_str());
+        }
+        parts.join("\n\n")
+    }
+}
+
+/// Number of `═` characters in a block's separator rule (hermes uses 46).
+const SEPARATOR_WIDTH: usize = 46;
+
+/// Render a single store's system-prompt block. Public so a provider can build
+/// a block from already-read entries without another disk hit.
+pub fn render_block(target: Target, entries: &[String], limit: usize) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let content = render_entries(entries);
+    let current = content.chars().count();
+    let pct = if limit > 0 {
+        (current * 100 / limit).min(100)
+    } else {
+        0
+    };
+    let header = match target {
+        Target::Memory => format!("MEMORY (your personal notes) [{pct}% — {current}/{limit} chars]"),
+        Target::User => format!("USER PROFILE (who the user is) [{pct}% — {current}/{limit} chars]"),
+    };
+    let sep = "═".repeat(SEPARATOR_WIDTH);
+    format!("{sep}\n{header}\n{sep}\n{content}")
 }
 
 fn scan_or_err(content: &str) -> Result<(), MemoryError> {
@@ -375,10 +447,10 @@ fn total_chars(entries: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_storage_backend::MemoryBackend;
+    use runic_filesystem::MemoryFs;
 
     fn store() -> BoundedMemoryStore {
-        BoundedMemoryStore::new(Arc::new(MemoryBackend::new()))
+        BoundedMemoryStore::new(Arc::new(MemoryFs::new()))
     }
 
     #[tokio::test]
@@ -497,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn separate_instances_share_backend() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
         let s1 = BoundedMemoryStore::new(backend.clone());
         let s2 = BoundedMemoryStore::new(backend);
         s1.add(Target::User, "written by s1").await.unwrap();
@@ -584,14 +656,14 @@ mod tests {
 
     #[tokio::test]
     async fn drift_detected_when_external_edit_breaks_roundtrip() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
         let s = BoundedMemoryStore::new(backend.clone());
 
         // External editor wrote per-entry trailing whitespace that our
         // parser would strip — so a future write would silently drop it.
         // That's drift.
         backend
-            .write(USER_KEY, "first entry   \n§\nsecond entry".as_bytes())
+            .write(USER_KEY, "first entry   \n§\nsecond entry")
             .await
             .unwrap();
 
@@ -600,7 +672,7 @@ mod tests {
             MemoryError::DriftDetected { target, backup_key } => {
                 assert_eq!(target, "user");
                 assert!(backup_key.starts_with("memory/USER.md.bak."));
-                let saved = backend.read_to_string(&backup_key).await.unwrap();
+                let saved = backend.read(&backup_key, 0, usize::MAX).await.unwrap().content;
                 assert!(saved.contains("first entry   "));
                 assert!(saved.contains("second entry"));
             }
@@ -610,12 +682,57 @@ mod tests {
 
     #[tokio::test]
     async fn entry_over_cap_on_disk_is_treated_as_drift() {
-        let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
         let s = BoundedMemoryStore::new(backend.clone()).with_limits(20, 20);
         // External writer slammed in a huge entry that exceeds our cap.
         let huge = "x".repeat(40);
-        backend.write(MEMORY_KEY, huge.as_bytes()).await.unwrap();
+        backend.write(MEMORY_KEY, &huge).await.unwrap();
         let err = s.add(Target::Memory, "short").await.unwrap_err();
         assert!(matches!(err, MemoryError::DriftDetected { .. }));
+    }
+
+    // ── System-prompt snapshot ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn render_block_empty_store_is_blank() {
+        let s = store();
+        assert!(s.render_block(Target::Memory).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_block_has_header_gauge_and_separator() {
+        let s = store();
+        s.add(Target::User, "lives in Paris").await.unwrap();
+        let block = s.render_block(Target::User).await.unwrap();
+        assert!(block.contains("USER PROFILE (who the user is)"));
+        assert!(block.contains("/1375 chars]"));
+        assert!(block.contains('═'));
+        assert!(block.ends_with("lives in Paris"));
+        // memory header is distinct
+        s.add(Target::Memory, "uses zsh").await.unwrap();
+        assert!(s.render_block(Target::Memory).await.unwrap().contains("MEMORY (your personal notes)"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_section_gates_targets_independently() {
+        let s = store();
+        s.add(Target::Memory, "uses zsh").await.unwrap();
+        s.add(Target::User, "lives in Paris").await.unwrap();
+        let snap = s.snapshot().await.unwrap();
+        // both
+        let both = snap.section(true, true);
+        assert!(both.contains("uses zsh") && both.contains("lives in Paris"));
+        // user gated off
+        let mem_only = snap.section(true, false);
+        assert!(mem_only.contains("uses zsh") && !mem_only.contains("Paris"));
+        // both gated off → empty
+        assert!(snap.section(false, false).is_empty());
+    }
+
+    #[test]
+    fn render_block_pct_caps_at_100() {
+        // A single entry already over the limit reads as 100% (min clamp).
+        let block = render_block(Target::Memory, &["x".repeat(50)], 10);
+        assert!(block.contains("100%"));
     }
 }

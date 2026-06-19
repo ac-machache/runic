@@ -28,6 +28,14 @@ use crate::protocol::{
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STDIO_WRITER_CHANNEL_CAPACITY: usize = 32;
 
+/// Parent-environment variables passed through to a spawned MCP server. We
+/// `env_clear()` first so a server can't read unrelated secrets from our
+/// environment; only these (plus the server's explicitly-configured `env`)
+/// reach the child.
+const ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "USER", "LOGNAME", "LANG", "LC_ALL", "SHELL",
+];
+
 // ─── Transport trait ────────────────────────────────────────────────────────
 
 /// One bidirectional MCP transport. Implementations need only to:
@@ -108,7 +116,23 @@ impl StdioTransport {
     ) -> Result<Self, McpError> {
         debug!(server = server_name, command, "spawning MCP stdio server");
 
+        // Path-traversal guard: a server command must be a bare binary name or
+        // an absolute path, never a `..`-relative escape.
+        if command.contains("..") {
+            return Err(McpError::protocol(format!(
+                "refusing to spawn server '{server_name}': command '{command}' contains '..'"
+            )));
+        }
+
         let mut cmd = Command::new(command);
+        // Don't leak the parent's whole environment into the child. Start from
+        // a minimal allow-list, then layer the explicitly-configured vars on top.
+        cmd.env_clear();
+        for key in ENV_ALLOWLIST {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
         cmd.args(args)
             .envs(env)
             .stdin(std::process::Stdio::piped())
@@ -341,6 +365,16 @@ mod tests {
         match result {
             Err(McpError::Spawn { server, .. }) => assert_eq!(server, "ghost"),
             other => panic!("expected Spawn error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_path_traversal_command() {
+        let env = HashMap::new();
+        let result = StdioTransport::spawn("evil", "../../bin/sh", &[], &env).await;
+        match result {
+            Err(McpError::Protocol(msg)) => assert!(msg.contains("..")),
+            other => panic!("expected path-traversal rejection, got {other:?}"),
         }
     }
 

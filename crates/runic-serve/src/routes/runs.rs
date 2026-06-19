@@ -1,19 +1,17 @@
 //! Run streaming.
 //!
-//! Two endpoints share most of the logic:
+//! - `POST /threads/:id/runs/stream` — drive a fresh turn, stream events live.
+//! - `GET  /threads/:id/runs/:run_id/stream` — replay a past run's persisted
+//!   events and, if it's still in flight, attach to the live broadcast.
+//! - `POST /threads/:id/runs/:run_id/asks/:ask_id` — answer a parked
+//!   `ask_user` (HITL).
 //!
-//! - `POST /threads/:id/runs/stream` — drive a fresh turn, stream events
-//!   in real time.
-//! - `GET  /threads/:id/runs/:run_id/stream` — replay a past run's
-//!   persisted events (and, if it's still in flight, attach to the live
-//!   broadcast for the rest).
-//!
-//! The wire format is documented in [`crate::wire`]. Each SSE event
-//! carries the `WireEvent` JSON body, the matching `event:` field, and
-//! (for replay) the `id:` field from the store's seq number — that's
-//! what lets `Last-Event-ID` work for resume.
+//! The wire format is in [`crate::wire`]. Each SSE event carries the
+//! `WireEvent` JSON body, the matching `event:` field, and (for replay) the
+//! `id:` field from the store's seq — that's what `Last-Event-ID` resumes on.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
@@ -23,62 +21,55 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::Json;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 
-use runic_message_types::{ContentBlock, Message, Role};
+use runic_agent::AgentEvent;
+use runic_types::{ContentBlock, Message};
 
 use crate::app::AppState;
 use crate::error::ServeError;
+use crate::human::HumanChannel;
 use crate::tenant::Tenant;
 use crate::wire::{from_agent_event, from_session_event, WireEvent};
 
 /// The user turn for a run. Two shapes, checked in order:
 ///
-///   {"message": "plain text"}                         // text shorthand
-///   {"content": [{"type":"text","text":"..."},        // full blocks
-///                {"type":"blob","id":"sha256…", "mime":"image/png", "size":1234}]}
-///
-/// `content` carries `ContentBlock`s directly, so an upload is just a
-/// `blob` block referencing bytes already in the BlobStore — the
-/// provider adapter materializes it on the way to the model. No separate
-/// upload endpoint: multipart content rides inside the message, the way
-/// the providers' own APIs model it.
+///   {"message": "plain text"}                          // text shorthand
+///   {"content": [{"type":"text","text":"..."},         // full content blocks
+///                {"type":"image","media_type":"image/png","data":"<base64>"}]}
 #[derive(Debug, Deserialize)]
 pub struct RunMessageRequest {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
     pub content: Option<Vec<ContentBlock>>,
-    /// When set, the run is given a synthesized finish tool with this JSON
-    /// schema; it ends when the model calls it with valid args, and the
-    /// result arrives as a `structured_output` event.
-    #[serde(default)]
-    pub output_schema: Option<serde_json::Value>,
     /// Open per-request context, passed verbatim to the factory's
-    /// `build_run_context`. The app decides what keys mean (user_id,
-    /// provider, allow_web_search, collection_id, …); the serve crate is
-    /// agnostic to its contents.
+    /// `build_run_context`. The app decides what keys mean (user_id, provider,
+    /// allow_web_search, …); the serve crate is agnostic to its contents.
     #[serde(default)]
     pub context: Option<serde_json::Value>,
 }
 
 impl RunMessageRequest {
-    /// Resolve into the user `Message` to run, or a `BadRequest` if the
-    /// body carried neither a non-empty `message` nor any `content`.
+    /// Resolve into the user `Message`, or a `BadRequest` if the body carried
+    /// neither a non-empty `message` nor any `content`.
     fn into_message(self) -> Result<Message, ServeError> {
         match (self.content, self.message) {
-            (Some(blocks), _) if !blocks.is_empty() => Ok(Message {
-                role: Role::User,
-                content: blocks,
-                timestamp: None,
-                tool_duration_ms: None,
-            }),
-            (_, Some(text)) if !text.trim().is_empty() => Ok(Message::user(&text)),
+            (Some(blocks), _) if !blocks.is_empty() => Ok(Message::user_with_blocks(blocks)),
+            (_, Some(text)) if !text.trim().is_empty() => Ok(Message::user(text)),
             _ => Err(ServeError::BadRequest(
-                "run request needs a non-empty `message` string or a non-empty `content` array".into(),
+                "run request needs a non-empty `message` string or a non-empty `content` array"
+                    .into(),
             )),
         }
     }
+}
+
+/// Body for `POST .../asks/:ask_id` — the operator's answer to an `ask_user`.
+#[derive(Debug, Deserialize)]
+pub struct AnswerRequest {
+    pub answer: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,100 +79,64 @@ struct StreamErrorEvent {
 
 /// `POST /threads/:id/runs/stream`
 ///
-/// Locks the thread's Agent for the duration of the run, kicks off a
-/// streaming completion, and pipes every `AgentEvent` to the client as
-/// an SSE `WireEvent`. Concurrent runs on the same thread serialize on
-/// the pool's Mutex; concurrent runs on different threads parallelise.
+/// Kicks off a streaming run in a detached task that locks the thread's Agent
+/// for the whole turn (so concurrent POSTs on the same thread serialize), and
+/// merges the agent's live `AgentEvent` stream with any HITL `ask_required`
+/// prompts onto one SSE response. If the client disconnects, the response
+/// stream is dropped; the run keeps going to completion in the task.
 pub async fn create_and_stream_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
-    // Per-request structured output schema (None clears it on the warm agent).
-    let output_schema = req.output_schema.clone();
-    // Per-request context JSON (consumed by the factory below). Extract
-    // before `into_message` consumes the request.
+    // Extract context before `into_message` consumes the request, and validate
+    // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
-    // Validate the body BEFORE building/locking anything, so a malformed
-    // request gets a clean 400 instead of a half-open SSE stream.
     let user_msg = req.into_message()?;
 
-    // Turn the per-request context into a RunContext via the app's factory
-    // (the serve crate stays agnostic to its keys / provider resolution).
-    let run_ctx = state
+    // App-resolved per-run context (provider override, identity keys, …).
+    let mut run_ctx = state
         .pool
         .factory()
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
 
+    // Live token channel (AgentEvent) + HITL ask channel (WireEvent), merged
+    // into one SSE stream below. Both close when the run ends (the agent drops
+    // its event sender and the human channel).
+    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (ask_tx, mut ask_rx) = mpsc::unbounded_channel::<WireEvent>();
+    run_ctx = run_ctx
+        .with_events(evt_tx)
+        .with_human(Arc::new(HumanChannel::new(state.human_hub.clone(), ask_tx)));
+
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-
-    // The run executes in a DETACHED task that owns the agent's slot for
-    //
-    // (See below: before running, we point this thread's HITL approvals at
-    // `sse_tx` so an approval raised mid-run surfaces on this same stream.)
-    // the whole turn (so concurrent POSTs on the same thread still
-    // serialize) and ALWAYS returns the agent when finished. The SSE
-    // response only *observes* via `sse_rx`. If the client disconnects,
-    // the response stream is dropped and `sse_tx.send` starts erroring —
-    // we ignore that and keep draining the agent to completion, so the
-    // agent is returned to its slot regardless. Previously the return
-    // happened inside the response stream, so a mid-run disconnect left
-    // the slot permanently empty and bricked the thread.
-    let (sse_tx, mut sse_rx) = tokio::sync::mpsc::channel::<WireEvent>(256);
-
-    // Route this thread's HITL approval prompts onto this run's stream, and
-    // tear that down when the run task ends (below).
-    state.approval_hub.set_wire(&thread_id, sse_tx.clone());
-
-    let hub = state.approval_hub.clone();
-    let thread_for_task = thread_id.clone();
     tokio::spawn(async move {
-        let mut slot = agent_arc.lock().await;
-        let mut agent = match slot.take() {
-            Some(a) => a,
-            None => {
-                let _ = sse_tx
-                    .send(WireEvent::Warning {
-                        message: "agent slot was empty — a prior run panicked; DELETE the thread to reset".into(),
-                    })
-                    .await;
-                return;
-            }
-        };
-
-        // Apply (or clear) structured output for this run.
-        agent.set_structured_output(output_schema);
-
-        let (mut events, handle) = agent.run_streaming_message_with(user_msg, run_ctx);
-        while let Some(event) = events.next().await {
-            // Ignore send errors (client gone) but keep draining so the
-            // agent runs to completion and is returned below.
-            let _ = sse_tx.send(from_agent_event(event)).await;
-        }
-
-        match handle.await {
-            Ok((returned_agent, _outcome)) => {
-                *slot = Some(returned_agent);
-            }
-            Err(join_err) => {
-                // The run task panicked — the agent is lost. Leave the slot
-                // empty; the next request surfaces a clean error and the
-                // client can DELETE/recreate the thread.
-                let _ = sse_tx
-                    .send(WireEvent::Warning { message: format!("run task failed: {join_err}") })
-                    .await;
-            }
-        }
-        // Stop routing approvals at this (now-closing) stream.
-        hub.clear_wire(&thread_for_task);
-        // slot guard drops here → the next queued run on this thread proceeds.
+        let mut agent = agent_arc.lock().await;
+        let _ = agent.run_message_with(user_msg, run_ctx).await;
+        // Guard drops → the next queued run on this thread proceeds. The agent
+        // clears its event sender + human channel here, closing both rx ends.
     });
 
     let stream = stream! {
-        while let Some(wire) = sse_rx.recv().await {
-            yield Ok(to_sse(&wire, None));
+        let mut evt_open = true;
+        let mut ask_open = true;
+        while evt_open || ask_open {
+            tokio::select! {
+                evt = evt_rx.recv(), if evt_open => match evt {
+                    Some(e) => {
+                        for w in from_agent_event(e) {
+                            yield Ok(to_sse(&w, None));
+                        }
+                    }
+                    None => evt_open = false,
+                },
+                ask = ask_rx.recv(), if ask_open => match ask {
+                    Some(w) => yield Ok(to_sse(&w, None)),
+                    None => ask_open = false,
+                },
+            }
         }
     };
 
@@ -194,11 +149,9 @@ pub async fn create_and_stream_run(
 
 /// `GET /threads/:id/runs/:run_id/stream`
 ///
-/// Read persisted events for the run, filtered to those with seq > the
-/// `Last-Event-ID` header (if present). When the stored events run
-/// out, attach to the live broadcast if the corresponding Agent is
-/// still warm in the pool — so a client that disconnected mid-run can
-/// reconnect with `Last-Event-ID` and pick up where it left off.
+/// Emit persisted events for the run with seq > the `Last-Event-ID` header,
+/// then attach to the agent's live broadcast if it's still warm — so a client
+/// that dropped mid-run can reconnect and pick up where it left off.
 pub async fn replay_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -216,62 +169,38 @@ pub async fn replay_run(
         .read_after(&tenant, &thread_id, after_seq)
         .await?;
 
-    // Filter to events for THIS run_id, drop the internal-only ones.
+    // Events for THIS run, internal-only kinds dropped.
     let filtered: Vec<(u64, WireEvent)> = stored
         .into_iter()
-        .filter(|s| match &s.event {
-            runic_agent_core::SessionEvent::RunStart { run_id: rid, .. }
-            | runic_agent_core::SessionEvent::RunEnd { run_id: rid, .. }
-            | runic_agent_core::SessionEvent::Message { run_id: rid, .. }
-            | runic_agent_core::SessionEvent::TurnBoundary { run_id: rid, .. }
-            | runic_agent_core::SessionEvent::HookRan { run_id: rid, .. }
-            | runic_agent_core::SessionEvent::StateSnapshot { run_id: rid, .. } => rid == &run_id,
-        })
+        .filter(|s| s.event.run_id() == run_id)
         .filter_map(|s| from_session_event(s.event).map(|w| (s.seq, w)))
         .collect();
 
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
 
     let stream = stream! {
-        // 1) emit the persisted events the client missed.
+        // 1) replay the persisted events the client missed.
         for (seq, wire) in filtered {
             yield Ok(to_sse(&wire, Some(seq)));
         }
 
-        // 2) attach to the agent's live broadcast for anything still
-        //    in flight. If the run already terminated we get a
-        //    Closed/Lagged immediately and stop.
-        let slot = agent_arc.lock().await;
-        let rx = match slot.as_ref().and_then(|a| a.state().subscribe_events()) {
-            Some(rx) => rx,
-            None => {
-                yield Ok(to_sse(&WireEvent::Done { total_turns: 0 }, None));
-                return;
-            }
+        // 2) attach to the live broadcast for anything still in flight.
+        let rx = {
+            let agent = agent_arc.lock().await;
+            agent.state().subscribe_events()
         };
-        drop(slot);
+        let Some(rx) = rx else {
+            yield Ok(to_sse(&WireEvent::Done { total_turns: 0 }, None));
+            return;
+        };
 
         let mut live = BroadcastStream::new(rx);
         while let Some(received) = live.next().await {
-            let session_event = match received {
-                Ok(e) => e,
-                Err(_lagged) => continue,
-            };
-            // Only pass-through events for THIS run.
-            let same_run = matches!(
-                &session_event,
-                runic_agent_core::SessionEvent::RunStart { run_id: rid, .. }
-                | runic_agent_core::SessionEvent::RunEnd { run_id: rid, .. }
-                | runic_agent_core::SessionEvent::Message { run_id: rid, .. }
-                | runic_agent_core::SessionEvent::TurnBoundary { run_id: rid, .. }
-                | runic_agent_core::SessionEvent::HookRan { run_id: rid, .. }
-                | runic_agent_core::SessionEvent::StateSnapshot { run_id: rid, .. }
-                if rid == &run_id
-            );
-            if !same_run {
+            let Ok(event) = received else { continue }; // skip Lagged
+            if event.run_id() != run_id {
                 continue;
             }
-            if let Some(wire) = from_session_event(session_event) {
+            if let Some(wire) = from_session_event(event) {
                 yield Ok(to_sse(&wire, None));
             }
         }
@@ -286,27 +215,21 @@ pub async fn replay_run(
     ))
 }
 
-/// `POST /threads/:id/runs/:run_id/approvals/:call_id`
+/// `POST /threads/:id/runs/:run_id/asks/:ask_id`
 ///
-/// Deliver an operator decision to a HITL tool parked inside a running
-/// agent (see [`crate::approval`]). Body is a [`UserDecision`]:
-///   `{"decision":"submit","final_input":{…}}` or
-///   `{"decision":"cancel","reason":"…"}`.
-/// The parked `review()` wakes, the tool runs (or is cancelled), and the
-/// rest of the turn streams on the original run connection.
-pub async fn submit_approval(
+/// Deliver an operator's answer to a parked `ask_user`. The parked tool wakes,
+/// returns the answer into the conversation, and the run streams on.
+pub async fn submit_answer(
     State(state): State<AppState>,
     Tenant(_tenant): Tenant,
-    Path((_thread_id, _run_id, call_id)): Path<(String, String, String)>,
-    Json(decision): Json<runic_agent_core::UserDecision>,
+    Path((_thread_id, _run_id, ask_id)): Path<(String, String, String)>,
+    Json(body): Json<AnswerRequest>,
 ) -> Result<StatusCode, ServeError> {
-    if state.approval_hub.submit_decision(&call_id, decision) {
+    if state.human_hub.resolve(&ask_id, body.answer) {
         Ok(StatusCode::ACCEPTED)
     } else {
-        // No approval is parked under this call_id — already decided, timed
-        // out, or never existed.
         Err(ServeError::BadRequest(format!(
-            "no pending approval for call_id '{call_id}'"
+            "no pending ask for ask_id '{ask_id}'"
         )))
     }
 }
@@ -336,46 +259,34 @@ mod tests {
     #[test]
     fn text_shorthand_becomes_a_user_text_message() {
         let msg = parse(r#"{"message":"hello"}"#).into_message().unwrap();
-        assert!(matches!(msg.role, Role::User));
-        match &msg.content[0] {
-            ContentBlock::Text { text, .. } => assert_eq!(text, "hello"),
-            other => panic!("expected text block, got {other:?}"),
-        }
+        assert!(matches!(msg.role, runic_types::Role::User));
+        assert!(msg.content.text_content().contains("hello"));
     }
 
     #[test]
-    fn content_blocks_pass_through_including_a_blob_ref() {
+    fn content_blocks_pass_through() {
         let req = parse(
             r#"{"content":[
                 {"type":"text","text":"look at this"},
-                {"type":"blob","id":"abc123","mime":"image/png","size":42}
+                {"type":"image","media_type":"image/png","data":"YWJj"}
             ]}"#,
         );
         let msg = req.into_message().unwrap();
-        assert_eq!(msg.content.len(), 2);
-        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "look at this"));
-        match &msg.content[1] {
-            ContentBlock::Blob(b) => {
-                assert_eq!(b.id, "abc123");
-                assert_eq!(b.mime, "image/png");
-                assert_eq!(b.size, 42);
-            }
-            other => panic!("expected blob block, got {other:?}"),
-        }
+        assert!(msg.content.text_content().contains("look at this"));
     }
 
     #[test]
     fn content_takes_precedence_over_message_when_both_present() {
         let req = parse(r#"{"message":"ignored","content":[{"type":"text","text":"win"}]}"#);
         let msg = req.into_message().unwrap();
-        assert_eq!(msg.content.len(), 1);
-        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "win"));
+        assert!(msg.content.text_content().contains("win"));
+        assert!(!msg.content.text_content().contains("ignored"));
     }
 
     #[test]
     fn empty_content_array_falls_back_to_message_text() {
         let msg = parse(r#"{"message":"fallback","content":[]}"#).into_message().unwrap();
-        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == "fallback"));
+        assert!(msg.content.text_content().contains("fallback"));
     }
 
     #[test]
@@ -396,56 +307,5 @@ mod tests {
     #[test]
     fn context_is_none_when_absent() {
         assert!(parse(r#"{"message":"hi"}"#).context.is_none());
-    }
-
-    #[tokio::test]
-    async fn default_build_run_context_is_empty() {
-        use crate::AgentFactory;
-        use runic_agent_core::Agent;
-
-        struct BareFactory;
-        #[async_trait::async_trait]
-        impl crate::AgentFactory for BareFactory {
-            async fn build(&self, _t: &str, session_id: &str) -> Agent {
-                // Minimal agent; never run here — we only exercise the
-                // default build_run_context.
-                Agent::builder(unreachable_provider()).session_id(session_id).build()
-            }
-        }
-        // The default impl returns an empty RunContext.
-        let rc = BareFactory
-            .build_run_context("org", "thread", &serde_json::json!({"ignored": true}))
-            .await;
-        assert!(rc.config.is_empty());
-        assert!(rc.provider.is_none());
-    }
-
-    fn unreachable_provider() -> std::sync::Arc<dyn runic_provider_core::Provider> {
-        // Only constructed to satisfy the builder type; the test never runs
-        // the agent, so a panicking stub is fine.
-        struct Stub;
-        #[async_trait::async_trait]
-        impl runic_provider_core::Provider for Stub {
-            async fn complete(
-                &self,
-                _: &[runic_message_types::Message],
-                _: &[runic_message_types::ToolDefinition],
-                _: &str,
-                _: Option<&str>,
-            ) -> Result<runic_provider_core::EventStream, runic_provider_core::ProviderError>
-            {
-                unreachable!()
-            }
-            fn name(&self) -> &str {
-                "stub"
-            }
-            fn model(&self) -> String {
-                "stub".into()
-            }
-            fn fork(&self) -> std::sync::Arc<dyn runic_provider_core::Provider> {
-                std::sync::Arc::new(Stub)
-            }
-        }
-        std::sync::Arc::new(Stub)
     }
 }

@@ -221,7 +221,7 @@ pub struct ResourceContent {
 }
 
 /// Render a list of [`ContentBlock`]s into a single string suitable for
-/// returning as a [`runic_tool_core::ToolResult`] body.
+/// returning as a [`runic_tool::ToolResult`] body.
 pub fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for block in blocks {

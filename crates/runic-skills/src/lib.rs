@@ -1,47 +1,227 @@
-pub mod layer;
-pub mod registry;
-pub mod tool;
-pub mod types;
+//! `runic-skills` — progressive-disclosure skills (the Anthropic Agent Skills
+//! pattern, runic's design).
+//!
+//! A skill is a `SKILL.md`: YAML frontmatter (`name`, `description`) + a
+//! Markdown body of full instructions. The model sees only a compact **index**
+//! (name + one-line description) in its system prompt — rendered by
+//! [`skills_prompt_section`] — and calls the [`SkillViewTool`] (`skill_view`)
+//! to load a skill's full body, or a sub-file inside its directory, on demand.
+//! Cheap context, lazy load — the same shape as MCP-deferred tools and the
+//! subagent roster.
 
-pub use layer::{DEFAULT_PREAMBLE, SkillsIndexLayer};
-pub use registry::{LoadError, SkillRegistry};
-pub use tool::SkillViewTool;
-pub use types::SkillMeta;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, thiserror::Error)]
-pub enum ParseError {
-    #[error("missing or malformed frontmatter (expected '---' delimeters)")]
-    MissingFrontMatter,
+use async_trait::async_trait;
+use serde::Deserialize;
 
-    #[error("invalid YAML in frontmatter: {0}")]
-    InvalidYaml(#[from] serde_yml::Error),
-}
+use runic_tool::{Tool, ToolContext, ToolResult};
 
+/// A loaded skill.
 #[derive(Debug, Clone)]
 pub struct Skill {
-    pub meta: SkillMeta,
+    pub name: String,
+    pub description: String,
+    /// Full Markdown instructions (the `SKILL.md` body).
     pub body: String,
-    pub dir: String,
+    /// The skill's directory — sub-file reads (`references/…`) resolve here.
+    pub dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct Frontmatter {
+    name: String,
+    #[serde(default)]
+    description: String,
 }
 
 impl Skill {
-    pub fn parse(raw: &str) -> Result<Self, ParseError> {
-        let rest = raw
-            .strip_prefix("---\n")
-            .ok_or(ParseError::MissingFrontMatter)?;
-
-        let close = rest.find("\n---\n").ok_or(ParseError::MissingFrontMatter)?;
-
-        let descriptor = &rest[..close];
-        let body = &rest[close + "\n---\n".len()..];
-
-        let meta: SkillMeta = serde_yml::from_str(descriptor)?;
-
-        Ok(Skill {
-            meta,
-            body: body.to_string(),
-            dir: String::new(),
+    /// Parse a `SKILL.md` document located at `dir`.
+    pub fn parse(dir: PathBuf, src: &str) -> anyhow::Result<Self> {
+        let src = src.trim_start_matches('\u{feff}').trim_start();
+        let rest = src
+            .strip_prefix("---")
+            .ok_or_else(|| anyhow::anyhow!("SKILL.md must start with `---` frontmatter"))?;
+        let end = rest
+            .find("\n---")
+            .ok_or_else(|| anyhow::anyhow!("SKILL.md frontmatter is not terminated by `---`"))?;
+        let fm: Frontmatter = serde_yml::from_str(&rest[..end])
+            .map_err(|e| anyhow::anyhow!("invalid SKILL.md frontmatter: {e}"))?;
+        if fm.name.trim().is_empty() {
+            anyhow::bail!("SKILL.md frontmatter is missing `name`");
+        }
+        let after = &rest[end + 4..];
+        let body = after.strip_prefix('\n').unwrap_or(after).trim().to_string();
+        Ok(Self {
+            name: fm.name,
+            description: fm.description,
+            body,
+            dir,
         })
+    }
+}
+
+/// A set of skills — the index the model browses + the source `skill_view`
+/// reads from.
+#[derive(Debug, Clone, Default)]
+pub struct SkillRegistry {
+    skills: Vec<Skill>,
+}
+
+impl SkillRegistry {
+    pub fn new(skills: Vec<Skill>) -> Self {
+        Self { skills }
+    }
+
+    /// Load every `<root>/<name>/SKILL.md`. Directories without one are
+    /// skipped; an invalid `SKILL.md` is logged and skipped (best-effort).
+    pub fn from_dir(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        let mut skills = Vec::new();
+        for entry in std::fs::read_dir(root)?.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let manifest = dir.join("SKILL.md");
+            if !manifest.is_file() {
+                continue;
+            }
+            match std::fs::read_to_string(&manifest) {
+                Ok(text) => match Skill::parse(dir.clone(), &text) {
+                    Ok(skill) => skills.push(skill),
+                    Err(e) => {
+                        tracing::warn!(path = %manifest.display(), error = %e, "skipping invalid SKILL.md")
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(path = %manifest.display(), error = %e, "cannot read SKILL.md")
+                }
+            }
+        }
+        Ok(Self { skills })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+    pub fn get(&self, name: &str) -> Option<&Skill> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+    pub fn names(&self) -> Vec<&str> {
+        self.skills.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// All skills (for aggregation, e.g. by the plugin manager).
+    pub fn all(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    /// Narrow to an allow-list (used by subagents declaring `skills: [...]`).
+    pub fn scope<S: AsRef<str>>(&self, allowed: &[S]) -> Self {
+        let allow: Vec<&str> = allowed.iter().map(|s| s.as_ref()).collect();
+        Self {
+            skills: self
+                .skills
+                .iter()
+                .filter(|s| allow.contains(&s.name.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+/// Render the skills index for the system prompt. The app concatenates this;
+/// the loop stays skill-agnostic (same pattern as the MCP-deferred / subagent
+/// sections).
+pub fn skills_prompt_section(registry: &SkillRegistry) -> String {
+    if registry.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "<available-skills>\nEach skill is a focused workflow. To load a skill's \
+         full instructions call `skill_view` with its `name`; for a file inside \
+         the skill pass `name` + a relative `path`.\n",
+    );
+    for s in &registry.skills {
+        out.push_str(&format!("- {}: {}\n", s.name, s.description));
+    }
+    out.push_str("</available-skills>");
+    out
+}
+
+/// `skill_view` — loads a skill's full body, or a sub-file inside its directory.
+pub struct SkillViewTool {
+    registry: std::sync::Arc<SkillRegistry>,
+}
+
+impl SkillViewTool {
+    pub fn new(registry: std::sync::Arc<SkillRegistry>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillViewTool {
+    fn name(&self) -> &str {
+        "skill_view"
+    }
+
+    fn description(&self) -> &str {
+        "Load a skill's full instructions by `name`, or a file inside the \
+         skill's directory by also passing a relative `path`."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Skill name from the index." },
+                "path": { "type": "string", "description": "Optional file path relative to the skill directory." }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
+            return Ok(ToolResult::error("skill_view requires `name`"));
+        };
+        let Some(skill) = self.registry.get(name) else {
+            return Ok(ToolResult::error(format!("unknown skill '{name}'")));
+        };
+
+        match args.get("path").and_then(|v| v.as_str()) {
+            None => Ok(ToolResult::ok(skill.body.clone())),
+            Some(rel) => match read_subfile(&skill.dir, rel) {
+                Ok(content) => Ok(ToolResult::ok(content)),
+                Err(e) => Ok(ToolResult::error(e)),
+            },
+        }
+    }
+}
+
+/// Read a file inside a skill directory, refusing path traversal / escapes.
+fn read_subfile(skill_dir: &Path, rel: &str) -> Result<String, String> {
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel.split(['/', '\\']).any(|seg| seg == ".." || seg.is_empty())
+    {
+        return Err(format!("invalid skill path '{rel}'"));
+    }
+    let target = skill_dir.join(rel);
+    // Defense in depth: ensure the resolved path stays under the skill dir.
+    match (target.canonicalize(), skill_dir.canonicalize()) {
+        (Ok(t), Ok(base)) if t.starts_with(&base) => {
+            std::fs::read_to_string(&t).map_err(|e| format!("cannot read '{rel}': {e}"))
+        }
+        (Ok(_), Ok(_)) => Err(format!("path '{rel}' escapes the skill directory")),
+        _ => Err(format!("cannot resolve skill path '{rel}'")),
     }
 }
 
@@ -49,349 +229,71 @@ impl Skill {
 mod tests {
     use super::*;
 
-    // ─── Happy path ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn parses_a_minimal_valid_skill() {
-        let raw = "\
----
-name: greeter
-description: says hello
----
-# Greeter
-
-Hello, world.
-";
-        let skill = Skill::parse(raw).expect("should parse");
-        assert_eq!(skill.meta.name, "greeter");
-        assert_eq!(skill.meta.description, "says hello");
-        assert!(
-            skill.body.starts_with("# Greeter"),
-            "body should start with the header, got: {:?}",
-            skill.body
-        );
-        assert!(
-            skill.body.contains("Hello, world."),
-            "body should contain the paragraph"
-        );
+    fn skill(name: &str, desc: &str) -> Skill {
+        Skill::parse(
+            PathBuf::from("/tmp/x"),
+            &format!("---\nname: {name}\ndescription: {desc}\n---\nFull body for {name}."),
+        )
+        .unwrap()
     }
 
     #[test]
-    fn parses_skill_with_empty_body() {
-        let raw = "\
----
-name: stub
-description: a skill with nothing in its body
----
-";
-        let skill = Skill::parse(raw).expect("should parse");
-        assert_eq!(skill.meta.name, "stub");
-        // Body may be empty or just whitespace — both are fine for an empty skill.
-        assert!(skill.body.trim().is_empty());
+    fn parses_and_indexes() {
+        let s = skill("greeter", "says hello");
+        assert_eq!(s.name, "greeter");
+        assert_eq!(s.description, "says hello");
+        assert_eq!(s.body, "Full body for greeter.");
     }
 
     #[test]
-    fn parses_skill_whose_body_contains_three_dashes() {
-        // A markdown horizontal rule (`---`) in the body MUST NOT be mistaken
-        // for the closing frontmatter delimiter. The closing delimiter is
-        // recognised as `\n---\n`, and we hit the *first* occurrence, which
-        // is the real closing one (line 4). Any `---` later in the body is
-        // safely past that point.
-        let raw = "\
----
-name: ruler
-description: uses horizontal rules
----
-# Section A
-
-Some prose.
-
----
-
-# Section B
-
-More prose.
-";
-        let skill = Skill::parse(raw).expect("should parse");
-        assert_eq!(skill.meta.name, "ruler");
-        assert!(skill.body.contains("Section A"));
-        assert!(skill.body.contains("Section B"));
-        assert!(
-            skill.body.contains("---"),
-            "the horizontal rule in the body must be preserved"
-        );
+    fn scope_filters() {
+        let reg = SkillRegistry::new(vec![
+            skill("a", "does a"),
+            skill("b", "does b"),
+            skill("c", "does c"),
+        ]);
+        let scoped = reg.scope(&["a", "c"]);
+        assert_eq!(scoped.len(), 2);
+        assert!(scoped.get("a").is_some());
+        assert!(scoped.get("b").is_none());
     }
 
     #[test]
-    fn parses_skill_with_extra_unknown_frontmatter_fields() {
-        // serde's default behaviour is to ignore unknown fields. A skill file
-        // shipped with `allowed-tools:` or `version:` (jcode/hermes-style)
-        // should parse fine even though we don't model those yet.
-        let raw = "\
----
-name: bigger
-description: has fields we don't model yet
-allowed-tools: bash, read, write
-version: 1.2.0
-tags:
-  - alpha
-  - beta
----
-body
-";
-        let skill = Skill::parse(raw).expect("unknown fields must be ignored");
-        assert_eq!(skill.meta.name, "bigger");
-        assert_eq!(skill.meta.description, "has fields we don't model yet");
+    fn prompt_section_lists_index() {
+        let reg = SkillRegistry::new(vec![skill("greeter", "says hello")]);
+        let section = skills_prompt_section(&reg);
+        assert!(section.contains("skill_view"));
+        assert!(section.contains("- greeter: says hello"));
+        assert!(skills_prompt_section(&SkillRegistry::default()).is_empty());
     }
 
-    #[test]
-    fn parses_skill_with_multiline_description() {
-        // YAML supports folded / multi-line strings. Verify they end up as a
-        // single string in `description`.
-        let raw = "\
----
-name: multi
-description: >
-  A description that
-  spans multiple lines
-  and should fold into one.
----
-body
-";
-        let skill = Skill::parse(raw).expect("should parse folded string");
-        // Folded scalars join lines with single spaces and add a trailing newline.
-        assert!(skill.meta.description.contains("A description that"));
-        assert!(skill.meta.description.contains("fold into one"));
-    }
+    #[tokio::test]
+    async fn skill_view_returns_body_and_rejects_traversal() {
+        let reg = std::sync::Arc::new(SkillRegistry::new(vec![skill("greeter", "hi")]));
+        let tool = SkillViewTool::new(reg);
+        let ctx = ToolContext::new("u", "s", "r");
 
-    // ─── Sad paths ──────────────────────────────────────────────────────────
+        let r = tool
+            .execute(serde_json::json!({ "name": "greeter" }), &ctx)
+            .await
+            .unwrap();
+        assert!(r.success);
+        assert!(r.output.contains("Full body for greeter"));
 
-    #[test]
-    fn rejects_file_with_no_frontmatter_at_all() {
-        let raw = "just a plain markdown file\nwith no frontmatter delimiters\n";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(
-            matches!(err, ParseError::MissingFrontMatter),
-            "expected MissingFrontMatter, got {err:?}"
-        );
-    }
+        let r = tool
+            .execute(serde_json::json!({ "name": "ghost" }), &ctx)
+            .await
+            .unwrap();
+        assert!(!r.success);
 
-    #[test]
-    fn rejects_file_that_opens_frontmatter_but_never_closes_it() {
-        let raw = "\
----
-name: oops
-description: forgot to close the frontmatter
-this is just more yaml-looking text
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(
-            matches!(err, ParseError::MissingFrontMatter),
-            "expected MissingFrontMatter, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_empty_input() {
-        let err = Skill::parse("").unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_invalid_yaml_in_frontmatter() {
-        // `name:` value is missing AND the indentation under `description:` is
-        // broken — serde_yml should refuse this.
-        let raw = "\
----
-name:
-description:
-  this is: not: valid yaml: at: all
----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(
-            matches!(err, ParseError::InvalidYaml(_)),
-            "expected InvalidYaml, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn rejects_frontmatter_missing_required_field_name() {
-        // `name` is required by SkillMeta. serde should error out as InvalidYaml.
-        let raw = "\
----
-description: I forgot my name
----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::InvalidYaml(_)));
-    }
-
-    #[test]
-    fn rejects_frontmatter_missing_required_field_description() {
-        let raw = "\
----
-name: nameless
----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::InvalidYaml(_)));
-    }
-
-    // ─── Malformed delimiters ───────────────────────────────────────────────
-
-    #[test]
-    fn rejects_opening_delimiter_with_too_few_dashes() {
-        // `--` instead of `---` — must not be accepted as a frontmatter opener.
-        let raw = "\
---
-name: foo
-description: bar
---
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_opening_delimiter_with_too_many_dashes() {
-        // `----` — strict parser must reject this.
-        let raw = "\
-----
-name: foo
-description: bar
-----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_opening_delimiter_followed_by_content_on_same_line() {
-        // `---foo\n` — must not match. The opening delimiter is exactly `---\n`.
-        let raw = "\
----something
-name: foo
-description: bar
----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_leading_whitespace_before_opening_delimiter() {
-        // A blank line before `---` means the file doesn't START with `---\n`.
-        let raw = "\n---\nname: foo\ndescription: bar\n---\nbody\n";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_closing_delimiter_with_too_few_dashes() {
-        // Opens cleanly but closes with `--` — no real closing delimiter found.
-        let raw = "\
----
-name: foo
-description: bar
---
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_closing_delimiter_with_too_many_dashes() {
-        // Opens cleanly but closes with `----`.
-        let raw = "\
----
-name: foo
-description: bar
-----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_closing_delimiter_followed_by_content_on_same_line() {
-        // `---something\n` cannot terminate the frontmatter.
-        let raw = "\
----
-name: foo
-description: bar
----trailing
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_lone_opening_delimiter_with_no_body() {
-        // Just `---\n` — opens but never closes.
-        let raw = "---\n";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_back_to_back_delimiters_with_no_newline_between_them() {
-        // `---\n---\n` — opens, then looking for `\n---\n` finds nothing
-        // because there is no newline BEFORE the second `---`. The parser
-        // intentionally requires `\n---\n` (not `---\n`) for the close so
-        // that `---` inside the YAML body never gets mistaken for a close.
-        let raw = "---\n---\n";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    #[test]
-    fn rejects_crlf_line_endings() {
-        // The parser is strict about `\n` — files saved with Windows line
-        // endings (`\r\n`) will not parse. Documenting this here as a known
-        // limitation; if it becomes a real problem we'd normalize input.
-        let raw = "---\r\nname: foo\r\ndescription: bar\r\n---\r\nbody\r\n";
-        let err = Skill::parse(raw).unwrap_err();
-        assert!(matches!(err, ParseError::MissingFrontMatter));
-    }
-
-    // ─── Error reporting ────────────────────────────────────────────────────
-
-    #[test]
-    fn missing_frontmatter_error_renders_a_useful_message() {
-        let err = Skill::parse("no delimiters").unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("frontmatter"),
-            "error message should mention 'frontmatter', got: {msg}"
-        );
-    }
-
-    #[test]
-    fn invalid_yaml_error_wraps_serde_error_via_display() {
-        let raw = "\
----
-name: foo
-description: { not: closed properly
----
-body
-";
-        let err = Skill::parse(raw).unwrap_err();
-        let msg = format!("{err}");
-        // The `#[error(\"invalid YAML in frontmatter: {0}\")]` template means
-        // the inner serde error must show up in the rendered message.
-        assert!(
-            msg.starts_with("invalid YAML in frontmatter:"),
-            "expected wrapped message, got: {msg}"
-        );
+        let r = tool
+            .execute(
+                serde_json::json!({ "name": "greeter", "path": "../../etc/passwd" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("invalid skill path"));
     }
 }

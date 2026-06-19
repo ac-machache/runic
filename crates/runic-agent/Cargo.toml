@@ -1,0 +1,27 @@
+[package]
+name = "runic-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "time"] }
+tracing = { workspace = true }
+
+runic-types = { path = "../runic-types" }
+runic-state = { path = "../runic-state" }
+runic-provider = { path = "../runic-provider" }
+runic-tool = { path = "../runic-tool" }
+runic-hook = { path = "../runic-hook" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

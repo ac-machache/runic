@@ -4,42 +4,43 @@ use std::sync::Arc;
 
 use axum::routing::{get, post};
 use axum::Router;
-use runic_sessions::SessionStore;
+use runic_substrate::SessionStore;
 use tower_http::cors::CorsLayer;
 
-use crate::approval::ApprovalHub;
 use crate::factory::BoxedAgentFactory;
+use crate::human::HumanHub;
 use crate::pool::ThreadPool;
 use crate::routes::{health, runs, threads};
 
-/// Everything every handler needs. Cheap to clone (all internal data
-/// is `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
+/// Everything every handler needs. Cheap to clone (all internal data is
+/// `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
 #[derive(Clone)]
 pub struct AppState {
     pub session_store: Arc<dyn SessionStore>,
     pub pool: Arc<ThreadPool>,
-    /// Bridges parked HITL approvals to the decision endpoint.
-    pub approval_hub: Arc<ApprovalHub>,
+    /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
+    pub human_hub: Arc<HumanHub>,
 }
 
-/// Construction parameters — the binary fills these in and hands them
-/// to [`router`].
+/// Construction parameters — the binary fills these in and hands them to
+/// [`router`].
 pub struct ServeConfig {
     pub session_store: Arc<dyn SessionStore>,
     pub agent_factory: BoxedAgentFactory,
-    /// Shared with the `ChannelApprover` installed in each server agent, so
-    /// approvals raised inside a run can be resolved via the HTTP endpoint.
-    pub approval_hub: Arc<ApprovalHub>,
+    /// Shared HITL hub; the serve crate builds a per-run `HumanChannel` over it
+    /// and installs it on each run's context, so an `ask_user` raised mid-run
+    /// resolves via the HTTP answer endpoint.
+    pub human_hub: Arc<HumanHub>,
 }
 
-/// Build the axum `Router` with every Phase-1 endpoint mounted. The
-/// binary owns the network layer (`axum::serve` / TLS / shutdown);
-/// this crate just produces the route surface.
+/// Build the axum `Router` with every endpoint mounted. The binary owns the
+/// network layer (`axum::serve` / TLS / shutdown); this crate just produces the
+/// route surface.
 pub fn router(config: ServeConfig) -> Router {
     let state = AppState {
         session_store: config.session_store.clone(),
         pool: Arc::new(ThreadPool::new(config.agent_factory, config.session_store)),
-        approval_hub: config.approval_hub,
+        human_hub: config.human_hub,
     };
 
     Router::new()
@@ -63,14 +64,11 @@ pub fn router(config: ServeConfig) -> Router {
             get(runs::replay_run),
         )
         .route(
-            "/threads/{thread_id}/runs/{run_id}/approvals/{call_id}",
-            post(runs::submit_approval),
+            "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
+            post(runs::submit_answer),
         )
-        // Permissive CORS so a browser dev UI served from another origin
-        // (e.g. trunk on :8080) can drive the server on :8920.
+        // Permissive CORS so a browser dev UI served from another origin can
+        // drive the server.
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
-
-// Re-export to keep the public surface tidy.
-pub use runic_sessions::FileSessionStore;

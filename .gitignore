@@ -12,3 +12,7 @@ Cargo.lock.bak
 
 # trunk build output
 /crates/runic-web/dist
+
+# reference repos cloned locally for study (never committed)
+/zeroclaw
+/openfang

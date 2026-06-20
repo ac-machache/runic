@@ -61,13 +61,18 @@ pub enum AgentEvent {
     TextDelta(String),
     /// Incremental reasoning/thinking text.
     ThinkingDelta(String),
-    /// A tool is about to run.
-    ToolStarted { id: String, name: String },
-    /// A tool finished.
+    /// A tool is about to run, with the input args it was called with.
+    ToolStarted {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// A tool finished, with its output (for live display).
     ToolFinished {
         id: String,
         name: String,
         is_error: bool,
+        result: String,
     },
     /// One model turn completed.
     TurnCompleted { turn: u32, stop_reason: String },

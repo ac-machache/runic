@@ -61,8 +61,8 @@ button { font-family: inherit; }
 .sidebar-inner { width: 264px; display: flex; flex-direction: column; height: 100%; }
 
 .brand { display: flex; align-items: flex-start; justify-content: space-between; padding: 16px 16px 14px; border-bottom: 1px solid var(--border); }
-.brand-l { display: flex; align-items: baseline; gap: 8px; }
-.brand-mark { color: var(--accent); font-size: 17px; line-height: 1; }
+.brand-l { display: flex; align-items: center; gap: 9px; }
+.brand-mark { width: 28px; height: 28px; border-radius: 7px; object-fit: cover; display: block; box-shadow: 0 0 0 1px var(--border-2); }
 .brand-name { font-weight: 700; font-size: 15px; letter-spacing: -.01em; line-height: 1.1; }
 .brand-sub { font-size: 10.5px; font-weight: 500; color: var(--ink-3); letter-spacing: .06em; text-transform: uppercase; margin-top: 2px; }
 .collapse-btn { appearance: none; border: 1px solid var(--border-2); background: var(--surface); color: var(--ink-2); width: 26px; height: 26px; border-radius: 7px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 13px; }

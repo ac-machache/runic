@@ -87,21 +87,19 @@ impl ApiClient {
         resp.json().await.map_err(e2s)
     }
 
-    /// Deliver a HITL approval decision for a parked tool call. `decision`
-    /// is `{"decision":"submit","final_input":{…}}` or
-    /// `{"decision":"cancel","reason":"…"}`. The `run_id` path segment is
-    /// ignored server-side (the decision is keyed by `call_id`), so a
+    /// Answer a parked HITL `ask_user`. The server resolves by `ask_id`
+    /// (keyed globally), so the `run_id` path segment is ignored — a `live`
     /// placeholder is fine.
-    pub async fn submit_approval(
+    pub async fn submit_answer(
         &self,
         thread: &str,
-        call_id: &str,
-        decision: serde_json::Value,
+        ask_id: &str,
+        answer: String,
     ) -> Result<(), String> {
-        let url = format!("{}/threads/{thread}/runs/live/approvals/{call_id}", self.base);
+        let url = format!("{}/threads/{thread}/runs/live/asks/{ask_id}", self.base);
         let resp = Request::post(&url)
             .header("x-runic-tenant", &self.tenant)
-            .json(&decision)
+            .json(&serde_json::json!({ "answer": answer }))
             .map_err(e2s)?
             .send()
             .await
@@ -109,7 +107,7 @@ impl ApiClient {
         if resp.ok() {
             Ok(())
         } else {
-            Err(format!("approval rejected: HTTP {}", resp.status()))
+            Err(format!("answer rejected: HTTP {}", resp.status()))
         }
     }
 

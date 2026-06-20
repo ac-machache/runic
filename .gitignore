@@ -16,3 +16,4 @@ Cargo.lock.bak
 # reference repos cloned locally for study (never committed)
 /zeroclaw
 /openfang
+/runic_fs

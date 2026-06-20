@@ -2263,6 +2263,8 @@ dependencies = [
  "runic-memory",
  "runic-provider",
  "runic-serve",
+ "runic-skills",
+ "runic-subagent",
  "runic-substrate",
  "runic-tools",
  "tokio",

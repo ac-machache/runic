@@ -32,14 +32,21 @@ pub enum WireEvent {
     /// Streaming thinking token (only when the provider exposes thinking).
     AssistantThinkingDelta { text: String },
 
-    /// A tool call is about to run.
-    ToolStart { id: String, name: String },
+    /// A tool call is about to run, with its input args.
+    ToolStart {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 
-    /// A tool call finished (success or error).
+    /// A tool call finished (success or error). `preview` is a trimmed head of
+    /// the output for at-a-glance display; the full result is in the persisted
+    /// message log.
     ToolFinish {
         id: String,
         name: String,
         is_error: bool,
+        preview: String,
     },
 
     /// One model turn just finished — live runs only.
@@ -122,9 +129,9 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
         AgentEvent::RunStarted { run_id } => vec![WireEvent::RunStart { run_id, at: None }],
         AgentEvent::TextDelta(text) => vec![WireEvent::AssistantTextDelta { text }],
         AgentEvent::ThinkingDelta(text) => vec![WireEvent::AssistantThinkingDelta { text }],
-        AgentEvent::ToolStarted { id, name } => vec![WireEvent::ToolStart { id, name }],
-        AgentEvent::ToolFinished { id, name, is_error } => {
-            vec![WireEvent::ToolFinish { id, name, is_error }]
+        AgentEvent::ToolStarted { id, name, input } => vec![WireEvent::ToolStart { id, name, input }],
+        AgentEvent::ToolFinished { id, name, is_error, result } => {
+            vec![WireEvent::ToolFinish { id, name, is_error, preview: truncate(&result, 4000) }]
         }
         AgentEvent::TurnCompleted { turn, stop_reason } => {
             vec![WireEvent::TurnComplete { turn, stop_reason }]
@@ -155,6 +162,16 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
         SessionEvent::TurnBoundary { .. }
         | SessionEvent::HookRan { .. }
         | SessionEvent::StateSnapshot { .. } => None,
+    }
+}
+
+/// Trim a string to `max` chars (char-boundary safe), marking truncation.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max).collect();
+        format!("{head}…")
     }
 }
 

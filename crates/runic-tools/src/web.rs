@@ -143,7 +143,10 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
-        let Some(semi) = tail[..tail.len().min(12)].find(';') else {
+        // Find the entity terminator, but only accept short entities (≤12
+        // bytes). `find` returns a char-safe byte index — slicing `tail[..12]`
+        // directly panics when byte 12 lands inside a multi-byte char.
+        let Some(semi) = tail.find(';').filter(|&p| p <= 12) else {
             out.push('&');
             rest = &tail[1..];
             continue;
@@ -602,5 +605,14 @@ mod tests {
         assert_eq!(decode_entities("a&#65;b"), "aAb");
         assert_eq!(decode_entities("&#x41;"), "A");
         assert_eq!(decode_entities("plain &unknown; text"), "plain &unknown; text");
+    }
+
+    #[test]
+    fn entity_decoding_is_char_boundary_safe() {
+        // Regression: byte 12 after the `&` lands inside the multi-byte 'à'.
+        // The old `tail[..12]` slice panicked here.
+        assert_eq!(decode_entities("&#039;aide à la décision"), "'aide à la décision");
+        // A bare `&` followed by multibyte text and no nearby ';' must not panic.
+        assert_eq!(decode_entities("R&D coûte à la société"), "R&D coûte à la société");
     }
 }

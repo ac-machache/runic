@@ -21,11 +21,13 @@ tracing-subscriber = { workspace = true }
 
 # New stack (path deps — not in workspace.dependencies yet).
 runic-agent = { path = "../crates/runic-agent" }
-runic-provider = { path = "../crates/runic-provider", features = ["anthropic"] }
+runic-provider = { path = "../crates/runic-provider", features = ["anthropic", "openai"] }
 runic-filesystem = { path = "../crates/runic-filesystem" }
 runic-tools = { path = "../crates/runic-tools" }
+runic-subagent = { path = "../crates/runic-subagent" }
 
 # New stack (already in workspace.dependencies).
 runic-memory = { workspace = true }
 runic-serve = { workspace = true }
-runic-substrate = { workspace = true }
+runic-skills = { workspace = true }
+runic-substrate = { workspace = true, features = ["postgres"] }

@@ -107,6 +107,7 @@ impl Agent {
                 self.emit(crate::AgentEvent::ToolStarted {
                     id: call.id.clone(),
                     name: call.name.clone(),
+                    input: call.input.clone(),
                 });
             }
         }
@@ -179,6 +180,7 @@ impl Agent {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     is_error: !result.success,
+                    result: result.output.clone(),
                 });
             }
 
@@ -234,9 +236,15 @@ async fn dispatch_one(
     let Some(tool) = tool else {
         return ToolResult::error(format!("unknown tool: {}", call.name));
     };
-    match tokio::time::timeout(timeout, tool.execute(call.input.clone(), &ctx)).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) => ToolResult::error(format!("tool '{}' failed: {e}", call.name)),
+    // Catch panics so a buggy tool can NEVER abort the run task (which would
+    // kill the SSE stream and strand the call). A panic becomes an in-band
+    // error result, just like a timeout or a returned `Err`.
+    use futures::FutureExt as _;
+    let exec = std::panic::AssertUnwindSafe(tool.execute(call.input.clone(), &ctx)).catch_unwind();
+    match tokio::time::timeout(timeout, exec).await {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(e))) => ToolResult::error(format!("tool '{}' failed: {e}", call.name)),
+        Ok(Err(_panic)) => ToolResult::error(format!("tool '{}' panicked", call.name)),
         Err(_) => ToolResult::error(format!(
             "tool '{}' timed out after {}s",
             call.name,

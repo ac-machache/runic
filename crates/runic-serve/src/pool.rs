@@ -18,7 +18,7 @@ use std::sync::Arc;
 use runic_agent::Agent;
 use runic_state::SessionEvent;
 use runic_substrate::SessionStore;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 use crate::factory::BoxedAgentFactory;
 
@@ -156,10 +156,22 @@ mod tests {
 
     #[test]
     fn thread_key_equality_uses_both_fields() {
-        let a = ThreadKey { tenant: "alice".into(), thread_id: "t1".into() };
-        let b = ThreadKey { tenant: "alice".into(), thread_id: "t1".into() };
-        let c = ThreadKey { tenant: "bob".into(), thread_id: "t1".into() };
-        let d = ThreadKey { tenant: "alice".into(), thread_id: "t2".into() };
+        let a = ThreadKey {
+            tenant: "alice".into(),
+            thread_id: "t1".into(),
+        };
+        let b = ThreadKey {
+            tenant: "alice".into(),
+            thread_id: "t1".into(),
+        };
+        let c = ThreadKey {
+            tenant: "bob".into(),
+            thread_id: "t1".into(),
+        };
+        let d = ThreadKey {
+            tenant: "alice".into(),
+            thread_id: "t2".into(),
+        };
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);

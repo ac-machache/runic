@@ -210,7 +210,9 @@ impl Tool for SkillViewTool {
 fn read_subfile(skill_dir: &Path, rel: &str) -> Result<String, String> {
     if rel.is_empty()
         || rel.starts_with('/')
-        || rel.split(['/', '\\']).any(|seg| seg == ".." || seg.is_empty())
+        || rel
+            .split(['/', '\\'])
+            .any(|seg| seg == ".." || seg.is_empty())
     {
         return Err(format!("invalid skill path '{rel}'"));
     }

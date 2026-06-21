@@ -35,7 +35,11 @@ fn event() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
         run_id().prop_map(move |run_id| SessionEvent::RunStart { run_id, at }),
-        (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message { run_id, msg, at }),
+        (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
+            run_id,
+            msg,
+            at
+        }),
         run_id().prop_map(move |run_id| SessionEvent::TurnBoundary { run_id, at }),
         run_id().prop_map(move |run_id| SessionEvent::RunEnd {
             run_id,
@@ -59,7 +63,11 @@ fn event_no_snapshot() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
         run_id().prop_map(move |run_id| SessionEvent::RunStart { run_id, at }),
-        (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message { run_id, msg, at }),
+        (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
+            run_id,
+            msg,
+            at
+        }),
         run_id().prop_map(move |run_id| SessionEvent::TurnBoundary { run_id, at }),
         run_id().prop_map(move |run_id| SessionEvent::RunEnd {
             run_id,

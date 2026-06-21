@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{router, AgentFactory, HumanHub, ServeConfig};
+use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
 use runic_substrate::MemorySessionStore;
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 use serde_json::Value;
@@ -46,10 +46,16 @@ struct ScriptedProvider;
 impl Provider for ScriptedProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text { text: "pong".into(), provider_metadata: None }],
+            content: vec![ContentBlock::Text {
+                text: "pong".into(),
+                provider_metadata: None,
+            }],
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],
-            usage: TokenUsage { input_tokens: 1, output_tokens: 2 },
+            usage: TokenUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+            },
         })
     }
 }
@@ -86,12 +92,16 @@ fn run_request(thread_id: &str, message: &str) -> Request<Body> {
 }
 
 async fn body_to_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
+        .await
+        .unwrap();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
 async fn body_to_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
@@ -99,7 +109,12 @@ async fn body_to_json(resp: axum::response::Response) -> Value {
 async fn healthz_returns_ok() {
     let app = make_router();
     let resp = app
-        .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -172,7 +187,12 @@ async fn list_threads_starts_empty() {
 async fn get_thread_returns_empty_event_count_for_new_thread() {
     let app = make_router();
     let resp = app
-        .oneshot(Request::builder().uri("/threads/some-thread").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/threads/some-thread")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -256,7 +276,10 @@ async fn tenant_header_isolates_thread_listings() {
         .iter()
         .map(|v| v["thread_id"].as_str().unwrap())
         .collect();
-    assert!(!ids.contains(&"alice-thread"), "bob should not see alice's thread; got {ids:?}");
+    assert!(
+        !ids.contains(&"alice-thread"),
+        "bob should not see alice's thread; got {ids:?}"
+    );
 }
 
 #[tokio::test]
@@ -265,7 +288,10 @@ async fn run_streams_agent_events() {
     let resp = app.oneshot(run_request("t1", "ping")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_to_string(resp).await;
-    assert!(body.contains("pong"), "streamed text missing from body: {body}");
+    assert!(
+        body.contains("pong"),
+        "streamed text missing from body: {body}"
+    );
 }
 
 #[tokio::test]
@@ -290,11 +316,19 @@ async fn abandoned_run_does_not_brick_the_thread() {
     // same thread succeeds.
     let app = scripted_router();
 
-    let abandoned = app.clone().oneshot(run_request("t1", "abandon")).await.unwrap();
+    let abandoned = app
+        .clone()
+        .oneshot(run_request("t1", "abandon"))
+        .await
+        .unwrap();
     assert_eq!(abandoned.status(), StatusCode::OK);
     drop(abandoned);
 
-    let resp = app.clone().oneshot(run_request("t1", "after")).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(run_request("t1", "after"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_to_string(resp).await.contains("pong"));
 }

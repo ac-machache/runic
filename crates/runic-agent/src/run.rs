@@ -7,7 +7,7 @@
 
 use chrono::Utc;
 
-use runic_state::{new_run_id, RunOutcome, SessionEvent};
+use runic_state::{RunOutcome, SessionEvent, new_run_id};
 use runic_types::{Message, StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
@@ -33,7 +33,8 @@ impl Agent {
         input: impl Into<String>,
         ctx: RunContext,
     ) -> Result<RunOutcome, AgentError> {
-        self.run_message_with(Message::user(input.into()), ctx).await
+        self.run_message_with(Message::user(input.into()), ctx)
+            .await
     }
 
     /// The full entry point. Installs the per-run context, drives the loop,

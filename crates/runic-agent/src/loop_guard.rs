@@ -346,7 +346,10 @@ mod tests {
         for _ in 0..8 {
             assert_eq!(g.check(&call("status_check", 1)), Verdict::Allow);
         }
-        assert!(matches!(g.check(&call("status_check", 1)), Verdict::Warn(_))); // 9th
+        assert!(matches!(
+            g.check(&call("status_check", 1)),
+            Verdict::Warn(_)
+        )); // 9th
     }
 
     #[test]
@@ -362,7 +365,10 @@ mod tests {
             g.check(&call(name, 1));
         }
         let v = g.check(&call("b", 1)); // completes the 3rd A-B cycle
-        assert!(matches!(v, Verdict::Block(_)), "expected ping-pong block, got {v:?}");
+        assert!(
+            matches!(v, Verdict::Block(_)),
+            "expected ping-pong block, got {v:?}"
+        );
     }
 
     #[test]
@@ -464,7 +470,11 @@ mod ported_from_openfang {
         let mut guard = LoopGuard::new(LoopGuardConfig::default());
         let params = serde_json::json!({ "query": "weather" });
         let result = "sunny 72F";
-        assert!(guard.record_outcome_parts("web_search", &params, result).is_none());
+        assert!(
+            guard
+                .record_outcome_parts("web_search", &params, result)
+                .is_none()
+        );
         let w = guard.record_outcome_parts("web_search", &params, result);
         assert!(w.is_some());
         assert!(w.unwrap().contains("identical results"));
@@ -547,7 +557,10 @@ mod ported_from_openfang {
             );
         }
         let v = guard.check_parts("shell_exec", &params);
-        assert!(matches!(v, Verdict::Warn(_)), "expected warn at poll threshold, got: {v:?}");
+        assert!(
+            matches!(v, Verdict::Warn(_)),
+            "expected warn at poll threshold, got: {v:?}"
+        );
     }
 
     #[test]

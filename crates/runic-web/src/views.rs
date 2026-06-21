@@ -5,7 +5,9 @@ use leptos::prelude::*;
 use serde_json::Value;
 
 use crate::model::{Item, RunCluster, ToolView, TurnCluster};
-use crate::util::{clean_tool_name, content_blocks, md_to_html, render_block_summary, short_id, truncate};
+use crate::util::{
+    clean_tool_name, content_blocks, md_to_html, render_block_summary, short_id, truncate,
+};
 
 // ── chat transcript ──────────────────────────────────────────────────────
 
@@ -38,7 +40,11 @@ pub fn render_item(item: Item) -> AnyView {
 fn render_tool_card(t: ToolView) -> AnyView {
     let dot_cls = format!("tool-dot {}", t.status);
     let status_cls = format!("tool-status {}", t.status);
-    let dur = if t.duration_ms > 0 { format!("· {}ms", t.duration_ms) } else { String::new() };
+    let dur = if t.duration_ms > 0 {
+        format!("· {}ms", t.duration_ms)
+    } else {
+        String::new()
+    };
     let label = clean_tool_name(&t.name);
     let has_input = !t.input.is_empty();
     let input = t.input.clone();
@@ -82,7 +88,13 @@ fn render_tool_card(t: ToolView) -> AnyView {
 /// Render one RUN (top level) — a user message + its answer — expanding to
 /// the model turns that happened in between.
 pub fn render_run(idx: usize, total: usize, r: RunCluster, show_thinking: bool) -> AnyView {
-    let dot_cls = if r.running { "run-dot running" } else if r.errored { "run-dot error" } else { "run-dot" };
+    let dot_cls = if r.running {
+        "run-dot running"
+    } else if r.errored {
+        "run-dot error"
+    } else {
+        "run-dot"
+    };
     let has_prompt = !r.prompt.is_empty();
     let prompt = r.prompt.clone();
     let label = if has_prompt {
@@ -98,7 +110,10 @@ pub fn render_run(idx: usize, total: usize, r: RunCluster, show_thinking: bool) 
     let stop = r.stop_reason.clone();
     let usage = r.usage;
     let open = r.running || idx + 1 == total; // newest / live run expanded
-    let turn_views = r.turns.into_iter().enumerate()
+    let turn_views = r
+        .turns
+        .into_iter()
+        .enumerate()
         .map(|(i, t)| render_turn(i, t, show_thinking))
         .collect_view();
     view! {
@@ -134,8 +149,11 @@ fn render_turn(idx: usize, t: TurnCluster, show_thinking: bool) -> AnyView {
     let thinking = t.thinking.clone();
     let tool_views = t.tools.iter().map(render_turn_tool).collect_view();
     let foot = t.closed.then(|| {
-        format!("stop_reason: {} · tool_calls: {}",
-            t.stop_reason.clone().unwrap_or_else(|| "—".into()), calls)
+        format!(
+            "stop_reason: {} · tool_calls: {}",
+            t.stop_reason.clone().unwrap_or_else(|| "—".into()),
+            calls
+        )
     });
     view! {
         <details class="turn" open=true>
@@ -166,13 +184,19 @@ fn render_turn_tool(t: &ToolView) -> AnyView {
     let pill_cls = format!("status-pill {}", t.status);
     let status = t.status.clone();
     let label = clean_tool_name(&t.name);
-    let dur = if t.duration_ms > 0 { format!("{}ms", t.duration_ms) } else { String::new() };
+    let dur = if t.duration_ms > 0 {
+        format!("{}ms", t.duration_ms)
+    } else {
+        String::new()
+    };
     let mut body = String::new();
     if !t.input.is_empty() {
         body.push_str(&t.input);
     }
     if !t.result.is_empty() {
-        if !body.is_empty() { body.push('\n'); }
+        if !body.is_empty() {
+            body.push('\n');
+        }
         body.push_str("→ ");
         body.push_str(&t.result);
     }
@@ -200,10 +224,22 @@ fn render_turn_tool(t: &ToolView) -> AnyView {
 /// base prompt or the tool schemas).
 pub fn render_state(s: &Value, refresh: impl Fn() + Copy + 'static) -> AnyView {
     let busy = s.get("busy").and_then(|v| v.as_bool()).unwrap_or(false);
-    let prompt = s.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let prompt = s
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let event_count = s.get("event_count").and_then(|v| v.as_u64()).unwrap_or(0);
-    let run_count = s.get("run_count").and_then(|v| v.as_u64()).map(|r| r.to_string()).unwrap_or_else(|| "—".into());
-    let messages = s.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let run_count = s
+        .get("run_count")
+        .and_then(|v| v.as_u64())
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "—".into());
+    let messages = s
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let msg_count = messages.len();
 
     let msg_views = messages.into_iter().map(|m| {

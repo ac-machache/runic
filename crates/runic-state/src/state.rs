@@ -183,7 +183,12 @@ impl AgentState {
                     SessionEvent::RunEnd { at, .. } => Some(*at),
                     _ => None,
                 });
-                RunView { id, started_at, ended_at, events }
+                RunView {
+                    id,
+                    started_at,
+                    ended_at,
+                    events,
+                }
             })
             .collect()
     }
@@ -197,12 +202,13 @@ impl AgentState {
     pub fn last_assistant_text(&self) -> Option<String> {
         for ev in self.events.iter().rev() {
             if let SessionEvent::Message { msg, .. } = ev
-                && msg.role == runic_types::Role::Assistant {
-                    let t = msg.content.text_content();
-                    if !t.is_empty() {
-                        return Some(t);
-                    }
+                && msg.role == runic_types::Role::Assistant
+            {
+                let t = msg.content.text_content();
+                if !t.is_empty() {
+                    return Some(t);
                 }
+            }
         }
         None
     }

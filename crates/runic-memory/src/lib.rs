@@ -38,14 +38,14 @@ pub mod store;
 pub mod threats;
 pub mod tool;
 
-pub use config::{ExternalProviderConfig, MemoryConfig, ProviderConfig, DEFAULT_NUDGE_INTERVAL};
+pub use config::{DEFAULT_NUDGE_INTERVAL, ExternalProviderConfig, MemoryConfig, ProviderConfig};
 pub use error::MemoryError;
 pub use manager::MemoryManager;
 pub use provider::{BuiltinProvider, MemoryProvider, MemoryScope, MemoryWriteMeta};
-pub use review::{ReviewScheduler, MEMORY_REVIEW_GUIDANCE};
+pub use review::{MEMORY_REVIEW_GUIDANCE, ReviewScheduler};
 pub use store::{
-    render_block, BoundedMemoryStore, MemorySnapshot, Target, DEFAULT_MEMORY_LIMIT,
-    DEFAULT_USER_LIMIT, ENTRY_DELIMITER, MEMORY_KEY, USER_KEY,
+    BoundedMemoryStore, DEFAULT_MEMORY_LIMIT, DEFAULT_USER_LIMIT, ENTRY_DELIMITER, MEMORY_KEY,
+    MemorySnapshot, Target, USER_KEY, render_block,
 };
 pub use threats::ThreatHit;
 pub use tool::MemoryTool;

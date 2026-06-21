@@ -58,7 +58,11 @@ impl Tool for SearchChatsTool {
         args: serde_json::Value,
         ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         if query.is_empty() {
             return Ok(ToolResult::error("search_chats requires a non-empty query"));
         }
@@ -73,9 +77,9 @@ impl Tool for SearchChatsTool {
         let exclude = Some(ctx.session_id.as_str());
 
         match self.store.search(tenant, query, limit, exclude).await {
-            Ok(hits) if hits.is_empty() => {
-                Ok(ToolResult::ok("No matching messages in your other conversations."))
-            }
+            Ok(hits) if hits.is_empty() => Ok(ToolResult::ok(
+                "No matching messages in your other conversations.",
+            )),
             Ok(hits) => {
                 let mut out = format!("{} match(es):\n", hits.len());
                 for h in hits {
@@ -89,9 +93,9 @@ impl Tool for SearchChatsTool {
                 }
                 Ok(ToolResult::ok(out))
             }
-            Err(Error::Unsupported(_)) => {
-                Ok(ToolResult::error("chat search is not available with this store"))
-            }
+            Err(Error::Unsupported(_)) => Ok(ToolResult::error(
+                "chat search is not available with this store",
+            )),
             Err(e) => Ok(ToolResult::error(format!("chat search failed: {e}"))),
         }
     }
@@ -123,7 +127,13 @@ mod tests {
     #[tokio::test]
     async fn searches_other_sessions_scoped_to_the_context_tenant() {
         let store = Arc::new(MemorySessionStore::new());
-        seed(&store, "acme", "past", "the postgres migration failed badly").await;
+        seed(
+            &store,
+            "acme",
+            "past",
+            "the postgres migration failed badly",
+        )
+        .await;
         seed(&store, "acme", "current", "postgres status now").await;
         seed(&store, "other", "x", "postgres migration in another tenant").await;
 

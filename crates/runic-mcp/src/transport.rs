@@ -10,19 +10,19 @@
 //! no surgery to the rest of the crate.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, warn};
 
 use crate::error::McpError;
 use crate::protocol::{
-    JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, JSONRPC_VERSION,
+    JSONRPC_VERSION, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
 };
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,11 +56,8 @@ pub trait Transport: Send + Sync + std::fmt::Debug {
     ) -> Result<serde_json::Value, McpError>;
 
     /// Send a JSON-RPC notification (no `id`, no response expected).
-    async fn notify(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<(), McpError>;
+    async fn notify(&self, method: &str, params: Option<serde_json::Value>)
+    -> Result<(), McpError>;
 
     /// Best-effort graceful shutdown. After this returns, the transport
     /// is considered dead.

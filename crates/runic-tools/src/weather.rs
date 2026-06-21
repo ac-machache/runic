@@ -15,8 +15,8 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use runic_tool::{Tool, ToolContext, ToolResult};
 
@@ -25,10 +25,8 @@ const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const ARCHIVE_URL: &str = "https://archive-api.open-meteo.com/v1/archive";
 const FORECAST_DAYS: u32 = 7;
 
-const CURRENT_VARS: &str =
-    "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m";
-const FORECAST_DAILY_VARS: &str =
-    "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max";
+const CURRENT_VARS: &str = "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m";
+const FORECAST_DAILY_VARS: &str = "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max";
 // Archive has no precipitation_probability.
 const ARCHIVE_DAILY_VARS: &str =
     "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max";
@@ -63,7 +61,9 @@ async fn get_json<T: DeserializeOwned>(
             body.chars().take(200).collect::<String>()
         ));
     }
-    resp.json::<T>().await.map_err(|e| format!("parse failed: {e}"))
+    resp.json::<T>()
+        .await
+        .map_err(|e| format!("parse failed: {e}"))
 }
 
 /// Resolve a place name to its first geocoding match. Shared by both tools.
@@ -71,7 +71,12 @@ async fn geocode(client: &reqwest::Client, location: &str) -> Result<GeoResult, 
     let geo: GeoResponse = get_json(
         client,
         GEOCODE_URL,
-        &[("name", location), ("count", "1"), ("language", "en"), ("format", "json")],
+        &[
+            ("name", location),
+            ("count", "1"),
+            ("language", "en"),
+            ("format", "json"),
+        ],
     )
     .await?;
     geo.results
@@ -221,9 +226,21 @@ fn render_daily(d: &Daily, fahrenheit: bool) -> String {
     let mut out = String::new();
     for i in 0..d.time.len() {
         let date = &d.time[i];
-        let cond = d.weather_code.get(i).map(|c| wmo_text(*c)).unwrap_or("Unknown");
-        let max = d.temperature_2m_max.get(i).map(|x| format!("{x:.0}")).unwrap_or_else(|| "?".into());
-        let min = d.temperature_2m_min.get(i).map(|x| format!("{x:.0}")).unwrap_or_else(|| "?".into());
+        let cond = d
+            .weather_code
+            .get(i)
+            .map(|c| wmo_text(*c))
+            .unwrap_or("Unknown");
+        let max = d
+            .temperature_2m_max
+            .get(i)
+            .map(|x| format!("{x:.0}"))
+            .unwrap_or_else(|| "?".into());
+        let min = d
+            .temperature_2m_min
+            .get(i)
+            .map(|x| format!("{x:.0}"))
+            .unwrap_or_else(|| "?".into());
         let precip = d.precipitation_sum.get(i).copied().unwrap_or(0.0);
         let prob = d
             .precipitation_probability_max
@@ -281,7 +298,11 @@ impl Tool for WeatherTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(location) = args.get("location").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("weather requires `location`"));
         };
@@ -291,7 +312,11 @@ impl Tool for WeatherTool {
             Ok(g) => g,
             Err(e) => return Ok(ToolResult::error(e)),
         };
-        let (lat, lon, days) = (geo.latitude.to_string(), geo.longitude.to_string(), FORECAST_DAYS.to_string());
+        let (lat, lon, days) = (
+            geo.latitude.to_string(),
+            geo.longitude.to_string(),
+            FORECAST_DAYS.to_string(),
+        );
         let mut q: Vec<(&str, &str)> = vec![
             ("latitude", &lat),
             ("longitude", &lon),
@@ -364,14 +389,23 @@ impl Tool for WeatherHistoryTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(location) = args.get("location").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("weather_history requires `location`"));
         };
         let Some(start) = args.get("start_date").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("weather_history requires `start_date` (YYYY-MM-DD)"));
+            return Ok(ToolResult::error(
+                "weather_history requires `start_date` (YYYY-MM-DD)",
+            ));
         };
-        let end = args.get("end_date").and_then(|v| v.as_str()).unwrap_or(start);
+        let end = args
+            .get("end_date")
+            .and_then(|v| v.as_str())
+            .unwrap_or(start);
         let fahrenheit = args.get("units").and_then(|v| v.as_str()) == Some("fahrenheit");
 
         let geo = match geocode(&self.client, location).await {
@@ -396,7 +430,10 @@ impl Tool for WeatherHistoryTool {
             Err(e) => return Ok(ToolResult::error(e)),
         };
 
-        let mut out = format!("Weather history for {} ({start} → {end})\n", place_label(&geo));
+        let mut out = format!(
+            "Weather history for {} ({start} → {end})\n",
+            place_label(&geo)
+        );
         match &arc.daily {
             Some(d) if !d.time.is_empty() => {
                 out.push_str(&format!("\n{}\n", render_daily(d, fahrenheit)));
@@ -455,7 +492,10 @@ mod tests {
 
     #[test]
     fn place_label_joins_and_dedupes() {
-        assert_eq!(place_label(&geo()), "Paris, Île-de-France, France (Europe/Paris)");
+        assert_eq!(
+            place_label(&geo()),
+            "Paris, Île-de-France, France (Europe/Paris)"
+        );
     }
 
     #[test]
@@ -467,7 +507,10 @@ mod tests {
     #[test]
     fn current_line_renders() {
         let c = render_current(&current(), false);
-        assert_eq!(c, "Now: 14°C (feels 12°C), Overcast — humidity 80%, wind 11 km/h, precip 0 mm");
+        assert_eq!(
+            c,
+            "Now: 14°C (feels 12°C), Overcast — humidity 80%, wind 11 km/h, precip 0 mm"
+        );
     }
 
     #[test]

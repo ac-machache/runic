@@ -39,7 +39,10 @@ impl ReviewScheduler {
     /// `interval` turns between reviews (`0` = disabled, matching
     /// [`MemoryConfig::nudge_interval`](crate::config::MemoryConfig)).
     pub fn new(interval: u32) -> Self {
-        Self { interval, since: AtomicU32::new(0) }
+        Self {
+            interval,
+            since: AtomicU32::new(0),
+        }
     }
 
     /// Whether the nudge is active at all.

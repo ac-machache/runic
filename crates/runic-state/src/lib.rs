@@ -12,7 +12,7 @@ pub mod event;
 pub mod state;
 
 pub use event::{HookLifecycle, RunOutcome, SessionEvent};
-pub use state::{AgentState, RunTimeContext, RunView, EVENT_BROADCAST_CAPACITY, new_run_id};
+pub use state::{AgentState, EVENT_BROADCAST_CAPACITY, RunTimeContext, RunView, new_run_id};
 
 #[cfg(test)]
 mod tests {
@@ -21,7 +21,11 @@ mod tests {
     use runic_types::Message;
 
     fn push_msg(s: &mut AgentState, run_id: &str, msg: Message) {
-        s.push_event(SessionEvent::Message { run_id: run_id.into(), msg, at: Utc::now() });
+        s.push_event(SessionEvent::Message {
+            run_id: run_id.into(),
+            msg,
+            at: Utc::now(),
+        });
     }
 
     #[test]
@@ -70,9 +74,19 @@ mod tests {
     #[test]
     fn runs_group_by_id_and_current_run_is_unclosed() {
         let mut s = AgentState::new("u1", "sess", "");
-        s.push_event(SessionEvent::RunStart { run_id: "a".into(), at: Utc::now() });
-        s.push_event(SessionEvent::RunEnd { run_id: "a".into(), outcome: RunOutcome::default(), at: Utc::now() });
-        s.push_event(SessionEvent::RunStart { run_id: "b".into(), at: Utc::now() });
+        s.push_event(SessionEvent::RunStart {
+            run_id: "a".into(),
+            at: Utc::now(),
+        });
+        s.push_event(SessionEvent::RunEnd {
+            run_id: "a".into(),
+            outcome: RunOutcome::default(),
+            at: Utc::now(),
+        });
+        s.push_event(SessionEvent::RunStart {
+            run_id: "b".into(),
+            at: Utc::now(),
+        });
         let runs = s.runs();
         let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
@@ -93,7 +107,10 @@ mod tests {
         let (tx, _keep) = tokio::sync::broadcast::channel(16);
         s.set_events_tx(tx);
         let mut rx = s.subscribe_events().expect("channel installed");
-        s.push_event(SessionEvent::RunStart { run_id: "r1".into(), at: Utc::now() });
+        s.push_event(SessionEvent::RunStart {
+            run_id: "r1".into(),
+            at: Utc::now(),
+        });
         assert!(rx.try_recv().is_ok(), "subscriber should receive the event");
     }
 

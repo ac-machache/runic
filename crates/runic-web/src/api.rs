@@ -34,7 +34,11 @@ impl ApiClient {
             .and_then(|t| t.as_array())
             .map(|a| {
                 a.iter()
-                    .filter_map(|t| t.get("thread_id").and_then(|x| x.as_str()).map(String::from))
+                    .filter_map(|t| {
+                        t.get("thread_id")
+                            .and_then(|x| x.as_str())
+                            .map(String::from)
+                    })
                     .collect()
             })
             .unwrap_or_default())
@@ -141,7 +145,9 @@ impl ApiClient {
             .await
             .map_err(e2s)?;
 
-        let raw = resp.body().ok_or_else(|| "response has no body".to_string())?;
+        let raw = resp
+            .body()
+            .ok_or_else(|| "response has no body".to_string())?;
         let mut stream = wasm_streams::ReadableStream::from_raw(raw).into_stream();
 
         let mut buf: Vec<u8> = Vec::new();
@@ -157,7 +163,9 @@ impl ApiClient {
                 let frame: Vec<u8> = buf.drain(..pos + 2).collect();
                 let frame = String::from_utf8_lossy(&frame[..frame.len() - 2]);
                 for line in frame.lines() {
-                    let Some(data) = line.strip_prefix("data:") else { continue };
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
                     let data = data.trim();
                     if data.is_empty() {
                         continue;

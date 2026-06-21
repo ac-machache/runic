@@ -275,7 +275,8 @@ mod tests {
 
     #[test]
     fn jsonrpc_response_with_error_round_trips() {
-        let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
         let parsed: JsonRpcResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.id, 1);
         assert!(parsed.result.is_none());
@@ -330,7 +331,10 @@ mod tests {
         let parsed: ListToolsResult = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.tools.len(), 1);
         assert_eq!(parsed.tools[0].name, "read_file");
-        assert_eq!(parsed.tools[0].description.as_deref(), Some("Read a file from disk"));
+        assert_eq!(
+            parsed.tools[0].description.as_deref(),
+            Some("Read a file from disk")
+        );
     }
 
     #[test]
@@ -391,12 +395,16 @@ mod tests {
     #[test]
     fn content_blocks_to_text_handles_mixed_content() {
         let blocks = vec![
-            ContentBlock::Text { text: "first".into() },
+            ContentBlock::Text {
+                text: "first".into(),
+            },
             ContentBlock::Image {
                 data: "AAAA".into(),
                 mime_type: "image/png".into(),
             },
-            ContentBlock::Text { text: "last".into() },
+            ContentBlock::Text {
+                text: "last".into(),
+            },
         ];
         let text = content_blocks_to_text(&blocks);
         assert!(text.starts_with("first"));

@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, Utc};
 use runic_state::SessionEvent;
 use runic_types::Role;
 
-use crate::artifacts::{new_artifact_id, Artifact, ArtifactSource, ArtifactStore};
+use crate::artifacts::{Artifact, ArtifactSource, ArtifactStore, new_artifact_id};
 use crate::sessions::event_at;
 use crate::{ChatHit, Error, Result, SessionMeta, SessionStore, StoredEvent};
 
@@ -139,7 +139,10 @@ impl SessionStore for MemorySessionStore {
             });
         let seq = rec.events.len() as u64 + 1;
         rec.last_activity = event_at(event);
-        rec.events.push(StoredEvent { seq, event: event.clone() });
+        rec.events.push(StoredEvent {
+            seq,
+            event: event.clone(),
+        });
         Ok(seq)
     }
 
@@ -164,7 +167,13 @@ impl SessionStore for MemorySessionStore {
             .lock()
             .unwrap()
             .get(&(tenant.to_string(), session_id.to_string()))
-            .map(|r| r.events.iter().filter(|e| e.seq > after_seq).cloned().collect())
+            .map(|r| {
+                r.events
+                    .iter()
+                    .filter(|e| e.seq > after_seq)
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default())
     }
 
@@ -256,7 +265,13 @@ mod tests {
     async fn memory_artifact_roundtrip() {
         let s = MemoryArtifactStore::new();
         let a = s
-            .put("t", "sess", "application/pdf", ArtifactSource::UserUpload, b"%PDF")
+            .put(
+                "t",
+                "sess",
+                "application/pdf",
+                ArtifactSource::UserUpload,
+                b"%PDF",
+            )
             .await
             .unwrap();
         assert_eq!(s.get(&a.id).await.unwrap(), b"%PDF");
@@ -289,12 +304,26 @@ mod tests {
     #[tokio::test]
     async fn append_assigns_monotonic_seq_and_read_is_ordered() {
         let s = MemorySessionStore::new();
-        assert_eq!(s.append("t", "s1", &user_msg("r1", "hello")).await.unwrap(), 1);
-        assert_eq!(s.append("t", "s1", &assistant_msg("r1", "hi")).await.unwrap(), 2);
-        assert_eq!(s.append("t", "s1", &user_msg("r1", "bye")).await.unwrap(), 3);
+        assert_eq!(
+            s.append("t", "s1", &user_msg("r1", "hello")).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            s.append("t", "s1", &assistant_msg("r1", "hi"))
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            s.append("t", "s1", &user_msg("r1", "bye")).await.unwrap(),
+            3
+        );
 
         let events = s.read("t", "s1").await.unwrap();
-        assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         // tailing
         let tail = s.read_after("t", "s1", 1).await.unwrap();
         assert_eq!(tail.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
@@ -308,11 +337,17 @@ mod tests {
         s.append("alice", "a1", &user_msg("r", "x")).await.unwrap();
         s.append("alice", "a1", &user_msg("r", "y")).await.unwrap();
         s.append("alice", "a2", &user_msg("r", "z")).await.unwrap();
-        s.append("bob", "b1", &user_msg("r", "secret")).await.unwrap();
+        s.append("bob", "b1", &user_msg("r", "secret"))
+            .await
+            .unwrap();
 
         let alice = s.list_sessions("alice").await.unwrap();
         assert_eq!(alice.len(), 2);
-        assert!(alice.iter().all(|m| m.session_id == "a1" || m.session_id == "a2"));
+        assert!(
+            alice
+                .iter()
+                .all(|m| m.session_id == "a1" || m.session_id == "a2")
+        );
         let a1 = alice.iter().find(|m| m.session_id == "a1").unwrap();
         assert_eq!(a1.event_count, 2);
         // never leaks Bob's
@@ -332,17 +367,33 @@ mod tests {
     #[tokio::test]
     async fn search_is_tenant_scoped_and_excludes_current() {
         let s = MemorySessionStore::new();
-        s.append("acme", "past", &user_msg("r", "deploy the staging server")).await.unwrap();
-        s.append("acme", "past", &assistant_msg("r", "done deploying")).await.unwrap();
-        s.append("acme", "current", &user_msg("r", "deploy again")).await.unwrap();
-        s.append("other", "x", &user_msg("r", "deploy in another tenant")).await.unwrap();
+        s.append("acme", "past", &user_msg("r", "deploy the staging server"))
+            .await
+            .unwrap();
+        s.append("acme", "past", &assistant_msg("r", "done deploying"))
+            .await
+            .unwrap();
+        s.append("acme", "current", &user_msg("r", "deploy again"))
+            .await
+            .unwrap();
+        s.append("other", "x", &user_msg("r", "deploy in another tenant"))
+            .await
+            .unwrap();
 
         // tenant acme, excluding the current session → only the "past" hits
-        let hits = s.search("acme", "deploy", 10, Some("current")).await.unwrap();
+        let hits = s
+            .search("acme", "deploy", 10, Some("current"))
+            .await
+            .unwrap();
         assert!(hits.iter().all(|h| h.session_id == "past"));
         assert!(hits.iter().any(|h| h.snippet.contains("deploy")));
         // never crosses tenants
-        assert!(s.search("acme", "another tenant", 10, None).await.unwrap().is_empty());
+        assert!(
+            s.search("acme", "another tenant", 10, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // limit is honored
         assert_eq!(s.search("acme", "deploy", 1, None).await.unwrap().len(), 1);
     }

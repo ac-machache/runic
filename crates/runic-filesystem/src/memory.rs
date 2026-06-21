@@ -29,7 +29,9 @@ impl MemoryFs {
         for (k, v) in entries {
             m.insert((*k).to_string(), (*v).to_string());
         }
-        Self { files: Mutex::new(m) }
+        Self {
+            files: Mutex::new(m),
+        }
     }
 
     fn under(base: &str, key: &str) -> bool {
@@ -53,7 +55,9 @@ impl FilesystemBackend for MemoryFs {
         let mut dirs = BTreeSet::new();
         let mut out = Vec::new();
         for (k, v) in files.iter() {
-            let Some(rel) = k.strip_prefix(&prefix) else { continue };
+            let Some(rel) = k.strip_prefix(&prefix) else {
+                continue;
+            };
             if rel.is_empty() {
                 continue;
             }
@@ -73,10 +77,16 @@ impl FilesystemBackend for MemoryFs {
 
     async fn read(&self, path: &str, offset: usize, limit: usize) -> Result<ReadResult, FsError> {
         let files = self.files.lock().unwrap();
-        let content = files.get(path).ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        let content = files
+            .get(path)
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
         let lines: Vec<&str> = content.lines().collect();
         let end = offset.saturating_add(limit).min(lines.len());
-        let slice = if offset < lines.len() { &lines[offset..end] } else { &[][..] };
+        let slice = if offset < lines.len() {
+            &lines[offset..end]
+        } else {
+            &[][..]
+        };
         Ok(ReadResult {
             content: slice.join("\n"),
             start_line: offset + 1,
@@ -93,9 +103,17 @@ impl FilesystemBackend for MemoryFs {
         Ok(())
     }
 
-    async fn edit(&self, path: &str, old: &str, new: &str, replace_all: bool) -> Result<usize, FsError> {
+    async fn edit(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> Result<usize, FsError> {
         let mut files = self.files.lock().unwrap();
-        let content = files.get(path).ok_or_else(|| FsError::NotFound(path.to_string()))?;
+        let content = files
+            .get(path)
+            .ok_or_else(|| FsError::NotFound(path.to_string()))?;
         let count = content.matches(old).count();
         if count == 0 {
             return Err(FsError::NoEditMatch);
@@ -127,7 +145,11 @@ impl FilesystemBackend for MemoryFs {
             }
             for (i, line) in v.lines().enumerate() {
                 if line.contains(pattern) {
-                    out.push(GrepMatch { path: k.clone(), line: (i + 1) as u32, text: line.to_string() });
+                    out.push(GrepMatch {
+                        path: k.clone(),
+                        line: (i + 1) as u32,
+                        text: line.to_string(),
+                    });
                 }
             }
         }
@@ -175,15 +197,27 @@ mod tests {
     async fn write_read_delete_roundtrip() {
         let fs = MemoryFs::new();
         fs.write("/a.txt", "hello\nworld").await.unwrap();
-        assert!(matches!(fs.write("/a.txt", "x").await, Err(FsError::AlreadyExists(_))));
-        assert_eq!(fs.read("/a.txt", 0, usize::MAX).await.unwrap().content, "hello\nworld");
+        assert!(matches!(
+            fs.write("/a.txt", "x").await,
+            Err(FsError::AlreadyExists(_))
+        ));
+        assert_eq!(
+            fs.read("/a.txt", 0, usize::MAX).await.unwrap().content,
+            "hello\nworld"
+        );
         fs.delete("/a.txt").await.unwrap();
-        assert!(matches!(fs.read("/a.txt", 0, 1).await, Err(FsError::NotFound(_))));
+        assert!(matches!(
+            fs.read("/a.txt", 0, 1).await,
+            Err(FsError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
     async fn read_whole_file_with_max_limit() {
         let fs = MemoryFs::seeded(&[("/m.md", "one\n§\ntwo")]);
-        assert_eq!(fs.read("/m.md", 0, usize::MAX).await.unwrap().content, "one\n§\ntwo");
+        assert_eq!(
+            fs.read("/m.md", 0, usize::MAX).await.unwrap().content,
+            "one\n§\ntwo"
+        );
     }
 }

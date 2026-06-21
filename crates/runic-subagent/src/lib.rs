@@ -18,8 +18,8 @@ pub mod delegate;
 
 pub use def::{AgentDef, AgentRoster};
 pub use delegate::{
-    BackgroundTask, ChildBuilder, DelegateTool, DelegationCtx, SpawnBudget, TaskStatus,
-    DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TOTAL_SPAWNS,
+    BackgroundTask, ChildBuilder, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH,
+    DEFAULT_MAX_TOTAL_SPAWNS, DelegateTool, DelegationCtx, SpawnBudget, TaskStatus,
 };
 
 /// Render the roster into a system-prompt section so the model knows which

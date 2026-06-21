@@ -27,7 +27,11 @@ impl Tool for CalculatorTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(expr) = args.get("expression").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("calculator requires `expression`"));
         };
@@ -66,20 +70,43 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
         let c = chars[i];
         match c {
             ' ' | '\t' | '\n' | '\r' => i += 1,
-            '+' => { toks.push(Tok::Plus); i += 1; }
-            '-' => { toks.push(Tok::Minus); i += 1; }
-            '*' => { toks.push(Tok::Star); i += 1; }
-            '/' => { toks.push(Tok::Slash); i += 1; }
-            '%' => { toks.push(Tok::Percent); i += 1; }
-            '(' => { toks.push(Tok::LParen); i += 1; }
-            ')' => { toks.push(Tok::RParen); i += 1; }
+            '+' => {
+                toks.push(Tok::Plus);
+                i += 1;
+            }
+            '-' => {
+                toks.push(Tok::Minus);
+                i += 1;
+            }
+            '*' => {
+                toks.push(Tok::Star);
+                i += 1;
+            }
+            '/' => {
+                toks.push(Tok::Slash);
+                i += 1;
+            }
+            '%' => {
+                toks.push(Tok::Percent);
+                i += 1;
+            }
+            '(' => {
+                toks.push(Tok::LParen);
+                i += 1;
+            }
+            ')' => {
+                toks.push(Tok::RParen);
+                i += 1;
+            }
             c if c.is_ascii_digit() || c == '.' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
                 }
                 let num: String = chars[start..i].iter().collect();
-                toks.push(Tok::Num(num.parse().map_err(|_| format!("invalid number '{num}'"))?));
+                toks.push(Tok::Num(
+                    num.parse().map_err(|_| format!("invalid number '{num}'"))?,
+                ));
             }
             other => return Err(format!("unexpected character '{other}'")),
         }
@@ -101,8 +128,14 @@ impl Parser {
         let mut v = self.term()?;
         while let Some(t) = self.peek() {
             match t {
-                Tok::Plus => { self.pos += 1; v += self.term()?; }
-                Tok::Minus => { self.pos += 1; v -= self.term()?; }
+                Tok::Plus => {
+                    self.pos += 1;
+                    v += self.term()?;
+                }
+                Tok::Minus => {
+                    self.pos += 1;
+                    v -= self.term()?;
+                }
                 _ => break,
             }
         }
@@ -113,7 +146,10 @@ impl Parser {
         let mut v = self.factor()?;
         while let Some(t) = self.peek() {
             match t {
-                Tok::Star => { self.pos += 1; v *= self.factor()?; }
+                Tok::Star => {
+                    self.pos += 1;
+                    v *= self.factor()?;
+                }
                 Tok::Slash => {
                     self.pos += 1;
                     let d = self.factor()?;
@@ -138,14 +174,26 @@ impl Parser {
 
     fn factor(&mut self) -> Result<f64, String> {
         match self.peek() {
-            Some(Tok::Num(n)) => { self.pos += 1; Ok(n) }
-            Some(Tok::Minus) => { self.pos += 1; Ok(-self.factor()?) }
-            Some(Tok::Plus) => { self.pos += 1; self.factor() }
+            Some(Tok::Num(n)) => {
+                self.pos += 1;
+                Ok(n)
+            }
+            Some(Tok::Minus) => {
+                self.pos += 1;
+                Ok(-self.factor()?)
+            }
+            Some(Tok::Plus) => {
+                self.pos += 1;
+                self.factor()
+            }
             Some(Tok::LParen) => {
                 self.pos += 1;
                 let v = self.expr()?;
                 match self.peek() {
-                    Some(Tok::RParen) => { self.pos += 1; Ok(v) }
+                    Some(Tok::RParen) => {
+                        self.pos += 1;
+                        Ok(v)
+                    }
                     _ => Err("expected ')'".into()),
                 }
             }

@@ -35,7 +35,11 @@ impl Tool for AskUserTool {
             "required": ["question"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(question) = args.get("question").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("ask_user requires `question`"));
         };
@@ -75,7 +79,11 @@ impl Tool for EscalateToHumanTool {
             "required": ["reason"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(reason) = args.get("reason").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("escalate_to_human requires `reason`"));
         };

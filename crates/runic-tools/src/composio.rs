@@ -207,7 +207,12 @@ impl ComposioTool {
             let slug = normalize_app_slug(app);
             req = req.query(&[("toolkits", slug.as_str())]);
         }
-        let resp = req.send().await?.error_for_status()?.json::<ToolsResponse>().await?;
+        let resp = req
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ToolsResponse>()
+            .await?;
         // Warm the slug cache so a later execute can skip candidate-guessing.
         if let Ok(mut cache) = self.slug_cache.write() {
             for t in &resp.items {
@@ -219,7 +224,11 @@ impl ComposioTool {
         Ok(resp.items)
     }
 
-    async fn list_accounts(&self, app: Option<&str>, entity: &str) -> anyhow::Result<Vec<ConnectedAccount>> {
+    async fn list_accounts(
+        &self,
+        app: Option<&str>,
+        entity: &str,
+    ) -> anyhow::Result<Vec<ConnectedAccount>> {
         let mut q: Vec<(&str, String)> = vec![
             ("limit", "50".into()),
             ("order_by", "updated_at".into()),
@@ -247,17 +256,18 @@ impl ComposioTool {
         let app = app.map(normalize_app_slug);
         let cache_key = format!("{entity}:{}", app.as_deref().unwrap_or("*"));
         if let Ok(cache) = self.account_cache.read()
-            && let Some(id) = cache.get(&cache_key) {
-                return Some(id.clone());
-            }
+            && let Some(id) = cache.get(&cache_key)
+        {
+            return Some(id.clone());
+        }
         let accounts = self.list_accounts(app.as_deref(), entity).await.ok()?;
         let id = accounts
             .into_iter()
             .find(|a| {
                 is_usable_status(&a.status)
-                    && app
-                        .as_deref()
-                        .is_none_or(|want| a.toolkit.as_ref().and_then(|t| t.slug.as_deref()) == Some(want))
+                    && app.as_deref().is_none_or(|want| {
+                        a.toolkit.as_ref().and_then(|t| t.slug.as_deref()) == Some(want)
+                    })
             })
             .map(|a| a.id)?;
         if let Ok(mut cache) = self.account_cache.write() {
@@ -268,7 +278,11 @@ impl ComposioTool {
 
     /// POST one execute attempt. `Ok(None)` means 404 (try the next slug);
     /// `Ok(Some)` is the result; `Err` is a real failure.
-    async fn try_execute(&self, slug: &str, body: &serde_json::Value) -> anyhow::Result<Option<serde_json::Value>> {
+    async fn try_execute(
+        &self,
+        slug: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
         let resp = self
             .client
             .post(format!("{API_BASE}/tools/execute/{slug}"))
@@ -282,7 +296,10 @@ impl ComposioTool {
         if !resp.status().is_success() {
             let code = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Composio execute failed ({code}): {}", text.chars().take(400).collect::<String>());
+            anyhow::bail!(
+                "Composio execute failed ({code}): {}",
+                text.chars().take(400).collect::<String>()
+            );
         }
         Ok(Some(resp.json::<serde_json::Value>().await?))
     }
@@ -296,7 +313,9 @@ impl ComposioTool {
         entity: &str,
         account_arg: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        let app = app.map(|a| a.to_string()).or_else(|| infer_app_from_action(action));
+        let app = app
+            .map(|a| a.to_string())
+            .or_else(|| infer_app_from_action(action));
         let account = match account_arg {
             Some(a) => Some(a.to_string()),
             None => self.resolve_account(app.as_deref(), entity).await,
@@ -306,9 +325,10 @@ impl ComposioTool {
         // Cached slug first, then normalized candidates.
         let mut candidates = Vec::new();
         if let Ok(cache) = self.slug_cache.read()
-            && let Some(slug) = cache.get(&action.to_ascii_lowercase()) {
-                candidates.push(slug.clone());
-            }
+            && let Some(slug) = cache.get(&action.to_ascii_lowercase())
+        {
+            candidates.push(slug.clone());
+        }
         for c in slug_candidates(action) {
             if !candidates.contains(&c) {
                 candidates.push(c);
@@ -328,7 +348,12 @@ impl ComposioTool {
         )
     }
 
-    async fn connect(&self, app: &str, entity: &str, auth_config_arg: Option<&str>) -> anyhow::Result<String> {
+    async fn connect(
+        &self,
+        app: &str,
+        entity: &str,
+        auth_config_arg: Option<&str>,
+    ) -> anyhow::Result<String> {
         let app = normalize_app_slug(app);
         let auth_config_id = match auth_config_arg {
             Some(id) => id.to_string(),
@@ -343,11 +368,9 @@ impl ComposioTool {
                     .error_for_status()?
                     .json::<AuthConfigsResponse>()
                     .await?;
-                resp.items
-                    .into_iter()
-                    .next()
-                    .map(|c| c.id)
-                    .ok_or_else(|| anyhow::anyhow!("no auth config found for '{app}'; pass auth_config_id"))?
+                resp.items.into_iter().next().map(|c| c.id).ok_or_else(|| {
+                    anyhow::anyhow!("no auth config found for '{app}'; pass auth_config_id")
+                })?
             }
         };
         let resp = self
@@ -400,7 +423,11 @@ impl Tool for ComposioTool {
             "required": ["action"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(action) = args.get("action").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("composio requires `action`"));
         };
@@ -413,30 +440,44 @@ impl Tool for ComposioTool {
                     if tools.is_empty() {
                         return Ok(ToolResult::ok("No actions found."));
                     }
-                    let mut out = format!("Composio actions{}:\n", app.map(|a| format!(" for {a}")).unwrap_or_default());
+                    let mut out = format!(
+                        "Composio actions{}:\n",
+                        app.map(|a| format!(" for {a}")).unwrap_or_default()
+                    );
                     for t in tools.iter().take(60) {
                         let slug = t.slug.as_deref().or(t.name.as_deref()).unwrap_or("?");
                         let desc = t.description.as_deref().unwrap_or("");
-                        out.push_str(&format!("- {slug} — {}\n", desc.chars().take(100).collect::<String>()));
+                        out.push_str(&format!(
+                            "- {slug} — {}\n",
+                            desc.chars().take(100).collect::<String>()
+                        ));
                     }
                     Ok(ToolResult::ok(out))
                 }
                 Err(e) => Ok(ToolResult::error(format!("composio list failed: {e}"))),
             },
-            "list_accounts" | "connected_accounts" => match self.list_accounts(app, &entity).await {
-                Ok(accounts) => {
-                    if accounts.is_empty() {
-                        return Ok(ToolResult::ok("No connected accounts."));
+            "list_accounts" | "connected_accounts" => {
+                match self.list_accounts(app, &entity).await {
+                    Ok(accounts) => {
+                        if accounts.is_empty() {
+                            return Ok(ToolResult::ok("No connected accounts."));
+                        }
+                        let mut out = String::from("Connected accounts:\n");
+                        for a in &accounts {
+                            let tk = a
+                                .toolkit
+                                .as_ref()
+                                .and_then(|t| t.slug.as_deref())
+                                .unwrap_or("?");
+                            out.push_str(&format!("- {tk}: {} ({})\n", a.id, a.status));
+                        }
+                        Ok(ToolResult::ok(out))
                     }
-                    let mut out = String::from("Connected accounts:\n");
-                    for a in &accounts {
-                        let tk = a.toolkit.as_ref().and_then(|t| t.slug.as_deref()).unwrap_or("?");
-                        out.push_str(&format!("- {tk}: {} ({})\n", a.id, a.status));
-                    }
-                    Ok(ToolResult::ok(out))
+                    Err(e) => Ok(ToolResult::error(format!(
+                        "composio list_accounts failed: {e}"
+                    ))),
                 }
-                Err(e) => Ok(ToolResult::error(format!("composio list_accounts failed: {e}"))),
-            },
+            }
             "execute" => {
                 let Some(action_name) = args
                     .get("action_name")
@@ -445,12 +486,19 @@ impl Tool for ComposioTool {
                 else {
                     return Ok(ToolResult::error("composio execute requires `action_name`"));
                 };
-                let params = args.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let params = args
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
                 let text = args.get("text").and_then(|v| v.as_str());
                 let account = args.get("connected_account_id").and_then(|v| v.as_str());
-                match self.execute_action(action_name, app, &params, text, &entity, account).await {
+                match self
+                    .execute_action(action_name, app, &params, text, &entity, account)
+                    .await
+                {
                     Ok(result) => Ok(ToolResult::ok(
-                        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()),
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|_| result.to_string()),
                     )),
                     Err(e) => Ok(ToolResult::error(format!("{e}"))),
                 }
@@ -467,7 +515,9 @@ impl Tool for ComposioTool {
                     Err(e) => Ok(ToolResult::error(format!("composio connect failed: {e}"))),
                 }
             }
-            other => Ok(ToolResult::error(format!("unknown composio action '{other}'"))),
+            other => Ok(ToolResult::error(format!(
+                "unknown composio action '{other}'"
+            ))),
         }
     }
 }
@@ -478,8 +528,14 @@ mod tests {
 
     #[test]
     fn app_inference_and_normalization() {
-        assert_eq!(infer_app_from_action("gmail-send-email").as_deref(), Some("gmail"));
-        assert_eq!(infer_app_from_action("GITHUB_CREATE_ISSUE").as_deref(), Some("github"));
+        assert_eq!(
+            infer_app_from_action("gmail-send-email").as_deref(),
+            Some("gmail")
+        );
+        assert_eq!(
+            infer_app_from_action("GITHUB_CREATE_ISSUE").as_deref(),
+            Some("github")
+        );
         assert_eq!(infer_app_from_action("noprefix"), None);
         assert_eq!(normalize_app_slug("  Gmail_API "), "gmail-api");
     }
@@ -527,7 +583,10 @@ mod tests {
         let v = serde_json::json!({
             "data": { "connection": { "redirect_url": "https://auth.example/x" } }
         });
-        assert_eq!(find_string(&v, "redirect_url"), Some("https://auth.example/x"));
+        assert_eq!(
+            find_string(&v, "redirect_url"),
+            Some("https://auth.example/x")
+        );
         assert_eq!(find_string(&v, "missing"), None);
     }
 }

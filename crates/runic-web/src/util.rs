@@ -19,7 +19,11 @@ pub fn pretty_json(v: &Value) -> String {
 }
 
 pub fn short_id(id: &str) -> String {
-    if id.len() > 12 { format!("{}…", &id[..12]) } else { id.to_string() }
+    if id.len() > 12 {
+        format!("{}…", &id[..12])
+    } else {
+        id.to_string()
+    }
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
@@ -58,7 +62,9 @@ pub fn content_blocks(msg: &Value) -> Vec<Value> {
 pub fn first_text(msg: &Value) -> Option<String> {
     content_blocks(msg).iter().find_map(|b| {
         if b.get("type").and_then(|v| v.as_str()) == Some("text") {
-            b.get("text").and_then(|v| v.as_str()).map(|s| s.to_string())
+            b.get("text")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
         } else {
             None
         }
@@ -67,13 +73,20 @@ pub fn first_text(msg: &Value) -> Option<String> {
 
 /// Grounding sources from a tool result's `metadata.sources` (web search etc.).
 pub fn parse_sources(metadata: Option<&Value>) -> Vec<Source> {
-    let Some(arr) = metadata.and_then(|m| m.get("sources")).and_then(|v| v.as_array()) else {
+    let Some(arr) = metadata
+        .and_then(|m| m.get("sources"))
+        .and_then(|v| v.as_array())
+    else {
         return Vec::new();
     };
     arr.iter()
         .filter_map(|s| {
             let url = s.get("url").and_then(|v| v.as_str())?.to_string();
-            let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let title = s
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             Some(Source { title, url })
         })
         .collect()
@@ -82,11 +95,17 @@ pub fn parse_sources(metadata: Option<&Value>) -> Vec<Source> {
 /// One-line summary of a content block, for the State tab's message list.
 pub fn render_block_summary(b: &Value) -> String {
     match b.get("type").and_then(|v| v.as_str()) {
-        Some("text") => b.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Some("text") => b
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         Some("tool_use") => format!(
             "→ tool_use {}({})",
             b.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            b.get("input").map(|v| truncate(&v.to_string(), 120)).unwrap_or_default()
+            b.get("input")
+                .map(|v| truncate(&v.to_string(), 120))
+                .unwrap_or_default()
         ),
         Some("tool_result") => format!(
             "← tool_result {}",

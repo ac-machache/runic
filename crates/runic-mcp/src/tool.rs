@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::client::McpHandle;
-use crate::protocol::{content_blocks_to_text, McpToolDef};
+use crate::protocol::{McpToolDef, content_blocks_to_text};
 
 /// Build the registry name for an MCP tool: `mcp__{server}__{tool}`.
 pub fn prefixed_name(server_name: &str, tool_name: &str) -> String {
@@ -139,7 +139,10 @@ mod tests {
 
     #[test]
     fn prefixed_name_combines_server_and_tool() {
-        assert_eq!(prefixed_name("github", "list_repos"), "mcp__github__list_repos");
+        assert_eq!(
+            prefixed_name("github", "list_repos"),
+            "mcp__github__list_repos"
+        );
     }
 
     #[test]
@@ -170,7 +173,10 @@ mod tests {
         let mut def = make_def("t");
         def.input_schema = serde_json::json!({"type": "object", "x": 42});
         let tool = McpTool::new(handle, def);
-        assert_eq!(tool.parameters_schema(), serde_json::json!({"type": "object", "x": 42}));
+        assert_eq!(
+            tool.parameters_schema(),
+            serde_json::json!({"type": "object", "x": 42})
+        );
     }
 
     #[test]
@@ -191,5 +197,4 @@ mod tests {
         assert!(out.contains("abc"));
         assert!(out.contains("file:///x"));
     }
-
 }

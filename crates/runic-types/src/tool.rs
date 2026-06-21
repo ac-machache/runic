@@ -61,9 +61,10 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
             // Some MCP servers / skill definitions serialize schemas as strings.
             if let Some(s) = schema.as_str()
                 && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s)
-                    && parsed.is_object() {
-                        return normalize_schema_recursive(&parsed);
-                    }
+                && parsed.is_object()
+            {
+                return normalize_schema_recursive(&parsed);
+            }
             // Non-object schema (null, number, bool, unparseable string, array) —
             // return a valid empty object schema so providers don't reject it.
             return serde_json::json!({"type": "object", "properties": {}});
@@ -148,14 +149,15 @@ fn normalize_schema_recursive(schema: &serde_json::Value) -> serde_json::Value {
 
         // Recurse into properties
         if key == "properties"
-            && let Some(props) = value.as_object() {
-                let mut new_props = serde_json::Map::new();
-                for (prop_name, prop_schema) in props {
-                    new_props.insert(prop_name.clone(), normalize_schema_recursive(prop_schema));
-                }
-                result.insert(key.clone(), serde_json::Value::Object(new_props));
-                continue;
+            && let Some(props) = value.as_object()
+        {
+            let mut new_props = serde_json::Map::new();
+            for (prop_name, prop_schema) in props {
+                new_props.insert(prop_name.clone(), normalize_schema_recursive(prop_schema));
             }
+            result.insert(key.clone(), serde_json::Value::Object(new_props));
+            continue;
+        }
 
         // Recurse into items
         if key == "items" {
@@ -202,12 +204,13 @@ fn resolve_refs(obj: &serde_json::Map<String, serde_json::Value>) -> serde_json:
                         .strip_prefix("#/$defs/")
                         .or_else(|| ref_val.strip_prefix("#/definitions/"));
                     if let Some(name) = ref_name
-                        && let Some(def) = defs.get(name) {
-                            *val = def.clone();
-                            // Recurse into the inlined definition
-                            inline_refs(val, defs);
-                            return;
-                        }
+                        && let Some(def) = defs.get(name)
+                    {
+                        *val = def.clone();
+                        // Recurse into the inlined definition
+                        inline_refs(val, defs);
+                        return;
+                    }
                 }
                 // Recurse into all values
                 for v in map.values_mut() {
@@ -386,9 +389,11 @@ mod tests {
             }
         });
         let result = normalize_schema_for_provider(&schema, "gemini");
-        assert!(result["properties"]["outer"]["properties"]["inner"]
-            .get("$schema")
-            .is_none());
+        assert!(
+            result["properties"]["outer"]["properties"]["inner"]
+                .get("$schema")
+                .is_none()
+        );
     }
 
     #[test]

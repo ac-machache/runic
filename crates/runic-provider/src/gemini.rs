@@ -11,10 +11,8 @@
 use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
-use runic_types::{
-    ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
-};
 use runic_types::ToolCall;
+use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -524,8 +522,7 @@ fn convert_tools(request: &CompletionRequest) -> Vec<GeminiToolConfig> {
         .iter()
         .map(|t| {
             // Normalize schema for Gemini (strips $schema, flattens anyOf)
-            let normalized =
-                runic_types::normalize_schema_for_provider(&t.input_schema, "gemini");
+            let normalized = runic_types::normalize_schema_for_provider(&t.input_schema, "gemini");
             GeminiFunctionDeclaration {
                 name: t.name.clone(),
                 description: t.description.clone(),
@@ -665,7 +662,10 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, Provider
 
 #[async_trait]
 impl Provider for GeminiDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
         let tools = convert_tools(&request);
 

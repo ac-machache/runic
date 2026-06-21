@@ -66,7 +66,6 @@ pub enum ProviderConfig {
     External(ExternalProviderConfig),
 }
 
-
 /// Configuration for an external memory provider. `name` selects the
 /// implementation; the rest is generic so a new provider needs no schema churn.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -99,7 +98,10 @@ mod tests {
 
     #[test]
     fn nudge_disabled_when_interval_zero() {
-        let c = MemoryConfig { nudge_interval: 0, ..Default::default() };
+        let c = MemoryConfig {
+            nudge_interval: 0,
+            ..Default::default()
+        };
         assert!(!c.nudge_enabled());
     }
 
@@ -125,7 +127,8 @@ mod tests {
 
     #[test]
     fn builtin_is_the_default_variant() {
-        let p: ProviderConfig = serde_json::from_value(serde_json::json!({"kind": "builtin"})).unwrap();
+        let p: ProviderConfig =
+            serde_json::from_value(serde_json::json!({"kind": "builtin"})).unwrap();
         assert!(matches!(p, ProviderConfig::Builtin));
     }
 }

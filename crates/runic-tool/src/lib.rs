@@ -33,12 +33,20 @@ pub struct ToolResult {
 impl ToolResult {
     /// A successful result.
     pub fn ok(output: impl Into<String>) -> Self {
-        Self { success: true, output: output.into(), error: None }
+        Self {
+            success: true,
+            output: output.into(),
+            error: None,
+        }
     }
     /// A failed result (the message is both the output and the error).
     pub fn error(message: impl Into<String>) -> Self {
         let m = message.into();
-        Self { success: false, output: m.clone(), error: Some(m) }
+        Self {
+            success: false,
+            output: m.clone(),
+            error: Some(m),
+        }
     }
 }
 
@@ -137,7 +145,9 @@ impl ToolContext {
 
     /// Read + deserialize a per-run config value.
     pub fn config_as<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.config.get(key).and_then(|v| serde_json::from_value(v.clone()).ok())
+        self.config
+            .get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
     /// Set the per-run config map (builder-style).
@@ -262,14 +272,25 @@ mod tests {
 
     #[async_trait]
     impl Tool for Echo {
-        fn name(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "Echoes its input back." }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes its input back."
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({ "type": "object", "additionalProperties": true })
         }
-        async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        async fn execute(
+            &self,
+            args: serde_json::Value,
+            ctx: &ToolContext,
+        ) -> anyhow::Result<ToolResult> {
             // Demonstrates reaching the runtime context (per-run config).
-            let user = ctx.config("user_id").and_then(|v| v.as_str()).unwrap_or(&ctx.user_id);
+            let user = ctx
+                .config("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&ctx.user_id);
             Ok(ToolResult::ok(format!("{user}: {args}")))
         }
     }
@@ -278,7 +299,10 @@ mod tests {
     async fn tool_executes_with_ctx_and_spec() {
         let t = Echo;
         let ctx = ToolContext::new("u1", "s1", "r1");
-        let r = t.execute(serde_json::json!({ "x": 1 }), &ctx).await.unwrap();
+        let r = t
+            .execute(serde_json::json!({ "x": 1 }), &ctx)
+            .await
+            .unwrap();
         assert!(r.success);
         assert!(r.output.starts_with("u1:"));
         assert_eq!(t.spec().name, "echo");

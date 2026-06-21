@@ -38,9 +38,7 @@ pub mod web;
 
 pub use calc::CalculatorTool;
 pub use composio::ComposioTool;
-pub use fs::{
-    fs_tools, EditFileTool, GlobTool, GrepTool, LsTool, ReadFileTool, WriteFileTool,
-};
+pub use fs::{EditFileTool, GlobTool, GrepTool, LsTool, ReadFileTool, WriteFileTool, fs_tools};
 pub use hitl::{AskUserTool, EscalateToHumanTool};
 pub use patch::ApplyPatchTool;
 pub use time::SystemTimeTool;
@@ -49,9 +47,11 @@ pub use weather::{WeatherHistoryTool, WeatherTool};
 // Pure parsers exposed for fuzz/property testing — not part of the stable API.
 #[doc(hidden)]
 pub use calc::eval as eval_calc;
+pub use web::{
+    SearchProvider, SearchResult, SearxngProvider, TavilyProvider, WebFetchTool, WebSearchTool,
+};
 #[doc(hidden)]
 pub use web::{decode_entities, html_to_text};
-pub use web::{SearchProvider, SearchResult, SearxngProvider, TavilyProvider, WebFetchTool, WebSearchTool};
 
 /// The native tools bound to a filesystem backend: the six fs tools +
 /// `apply_patch` + `calculator` + `system_time`. The app adds subsystem tools

@@ -135,9 +135,7 @@ impl McpConfig {
         Self::parse(&raw, p)
     }
 
-    pub async fn try_load_from_path(
-        path: impl AsRef<Path>,
-    ) -> Result<Option<Self>, ConfigError> {
+    pub async fn try_load_from_path(path: impl AsRef<Path>) -> Result<Option<Self>, ConfigError> {
         let p: &Path = path.as_ref();
         match tokio::fs::read_to_string(p).await {
             Ok(raw) => Self::parse(&raw, p).map(Some),
@@ -187,7 +185,10 @@ mod tests {
             McpServerConfig::Stdio(c) => {
                 assert_eq!(c.command, "npx");
                 assert_eq!(c.args.len(), 2);
-                assert_eq!(c.env.get("GITHUB_TOKEN").map(String::as_str), Some("ghp_abc"));
+                assert_eq!(
+                    c.env.get("GITHUB_TOKEN").map(String::as_str),
+                    Some("ghp_abc")
+                );
                 assert!(c.shared);
             }
             other => panic!("expected Stdio variant, got {other:?}"),
@@ -210,7 +211,10 @@ mod tests {
         match remote {
             McpServerConfig::Http(c) => {
                 assert_eq!(c.url, "https://mcp.example.com/messages");
-                assert_eq!(c.headers.get("Authorization").map(String::as_str), Some("Bearer abc"));
+                assert_eq!(
+                    c.headers.get("Authorization").map(String::as_str),
+                    Some("Bearer abc")
+                );
                 assert!(c.shared);
             }
             other => panic!("expected Http variant, got {other:?}"),
@@ -292,7 +296,9 @@ mod tests {
     async fn load_from_path_reads_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
-        tokio::fs::write(&path, r#"{"mcpServers":{}}"#).await.unwrap();
+        tokio::fs::write(&path, r#"{"mcpServers":{}}"#)
+            .await
+            .unwrap();
         let cfg = McpConfig::load_from_path(&path).await.unwrap();
         assert!(cfg.is_empty());
     }

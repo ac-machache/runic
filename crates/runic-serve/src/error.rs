@@ -1,9 +1,9 @@
 //! HTTP error type — converts to a JSON `{error: "kind", message: "..."}`
 //! body with an appropriate status code.
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {

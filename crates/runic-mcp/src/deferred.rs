@@ -12,7 +12,7 @@ use runic_tool::ToolSpec;
 
 use crate::client::{McpClient, McpHandle};
 use crate::protocol::McpToolDef;
-use crate::tool::{prefixed_name, McpTool};
+use crate::tool::{McpTool, prefixed_name};
 
 /// A not-yet-activated MCP tool: just enough to list and search by, plus the
 /// live handle needed to materialize a real [`McpTool`] on activation.
@@ -74,7 +74,10 @@ impl DeferredMcpToolSet {
         let mut stubs = Vec::new();
         for client in clients {
             for def in client.tools() {
-                stubs.push(DeferredMcpToolStub::new(client.handle().clone(), def.clone()));
+                stubs.push(DeferredMcpToolStub::new(
+                    client.handle().clone(),
+                    def.clone(),
+                ));
             }
         }
         Self { stubs }
@@ -243,9 +246,11 @@ mod tests {
         ]);
         let hits = set.search("read file", 5);
         assert_eq!(hits[0].prefixed_name(), "mcp__fs__read_file");
-        assert!(set.search("database", 5)[0]
-            .prefixed_name()
-            .ends_with("query_db"));
+        assert!(
+            set.search("database", 5)[0]
+                .prefixed_name()
+                .ends_with("query_db")
+        );
         assert!(set.search("nonexistent", 5).is_empty());
     }
 

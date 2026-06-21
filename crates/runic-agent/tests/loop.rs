@@ -155,7 +155,10 @@ async fn text_only_turn_ends_the_run() {
     assert_eq!(outcome.total_turns, 1);
     assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(outcome.usage.input_tokens, 10);
-    assert_eq!(agent.state().last_assistant_text().as_deref(), Some("hello there"));
+    assert_eq!(
+        agent.state().last_assistant_text().as_deref(),
+        Some("hello there")
+    );
 }
 
 #[tokio::test]
@@ -173,14 +176,17 @@ async fn tool_call_round_trips_then_finishes() {
     let outcome = agent.run("use the tool").await.unwrap();
 
     assert_eq!(outcome.total_turns, 2);
-    assert_eq!(agent.state().last_assistant_text().as_deref(), Some("all done"));
+    assert_eq!(
+        agent.state().last_assistant_text().as_deref(),
+        Some("all done")
+    );
 
     // The provider-facing history must contain the tool result the loop fed back.
     let msgs = agent.state().messages_for_provider();
     let has_tool_result = msgs.iter().any(|m| match &m.content {
-        runic_types::MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
-            matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("echo:"))
-        }),
+        runic_types::MessageContent::Blocks(blocks) => blocks.iter().any(
+            |b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("echo:")),
+        ),
         _ => false,
     });
     assert!(has_tool_result, "tool result should be in history");
@@ -189,7 +195,9 @@ async fn tool_call_round_trips_then_finishes() {
 #[tokio::test]
 async fn falls_back_to_secondary_provider_on_model_not_found() {
     let primary = Arc::new(AlwaysModelNotFound);
-    let fallback = Arc::new(ScriptedProvider::new(vec![text_response("fallback answer")]));
+    let fallback = Arc::new(ScriptedProvider::new(vec![text_response(
+        "fallback answer",
+    )]));
     let mut agent = Agent::builder(primary, "u1", "s1")
         .model("does-not-exist")
         .fallback(fallback, "good-model")
@@ -222,7 +230,10 @@ async fn unknown_tool_yields_error_result_not_crash() {
         }),
         _ => false,
     });
-    assert!(has_unknown_err, "unknown tool should produce an in-band error result");
+    assert!(
+        has_unknown_err,
+        "unknown tool should produce an in-band error result"
+    );
 }
 
 // ─── Step 4: RunContext, cancellation, steering, graceful finish ─────────────
@@ -312,10 +323,15 @@ async fn steering_messages_are_injected_into_history() {
         .await
         .unwrap();
 
-    let saw_steer = agent.state().messages_for_provider().iter().any(|m| {
-        matches!(&m.content, MessageContent::Text(t) if t == "steered nudge")
-    });
-    assert!(saw_steer, "steering text should be injected as a user message");
+    let saw_steer = agent
+        .state()
+        .messages_for_provider()
+        .iter()
+        .any(|m| matches!(&m.content, MessageContent::Text(t) if t == "steered nudge"));
+    assert!(
+        saw_steer,
+        "steering text should be injected as a user message"
+    );
 }
 
 #[tokio::test]
@@ -383,7 +399,10 @@ async fn streaming_emits_lifecycle_and_token_events() {
     assert!(started, "RunStarted");
     assert!(tool_started, "ToolStarted for echo");
     assert!(tool_finished, "ToolFinished for echo");
-    assert!(texts.iter().any(|t| t == "final answer"), "text delta streamed");
+    assert!(
+        texts.iter().any(|t| t == "final answer"),
+        "text delta streamed"
+    );
     assert_eq!(turns, 2, "two TurnCompleted events");
     assert!(completed, "RunCompleted");
 }

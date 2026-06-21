@@ -15,8 +15,8 @@ use crate::config::McpServerConfig;
 use crate::error::McpError;
 use crate::protocol::{
     CallToolParams, CallToolResult, ClientCapabilities, ClientInfo, InitializeParams,
-    InitializeResult, ListToolsResult, McpToolDef, ServerCapabilities, ServerInfo,
-    MCP_PROTOCOL_VERSION,
+    InitializeResult, ListToolsResult, MCP_PROTOCOL_VERSION, McpToolDef, ServerCapabilities,
+    ServerInfo,
 };
 use crate::transport::{StdioTransport, Transport};
 use crate::transport_http::HttpTransport;
@@ -408,7 +408,11 @@ mod tests {
 
         assert_eq!(
             transport.calls(),
-            vec!["initialize", "notify:notifications/initialized", "tools/list"],
+            vec![
+                "initialize",
+                "notify:notifications/initialized",
+                "tools/list"
+            ],
             "handshake sequence must follow the MCP spec order"
         );
         assert_eq!(client.server_info().name, "fake-server");

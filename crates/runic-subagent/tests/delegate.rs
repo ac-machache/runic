@@ -108,15 +108,21 @@ async fn depth_limit_refuses_delegation() {
 
 #[tokio::test]
 async fn spawn_budget_caps_total() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder))
-        .with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
+    let tool =
+        DelegateTool::new(roster(), Arc::new(FakeBuilder)).with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
     let first = tool
-        .execute(serde_json::json!({ "agent": "reviewer", "prompt": "x" }), &ctx())
+        .execute(
+            serde_json::json!({ "agent": "reviewer", "prompt": "x" }),
+            &ctx(),
+        )
         .await
         .unwrap();
     assert!(first.success);
     let second = tool
-        .execute(serde_json::json!({ "agent": "researcher", "prompt": "y" }), &ctx())
+        .execute(
+            serde_json::json!({ "agent": "researcher", "prompt": "y" }),
+            &ctx(),
+        )
         .await
         .unwrap();
     assert!(!second.success);

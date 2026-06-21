@@ -43,7 +43,9 @@ fn modified(meta: &std::fs::Metadata) -> Option<DateTime<Utc>> {
 
 /// Collect every file under `dir`, paired with its virtual path.
 fn walk(dir: &Path, base_vpath: &str, out: &mut Vec<(PathBuf, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -80,13 +82,17 @@ impl FilesystemBackend for LocalFs {
         let content = match std::fs::read_to_string(&real) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(FsError::NotFound(path.to_string()))
+                return Err(FsError::NotFound(path.to_string()));
             }
             Err(e) => return Err(io(e)),
         };
         let lines: Vec<&str> = content.lines().collect();
         let end = offset.saturating_add(limit).min(lines.len());
-        let slice = if offset < lines.len() { &lines[offset..end] } else { &[][..] };
+        let slice = if offset < lines.len() {
+            &lines[offset..end]
+        } else {
+            &[][..]
+        };
         Ok(ReadResult {
             content: slice.join("\n"),
             start_line: offset + 1,
@@ -116,7 +122,7 @@ impl FilesystemBackend for LocalFs {
         let content = match std::fs::read_to_string(&real) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(FsError::NotFound(path.to_string()))
+                return Err(FsError::NotFound(path.to_string()));
             }
             Err(e) => return Err(io(e)),
         };
@@ -154,11 +160,14 @@ impl FilesystemBackend for LocalFs {
         let mut out = Vec::new();
         for (real, vpath) in files {
             if let Some(m) = &matcher
-                && !m.is_match(vpath.trim_start_matches('/')) {
-                    continue;
-                }
+                && !m.is_match(vpath.trim_start_matches('/'))
+            {
+                continue;
+            }
             // Skip non-UTF-8 / binary files silently.
-            let Ok(content) = std::fs::read_to_string(&real) else { continue };
+            let Ok(content) = std::fs::read_to_string(&real) else {
+                continue;
+            };
             for (i, line) in content.lines().enumerate() {
                 if line.contains(pattern) {
                     out.push(GrepMatch {
@@ -228,28 +237,44 @@ mod tests {
         let (_tmp, fs) = fs();
         fs.write("/a/b.txt", "hello\nworld").await.unwrap();
         // write refuses to clobber
-        assert!(matches!(fs.write("/a/b.txt", "x").await, Err(FsError::AlreadyExists(_))));
+        assert!(matches!(
+            fs.write("/a/b.txt", "x").await,
+            Err(FsError::AlreadyExists(_))
+        ));
 
         let r = fs.read("/a/b.txt", 0, 10).await.unwrap();
         assert_eq!(r.content, "hello\nworld");
 
-        assert_eq!(fs.edit("/a/b.txt", "world", "there", false).await.unwrap(), 1);
-        assert_eq!(fs.read("/a/b.txt", 0, 10).await.unwrap().content, "hello\nthere");
+        assert_eq!(
+            fs.edit("/a/b.txt", "world", "there", false).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            fs.read("/a/b.txt", 0, 10).await.unwrap().content,
+            "hello\nthere"
+        );
 
         fs.delete("/a/b.txt").await.unwrap();
-        assert!(matches!(fs.read("/a/b.txt", 0, 10).await, Err(FsError::NotFound(_))));
+        assert!(matches!(
+            fs.read("/a/b.txt", 0, 10).await,
+            Err(FsError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
     async fn ls_glob_grep() {
         let (_tmp, fs) = fs();
-        fs.write("/src/lib.rs", "fn main() {}\n// TODO: fix").await.unwrap();
+        fs.write("/src/lib.rs", "fn main() {}\n// TODO: fix")
+            .await
+            .unwrap();
         fs.write("/src/mod.rs", "pub mod x;").await.unwrap();
         fs.write("/README.md", "# hi").await.unwrap();
 
         let listed = fs.ls("/src").await.unwrap();
-        assert_eq!(listed.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
-                   vec!["/src/lib.rs", "/src/mod.rs"]);
+        assert_eq!(
+            listed.iter().map(|f| f.path.clone()).collect::<Vec<_>>(),
+            vec!["/src/lib.rs", "/src/mod.rs"]
+        );
 
         let rs = fs.glob("**/*.rs", None).await.unwrap();
         assert_eq!(rs.len(), 2);
@@ -263,7 +288,13 @@ mod tests {
     #[tokio::test]
     async fn refuses_path_traversal() {
         let (_tmp, fs) = fs();
-        assert!(matches!(fs.read("/../etc/passwd", 0, 1).await, Err(FsError::InvalidPath(_))));
-        assert!(matches!(fs.write("/a/../../x", "y").await, Err(FsError::InvalidPath(_))));
+        assert!(matches!(
+            fs.read("/../etc/passwd", 0, 1).await,
+            Err(FsError::InvalidPath(_))
+        ));
+        assert!(matches!(
+            fs.write("/a/../../x", "y").await,
+            Err(FsError::InvalidPath(_))
+        ));
     }
 }

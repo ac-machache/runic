@@ -5,7 +5,9 @@ pub enum MemoryError {
     #[error("storage error: {0}")]
     Storage(String),
 
-    #[error("would exceed cap for {target}: {actual}/{limit} chars (remove or replace an entry first)")]
+    #[error(
+        "would exceed cap for {target}: {actual}/{limit} chars (remove or replace an entry first)"
+    )]
     OverLimit {
         target: String,
         actual: usize,
@@ -31,19 +33,13 @@ pub enum MemoryError {
     MissingField { field: &'static str },
 
     #[error("blocked by threat scanner ({kind}{}): rephrase the entry", if .detail.is_empty() { String::new() } else { format!(": {}", .detail) })]
-    Threat {
-        kind: &'static str,
-        detail: String,
-    },
+    Threat { kind: &'static str, detail: String },
 
     #[error(
         "refusing to write {target}: on-disk content was edited externally and would be lost on overwrite. \
          A backup was saved to {backup_key:?}. Inspect it, then re-issue the write."
     )]
-    DriftDetected {
-        target: String,
-        backup_key: String,
-    },
+    DriftDetected { target: String, backup_key: String },
 
     #[error("lock acquisition failed for {target}: {source}")]
     Lock {

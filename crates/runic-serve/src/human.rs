@@ -120,7 +120,12 @@ mod tests {
         let task = tokio::spawn(async move { channel.ask("proceed?", Some("ctx")).await });
 
         let evt = rx.recv().await.unwrap();
-        let WireEvent::AskRequired { ask_id, question, context } = evt else {
+        let WireEvent::AskRequired {
+            ask_id,
+            question,
+            context,
+        } = evt
+        else {
             panic!("expected ask_required, got {evt:?}");
         };
         assert_eq!(question, "proceed?");
@@ -143,6 +148,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let channel = HumanChannel::new(hub, tx);
         channel.escalate("blocked", None).await.unwrap();
-        assert!(matches!(rx.recv().await.unwrap(), WireEvent::Escalated { .. }));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            WireEvent::Escalated { .. }
+        ));
     }
 }

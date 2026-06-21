@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use runic_memory::{BoundedMemoryStore, MemoryTool, Target};
 use runic_filesystem::{FilesystemBackend, LocalFs};
+use runic_memory::{BoundedMemoryStore, MemoryTool, Target};
 use runic_tool::{Tool, ToolContext};
 use tempfile::tempdir;
 
@@ -18,10 +18,7 @@ async fn writes_land_under_memory_subdir_on_disk() {
     let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
     let store = BoundedMemoryStore::new(backend);
 
-    store
-        .add(Target::User, "user prefers Rust")
-        .await
-        .unwrap();
+    store.add(Target::User, "user prefers Rust").await.unwrap();
 
     let path = dir.path().join("memory").join("USER.md");
     let raw = tokio::fs::read_to_string(&path).await.unwrap();

@@ -59,9 +59,10 @@ impl ToolSearchTool {
         {
             let mut guard = self.lock_activated();
             if !guard.is_activated(prefixed)
-                && let Some(tool) = self.deferred.activate(prefixed) {
-                    guard.activate(prefixed.to_string(), Arc::new(tool));
-                }
+                && let Some(tool) = self.deferred.activate(prefixed)
+            {
+                guard.activate(prefixed.to_string(), Arc::new(tool));
+            }
         }
         let _ = writeln!(
             out,
@@ -244,8 +245,14 @@ mod tests {
 
     #[tokio::test]
     async fn empty_query_errors() {
-        let t = ToolSearchTool::new(deferred(vec![]), Arc::new(Mutex::new(ActivatedToolSet::new())));
-        let r = t.execute(serde_json::json!({ "query": "" }), &ctx()).await.unwrap();
+        let t = ToolSearchTool::new(
+            deferred(vec![]),
+            Arc::new(Mutex::new(ActivatedToolSet::new())),
+        );
+        let r = t
+            .execute(serde_json::json!({ "query": "" }), &ctx())
+            .await
+            .unwrap();
         assert!(!r.success);
     }
 
@@ -291,8 +298,12 @@ mod tests {
     async fn reactivation_is_idempotent() {
         let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
         let t = ToolSearchTool::new(deferred(vec![("t", "a tool")]), Arc::clone(&activated));
-        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx()).await.unwrap();
-        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx()).await.unwrap();
+        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx())
+            .await
+            .unwrap();
+        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx())
+            .await
+            .unwrap();
         assert_eq!(activated.lock().unwrap().len(), 1);
     }
 
@@ -307,7 +318,10 @@ mod tests {
             allowed: None,
             denied: Some(vec!["mcp__fs__blocked".into()]),
         });
-        let r = t.execute(serde_json::json!({ "query": "tool" }), &ctx()).await.unwrap();
+        let r = t
+            .execute(serde_json::json!({ "query": "tool" }), &ctx())
+            .await
+            .unwrap();
         assert!(r.output.contains("mcp__fs__allowed"));
         assert!(!r.output.contains("mcp__fs__blocked"));
         assert!(!activated.lock().unwrap().is_activated("mcp__fs__blocked"));

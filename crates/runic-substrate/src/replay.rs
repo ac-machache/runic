@@ -53,20 +53,39 @@ mod tests {
         } else {
             Message::assistant(text)
         };
-        SessionEvent::Message { run_id: "r".into(), msg, at: Utc::now() }
+        SessionEvent::Message {
+            run_id: "r".into(),
+            msg,
+            at: Utc::now(),
+        }
     }
 
     #[tokio::test]
     async fn replay_rebuilds_state_and_message_list() {
         let store = MemorySessionStore::new();
         store
-            .append("t", "s", &SessionEvent::RunStart { run_id: "r".into(), at: Utc::now() })
+            .append(
+                "t",
+                "s",
+                &SessionEvent::RunStart {
+                    run_id: "r".into(),
+                    at: Utc::now(),
+                },
+            )
             .await
             .unwrap();
-        store.append("t", "s", &msg_event(true, "hello")).await.unwrap();
-        store.append("t", "s", &msg_event(false, "hi there")).await.unwrap();
+        store
+            .append("t", "s", &msg_event(true, "hello"))
+            .await
+            .unwrap();
+        store
+            .append("t", "s", &msg_event(false, "hi there"))
+            .await
+            .unwrap();
 
-        let state = replay_into_state(&store, "t", "s", "be nice").await.unwrap();
+        let state = replay_into_state(&store, "t", "s", "be nice")
+            .await
+            .unwrap();
         assert_eq!(state.user_id, "t");
         assert_eq!(state.session_id, "s");
         assert_eq!(state.last_assistant_text().as_deref(), Some("hi there"));
@@ -79,7 +98,10 @@ mod tests {
     #[tokio::test]
     async fn state_snapshot_replaces_messages_on_replay() {
         let store = MemorySessionStore::new();
-        store.append("t", "s", &msg_event(true, "old one")).await.unwrap();
+        store
+            .append("t", "s", &msg_event(true, "old one"))
+            .await
+            .unwrap();
         store
             .append(
                 "t",

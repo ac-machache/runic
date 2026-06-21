@@ -38,10 +38,20 @@ pub struct FileInfo {
 
 impl FileInfo {
     pub fn file(path: impl Into<String>, size: u64) -> Self {
-        Self { path: path.into(), is_dir: false, size, modified_at: None }
+        Self {
+            path: path.into(),
+            is_dir: false,
+            size,
+            modified_at: None,
+        }
     }
     pub fn dir(path: impl Into<String>) -> Self {
-        Self { path: path.into(), is_dir: true, size: 0, modified_at: None }
+        Self {
+            path: path.into(),
+            is_dir: true,
+            size: 0,
+            modified_at: None,
+        }
     }
 }
 

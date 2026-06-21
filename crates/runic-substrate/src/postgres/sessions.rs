@@ -55,7 +55,10 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
         let seq: i64 = row.try_get("seq").map_err(db)?;
         let json: serde_json::Value = row.try_get("event").map_err(db)?;
         let event = serde_json::from_value(json).map_err(serde)?;
-        out.push(StoredEvent { seq: seq as u64, event });
+        out.push(StoredEvent {
+            seq: seq as u64,
+            event,
+        });
     }
     Ok(out)
 }

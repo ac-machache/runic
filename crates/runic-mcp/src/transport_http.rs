@@ -20,13 +20,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::error::McpError;
 use crate::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
-use crate::transport::{RequestIdCounter, Transport, REQUEST_TIMEOUT};
+use crate::transport::{REQUEST_TIMEOUT, RequestIdCounter, Transport};
 
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
@@ -115,7 +115,11 @@ impl Transport for HttpTransport {
 
         let resp = match tokio::time::timeout(
             REQUEST_TIMEOUT,
-            self.client.post(&self.url).headers(headers).body(body).send(),
+            self.client
+                .post(&self.url)
+                .headers(headers)
+                .body(body)
+                .send(),
         )
         .await
         {
@@ -162,9 +166,10 @@ impl Transport for HttpTransport {
             .to_lowercase();
 
         if ctype.starts_with("application/json") {
-            let response: JsonRpcResponse = resp.json().await.map_err(|err| {
-                McpError::protocol(format!("invalid JSON response body: {err}"))
-            })?;
+            let response: JsonRpcResponse = resp
+                .json()
+                .await
+                .map_err(|err| McpError::protocol(format!("invalid JSON response body: {err}")))?;
             return jsonrpc_result(response, id);
         }
 
@@ -197,7 +202,11 @@ impl Transport for HttpTransport {
 
         let resp = match tokio::time::timeout(
             REQUEST_TIMEOUT,
-            self.client.post(&self.url).headers(headers).body(body).send(),
+            self.client
+                .post(&self.url)
+                .headers(headers)
+                .body(body)
+                .send(),
         )
         .await
         {
@@ -241,9 +250,9 @@ fn guard_ssrf(server_name: &str, url: &str) -> Result<(), McpError> {
     let host = parsed.host_str().unwrap_or("").to_lowercase();
 
     const BLOCKED_HOSTS: &[&str] = &[
-        "169.254.169.254",              // AWS/GCP/Azure IMDS (link-local)
-        "metadata.google.internal",     // GCP metadata
-        "metadata.goog",                // GCP metadata (short)
+        "169.254.169.254",          // AWS/GCP/Azure IMDS (link-local)
+        "metadata.google.internal", // GCP metadata
+        "metadata.goog",            // GCP metadata (short)
     ];
     let blocked = BLOCKED_HOSTS.iter().any(|h| host == *h)
         || host == "metadata"

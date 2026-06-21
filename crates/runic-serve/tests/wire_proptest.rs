@@ -26,12 +26,15 @@ fn agent_event() -> impl Strategy<Value = AgentEvent> {
             input: serde_json::json!({"q": 1}),
         }),
         ("[a-z]{1,6}", "[a-z_]{1,10}", any::<bool>(), "[a-z ]{0,20}").prop_map(
-            |(id, name, is_error, result)| AgentEvent::ToolFinished { id, name, is_error, result }
+            |(id, name, is_error, result)| AgentEvent::ToolFinished {
+                id,
+                name,
+                is_error,
+                result
+            }
         ),
-        (0u32..10, "[a-z_]{1,8}").prop_map(|(turn, stop_reason)| AgentEvent::TurnCompleted {
-            turn,
-            stop_reason,
-        }),
+        (0u32..10, "[a-z_]{1,8}")
+            .prop_map(|(turn, stop_reason)| AgentEvent::TurnCompleted { turn, stop_reason }),
         Just(AgentEvent::RunCompleted(RunOutcome::default())),
     ]
 }

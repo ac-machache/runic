@@ -29,14 +29,22 @@ impl Tool for SystemTimeTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let now = Utc::now();
         match args.get("timezone").and_then(|v| v.as_str()) {
-            None => Ok(ToolResult::ok(now.format("%Y-%m-%d %H:%M:%S UTC").to_string())),
+            None => Ok(ToolResult::ok(
+                now.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            )),
             Some(name) => match name.parse::<Tz>() {
                 Ok(tz) => {
                     let local = now.with_timezone(&tz);
-                    Ok(ToolResult::ok(local.format("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string()))
+                    Ok(ToolResult::ok(
+                        local.format("%Y-%m-%d %H:%M:%S %Z (%:z)").to_string(),
+                    ))
                 }
                 Err(_) => Ok(ToolResult::error(format!("unknown timezone '{name}'"))),
             },

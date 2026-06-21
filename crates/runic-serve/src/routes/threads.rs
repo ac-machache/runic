@@ -3,9 +3,9 @@
 //! A "thread" in the HTTP surface == a "session" internally. We expose the
 //! resource with the conventional HTTP name; it routes to the same store.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use runic_substrate::StoredEvent;
 use serde::{Deserialize, Serialize};
 
@@ -80,7 +80,9 @@ pub async fn list_threads(
     Ok(Json(ThreadList {
         threads: metas
             .into_iter()
-            .map(|m| ThreadSummary { thread_id: m.session_id })
+            .map(|m| ThreadSummary {
+                thread_id: m.session_id,
+            })
             .collect(),
     }))
 }

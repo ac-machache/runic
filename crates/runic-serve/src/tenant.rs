@@ -29,10 +29,7 @@ impl Tenant {
 impl<S: Send + Sync> FromRequestParts<S> for Tenant {
     type Rejection = Infallible;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         let value = parts
             .headers
             .get(TENANT_HEADER)
@@ -67,40 +64,33 @@ mod tests {
         if let Some(v) = value {
             builder = builder.header(TENANT_HEADER, v);
         }
-        builder
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0
+        builder.body(()).unwrap().into_parts().0
     }
 
     #[tokio::test]
     async fn missing_header_yields_default() {
         let mut parts = parts_with_header(None);
-        let Tenant(t) =
-            <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
-                .await
-                .unwrap();
+        let Tenant(t) = <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
         assert_eq!(t, "default");
     }
 
     #[tokio::test]
     async fn header_value_is_extracted() {
         let mut parts = parts_with_header(Some("alice"));
-        let Tenant(t) =
-            <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
-                .await
-                .unwrap();
+        let Tenant(t) = <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
         assert_eq!(t, "alice");
     }
 
     #[tokio::test]
     async fn empty_header_falls_back_to_default() {
         let mut parts = parts_with_header(Some("   "));
-        let Tenant(t) =
-            <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
-                .await
-                .unwrap();
+        let Tenant(t) = <Tenant as FromRequestParts<()>>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
         assert_eq!(t, "default");
     }
 }

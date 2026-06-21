@@ -283,9 +283,7 @@ impl DelegateTool {
             None => ToolResult::error(format!("no such task '{task_id}'")),
             Some(task) => match task.status {
                 TaskStatus::Running => ToolResult::ok(format!("task '{task_id}' is still running")),
-                TaskStatus::Completed => {
-                    ToolResult::ok(task.output.clone().unwrap_or_default())
-                }
+                TaskStatus::Completed => ToolResult::ok(task.output.clone().unwrap_or_default()),
                 TaskStatus::Failed => ToolResult::error(format!(
                     "task '{task_id}' failed: {}",
                     task.error.clone().unwrap_or_default()
@@ -390,7 +388,10 @@ impl Tool for DelegateTool {
         args: serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("delegate");
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("delegate");
 
         let result = match action {
             "check_result" => match args.get("task_id").and_then(|v| v.as_str()) {
@@ -428,9 +429,14 @@ impl Tool for DelegateTool {
                 }
 
                 let Some(agent) = args.get("agent").and_then(|v| v.as_str()) else {
-                    return Ok(ToolResult::error("delegate requires `agent` (or `parallel`)"));
+                    return Ok(ToolResult::error(
+                        "delegate requires `agent` (or `parallel`)",
+                    ));
                 };
-                let background = args.get("background").and_then(|v| v.as_bool()).unwrap_or(false);
+                let background = args
+                    .get("background")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if background {
                     self.delegate_background(agent, full)
                 } else {

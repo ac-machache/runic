@@ -166,7 +166,8 @@ mod tests {
 
     #[test]
     fn parses_and_expands_arguments() {
-        let c = cmd("---\nname: review\ndescription: review a file\n---\nReview this:\n\n$ARGUMENTS");
+        let c =
+            cmd("---\nname: review\ndescription: review a file\n---\nReview this:\n\n$ARGUMENTS");
         assert_eq!(c.name, "review");
         assert_eq!(c.expand("src/lib.rs"), "Review this:\n\nsrc/lib.rs");
     }
@@ -180,7 +181,10 @@ mod tests {
 
     #[test]
     fn split_invocation_parses() {
-        assert_eq!(split_invocation("/review src/lib.rs"), Some(("review", "src/lib.rs")));
+        assert_eq!(
+            split_invocation("/review src/lib.rs"),
+            Some(("review", "src/lib.rs"))
+        );
         assert_eq!(split_invocation("/help"), Some(("help", "")));
         assert_eq!(split_invocation("not a command"), None);
         assert_eq!(split_invocation("/"), None);
@@ -191,7 +195,10 @@ mod tests {
         let reg = CommandRegistry::new(vec![cmd(
             "---\nname: review\ndescription: x\n---\nReview:\n$ARGUMENTS",
         )]);
-        assert_eq!(reg.resolve("/review foo.rs").as_deref(), Some("Review:\nfoo.rs"));
+        assert_eq!(
+            reg.resolve("/review foo.rs").as_deref(),
+            Some("Review:\nfoo.rs")
+        );
         assert!(reg.resolve("/unknown x").is_none());
         assert!(reg.resolve("plain message").is_none());
     }

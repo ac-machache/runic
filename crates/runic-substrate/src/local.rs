@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::io::AsyncWriteExt;
 
-use crate::artifacts::{new_artifact_id, Artifact, ArtifactSource, ArtifactStore};
+use crate::artifacts::{Artifact, ArtifactSource, ArtifactStore, new_artifact_id};
 use crate::{Error, Result};
 
 /// A filesystem-backed artifact store rooted at a directory.
@@ -66,9 +66,12 @@ impl ArtifactStore for LocalArtifactStore {
         let blob = self.blob_path(&artifact.id);
         ensure_parent(&blob).await?;
         tokio::fs::write(&blob, bytes).await.map_err(io)?;
-        tokio::fs::write(self.meta_path(&artifact.id), serde_json::to_vec(&artifact).map_err(serde)?)
-            .await
-            .map_err(io)?;
+        tokio::fs::write(
+            self.meta_path(&artifact.id),
+            serde_json::to_vec(&artifact).map_err(serde)?,
+        )
+        .await
+        .map_err(io)?;
 
         let index = self.index_path(tenant, session_id);
         ensure_parent(&index).await?;
@@ -130,7 +133,13 @@ async fn ensure_parent(path: &Path) -> Result<()> {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -143,7 +152,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s = LocalArtifactStore::new(tmp.path());
         let a = s
-            .put("org1", "sess", "image/png", ArtifactSource::ToolOutput, b"\x89PNG")
+            .put(
+                "org1",
+                "sess",
+                "image/png",
+                ArtifactSource::ToolOutput,
+                b"\x89PNG",
+            )
             .await
             .unwrap();
         assert_eq!(s.get(&a.id).await.unwrap(), b"\x89PNG");

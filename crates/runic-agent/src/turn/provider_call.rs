@@ -10,7 +10,7 @@
 use runic_provider::{CompletionRequest, CompletionResponse, ProviderError, StreamEvent};
 use tokio::sync::mpsc;
 
-use crate::{retry, Agent, AgentError, AgentEvent};
+use crate::{Agent, AgentError, AgentEvent, retry};
 
 impl Agent {
     pub(crate) async fn call_model(
@@ -64,11 +64,11 @@ impl Agent {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, AgentError> {
-        let primary_err = match retry::call_with_retry(self.provider.as_ref(), request.clone()).await
-        {
-            Ok(response) => return Ok(response),
-            Err(e) => e,
-        };
+        let primary_err =
+            match retry::call_with_retry(self.provider.as_ref(), request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(e) => e,
+            };
 
         if self.fallbacks.is_empty() || !is_fallback_worthy(&primary_err) {
             return Err(primary_err.into());

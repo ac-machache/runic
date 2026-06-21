@@ -29,9 +29,17 @@ type Fs = Arc<dyn FilesystemBackend>;
 pub struct ApplyPatchTool(pub Fs);
 
 enum Op {
-    Add { path: String, content: String },
-    Update { path: String, hunks: Vec<(String, String)> },
-    Delete { path: String },
+    Add {
+        path: String,
+        content: String,
+    },
+    Update {
+        path: String,
+        hunks: Vec<(String, String)>,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 fn flush_hunk(old: &mut Vec<String>, new: &mut Vec<String>, hunks: &mut Vec<(String, String)>) {
@@ -66,10 +74,15 @@ fn parse_patch(text: &str) -> Result<Vec<Op>, String> {
                 content.push(l.strip_prefix('+').unwrap_or(l).to_string());
                 i += 1;
             }
-            ops.push(Op::Add { path: path.trim().to_string(), content: content.join("\n") });
+            ops.push(Op::Add {
+                path: path.trim().to_string(),
+                content: content.join("\n"),
+            });
         } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
             i += 1;
-            ops.push(Op::Delete { path: path.trim().to_string() });
+            ops.push(Op::Delete {
+                path: path.trim().to_string(),
+            });
         } else if let Some(path) = line.strip_prefix("*** Update File: ") {
             i += 1;
             let mut old = Vec::new();
@@ -94,7 +107,10 @@ fn parse_patch(text: &str) -> Result<Vec<Op>, String> {
                 i += 1;
             }
             flush_hunk(&mut old, &mut new, &mut hunks);
-            ops.push(Op::Update { path: path.trim().to_string(), hunks });
+            ops.push(Op::Update {
+                path: path.trim().to_string(),
+                hunks,
+            });
         } else {
             i += 1;
         }
@@ -123,7 +139,11 @@ impl Tool for ApplyPatchTool {
             "required": ["patch"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(patch) = args.get("patch").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("apply_patch requires `patch`"));
         };
@@ -190,7 +210,9 @@ mod tests {
     async fn add_update_delete_in_one_patch() {
         let tmp = tempfile::tempdir().unwrap();
         let fs: Fs = Arc::new(LocalFs::new(tmp.path()));
-        fs.write("/keep.rs", "fn a() {}\nfn old() {}\n").await.unwrap();
+        fs.write("/keep.rs", "fn a() {}\nfn old() {}\n")
+            .await
+            .unwrap();
         fs.write("/gone.rs", "delete me").await.unwrap();
 
         let patch = "*** Begin Patch\n\
@@ -205,13 +227,25 @@ mod tests {
 
         let tool = ApplyPatchTool(fs.clone());
         let r = tool
-            .execute(serde_json::json!({ "patch": patch }), &ToolContext::new("u", "s", "r"))
+            .execute(
+                serde_json::json!({ "patch": patch }),
+                &ToolContext::new("u", "s", "r"),
+            )
             .await
             .unwrap();
         assert!(r.success, "{}", r.output);
 
-        assert_eq!(fs.read("/new.rs", 0, 9).await.unwrap().content, "fn fresh() {}");
-        assert!(fs.read("/keep.rs", 0, 9).await.unwrap().content.contains("renamed"));
+        assert_eq!(
+            fs.read("/new.rs", 0, 9).await.unwrap().content,
+            "fn fresh() {}"
+        );
+        assert!(
+            fs.read("/keep.rs", 0, 9)
+                .await
+                .unwrap()
+                .content
+                .contains("renamed")
+        );
         assert!(matches!(
             fs.read("/gone.rs", 0, 1).await,
             Err(runic_filesystem::FsError::NotFound(_))
@@ -223,7 +257,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fs: Fs = Arc::new(LocalFs::new(tmp.path()));
         let r = ApplyPatchTool(fs)
-            .execute(serde_json::json!({ "patch": "nothing here" }), &ToolContext::new("u", "s", "r"))
+            .execute(
+                serde_json::json!({ "patch": "nothing here" }),
+                &ToolContext::new("u", "s", "r"),
+            )
             .await
             .unwrap();
         assert!(!r.success);

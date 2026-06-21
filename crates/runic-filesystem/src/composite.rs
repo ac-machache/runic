@@ -25,7 +25,10 @@ pub struct CompositeBackend {
 impl CompositeBackend {
     /// A composite whose unmatched paths go to `default`.
     pub fn new(default: Arc<dyn FilesystemBackend>) -> Self {
-        Self { default, routes: Vec::new() }
+        Self {
+            default,
+            routes: Vec::new(),
+        }
     }
 
     /// Mount `backend` at `prefix` (e.g. `"/memories/"`). Builder-style.
@@ -102,7 +105,10 @@ impl FilesystemBackend for CompositeBackend {
         let (backend, inner, matched) = self.route(path);
         if let Some(prefix) = matched {
             let entries = backend.ls(&inner).await?;
-            return Ok(entries.into_iter().map(|fi| remap_info(&prefix, fi)).collect());
+            return Ok(entries
+                .into_iter()
+                .map(|fi| remap_info(&prefix, fi))
+                .collect());
         }
         // At root, aggregate the default's entries + each mount as a virtual dir.
         if path == "/" {
@@ -153,7 +159,10 @@ impl FilesystemBackend for CompositeBackend {
             let (backend, inner, matched) = self.route(p);
             if let Some(prefix) = matched {
                 let matches = backend.grep(pattern, Some(&inner), glob).await?;
-                return Ok(matches.into_iter().map(|m| remap_match(&prefix, m)).collect());
+                return Ok(matches
+                    .into_iter()
+                    .map(|m| remap_match(&prefix, m))
+                    .collect());
             }
         }
         // Whole-tree (None or "/"): fan out across default + every mount.
@@ -174,7 +183,10 @@ impl FilesystemBackend for CompositeBackend {
             let (backend, inner, matched) = self.route(p);
             if let Some(prefix) = matched {
                 let found = backend.glob(pattern, Some(&inner)).await?;
-                return Ok(found.into_iter().map(|fi| remap_info(&prefix, fi)).collect());
+                return Ok(found
+                    .into_iter()
+                    .map(|fi| remap_info(&prefix, fi))
+                    .collect());
             }
         }
         // Fan out: default + every mount (with the prefix stripped from the pattern).
@@ -208,7 +220,9 @@ mod tests {
             for (k, v) in entries {
                 m.insert((*k).to_string(), (*v).to_string());
             }
-            Arc::new(Self { files: Mutex::new(m) })
+            Arc::new(Self {
+                files: Mutex::new(m),
+            })
         }
 
         fn under(base: &str, key: &str) -> bool {
@@ -232,7 +246,9 @@ mod tests {
             let mut dirs = std::collections::BTreeSet::new();
             let mut out = Vec::new();
             for (k, v) in files.iter() {
-                let Some(rel) = k.strip_prefix(&prefix) else { continue };
+                let Some(rel) = k.strip_prefix(&prefix) else {
+                    continue;
+                };
                 if rel.is_empty() {
                     continue;
                 }
@@ -250,12 +266,23 @@ mod tests {
             Ok(out)
         }
 
-        async fn read(&self, path: &str, offset: usize, limit: usize) -> Result<ReadResult, FsError> {
+        async fn read(
+            &self,
+            path: &str,
+            offset: usize,
+            limit: usize,
+        ) -> Result<ReadResult, FsError> {
             let files = self.files.lock().unwrap();
-            let content = files.get(path).ok_or_else(|| FsError::NotFound(path.to_string()))?;
+            let content = files
+                .get(path)
+                .ok_or_else(|| FsError::NotFound(path.to_string()))?;
             let lines: Vec<&str> = content.lines().collect();
             let end = (offset + limit).min(lines.len());
-            let slice = if offset < lines.len() { &lines[offset..end] } else { &[][..] };
+            let slice = if offset < lines.len() {
+                &lines[offset..end]
+            } else {
+                &[][..]
+            };
             Ok(ReadResult {
                 content: slice.join("\n"),
                 start_line: offset + 1,
@@ -280,7 +307,9 @@ mod tests {
             replace_all: bool,
         ) -> Result<usize, FsError> {
             let mut files = self.files.lock().unwrap();
-            let content = files.get(path).ok_or_else(|| FsError::NotFound(path.to_string()))?;
+            let content = files
+                .get(path)
+                .ok_or_else(|| FsError::NotFound(path.to_string()))?;
             let count = content.matches(old).count();
             if count == 0 {
                 return Err(FsError::NoEditMatch);
@@ -312,7 +341,11 @@ mod tests {
                 }
                 for (i, line) in v.lines().enumerate() {
                     if line.contains(pattern) {
-                        out.push(GrepMatch { path: k.clone(), line: (i + 1) as u32, text: line.to_string() });
+                        out.push(GrepMatch {
+                            path: k.clone(),
+                            line: (i + 1) as u32,
+                            text: line.to_string(),
+                        });
                     }
                 }
             }
@@ -367,7 +400,10 @@ mod tests {
         // default path
         assert_eq!(fs.read("/scratch.txt", 0, 100).await.unwrap().content, "x");
         // mounted path → backend receives the STRIPPED path "/note.md"
-        assert_eq!(fs.read("/memories/note.md", 0, 100).await.unwrap().content, "remember me");
+        assert_eq!(
+            fs.read("/memories/note.md", 0, 100).await.unwrap().content,
+            "remember me"
+        );
     }
 
     #[tokio::test]
@@ -407,14 +443,23 @@ mod tests {
             fs.edit("/m/todo.md", "milk", "eggs", false).await,
             Err(FsError::AmbiguousEdit(2))
         );
-        assert_eq!(fs.edit("/m/todo.md", "milk", "eggs", true).await.unwrap(), 2);
-        assert_eq!(fs.read("/m/todo.md", 0, 10).await.unwrap().content, "buy eggs\nbuy eggs");
+        assert_eq!(
+            fs.edit("/m/todo.md", "milk", "eggs", true).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            fs.read("/m/todo.md", 0, 10).await.unwrap().content,
+            "buy eggs\nbuy eggs"
+        );
     }
 
     #[tokio::test]
     async fn write_conflict_is_propagated() {
         let fs = CompositeBackend::new(TestFs::seeded(&[("/a.txt", "x")]));
-        assert_eq!(fs.write("/a.txt", "y").await, Err(FsError::AlreadyExists("/a.txt".into())));
+        assert_eq!(
+            fs.write("/a.txt", "y").await,
+            Err(FsError::AlreadyExists("/a.txt".into()))
+        );
     }
 
     // ── ls aggregation + virtual dirs + remap ───────────────────────────────
@@ -427,8 +472,17 @@ mod tests {
             .mount("/s3/", TestFs::seeded(&[]));
         let listed = fs.ls("/").await.unwrap();
         // default files + a virtual dir per mount, sorted
-        assert_eq!(paths(&listed), vec!["/a.txt", "/b.txt", "/memories/", "/s3/"]);
-        assert!(listed.iter().find(|f| f.path == "/memories/").unwrap().is_dir);
+        assert_eq!(
+            paths(&listed),
+            vec!["/a.txt", "/b.txt", "/memories/", "/s3/"]
+        );
+        assert!(
+            listed
+                .iter()
+                .find(|f| f.path == "/memories/")
+                .unwrap()
+                .is_dir
+        );
     }
 
     #[tokio::test]
@@ -447,14 +501,22 @@ mod tests {
         let default = TestFs::seeded(&[("/d.txt", "TODO default")]);
         let m1 = TestFs::seeded(&[("/x.md", "a line\nTODO in memories")]);
         let m2 = TestFs::seeded(&[("/y.md", "TODO in s3")]);
-        let fs = CompositeBackend::new(default).mount("/memories/", m1).mount("/s3/", m2);
+        let fs = CompositeBackend::new(default)
+            .mount("/memories/", m1)
+            .mount("/s3/", m2);
 
         let mut hits = fs.grep("TODO", Some("/"), None).await.unwrap();
         hits.sort_by(|a, b| a.path.cmp(&b.path));
         let paths: Vec<_> = hits.iter().map(|m| m.path.clone()).collect();
         assert_eq!(paths, vec!["/d.txt", "/memories/x.md", "/s3/y.md"]);
         // line numbers are preserved through remap
-        assert_eq!(hits.iter().find(|m| m.path == "/memories/x.md").unwrap().line, 2);
+        assert_eq!(
+            hits.iter()
+                .find(|m| m.path == "/memories/x.md")
+                .unwrap()
+                .line,
+            2
+        );
     }
 
     #[tokio::test]
@@ -496,9 +558,15 @@ mod tests {
 
     #[tokio::test]
     async fn strip_route_from_pattern_works() {
-        assert_eq!(strip_route_from_pattern("/memories/**/*.md", "/memories/"), "**/*.md");
+        assert_eq!(
+            strip_route_from_pattern("/memories/**/*.md", "/memories/"),
+            "**/*.md"
+        );
         assert_eq!(strip_route_from_pattern("**/*.md", "/memories/"), "**/*.md");
-        assert_eq!(strip_route_from_pattern("memories/x.md", "/memories/"), "x.md");
+        assert_eq!(
+            strip_route_from_pattern("memories/x.md", "/memories/"),
+            "x.md"
+        );
     }
 
     // ── no-mount composite behaves like its default ─────────────────────────

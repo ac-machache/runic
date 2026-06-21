@@ -110,7 +110,9 @@ impl AgentRoster {
             if let Ok(text) = std::fs::read_to_string(path) {
                 match AgentDef::parse_markdown(&text) {
                     Ok(def) => defs.push(def),
-                    Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping invalid AGENT.md"),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "skipping invalid AGENT.md")
+                    }
                 }
             }
         };

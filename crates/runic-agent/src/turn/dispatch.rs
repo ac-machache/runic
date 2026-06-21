@@ -126,7 +126,16 @@ impl Agent {
         let parallel_idx: Vec<usize> = plans
             .iter()
             .enumerate()
-            .filter_map(|(i, p)| matches!(p, CallPlan::Dispatch { parallelizable: true, .. }).then_some(i))
+            .filter_map(|(i, p)| {
+                matches!(
+                    p,
+                    CallPlan::Dispatch {
+                        parallelizable: true,
+                        ..
+                    }
+                )
+                .then_some(i)
+            })
             .collect();
         if !parallel_idx.is_empty() {
             let futs: Vec<_> = parallel_idx

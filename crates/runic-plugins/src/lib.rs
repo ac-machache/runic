@@ -176,7 +176,10 @@ mod tests {
         assert!(agents.get("reviewer").is_some());
 
         let commands = mgr.aggregate_commands();
-        assert_eq!(commands.resolve("/hi there").as_deref(), Some("Say hi to there"));
+        assert_eq!(
+            commands.resolve("/hi there").as_deref(),
+            Some("Say hi to there")
+        );
     }
 
     #[test]

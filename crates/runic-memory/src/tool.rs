@@ -159,10 +159,11 @@ impl MemoryTool {
                     .get("search")
                     .and_then(Value::as_str)
                     .ok_or(MemoryError::MissingField { field: "search" })?;
-                let replacement = input
-                    .get("replacement")
-                    .and_then(Value::as_str)
-                    .ok_or(MemoryError::MissingField { field: "replacement" })?;
+                let replacement = input.get("replacement").and_then(Value::as_str).ok_or(
+                    MemoryError::MissingField {
+                        field: "replacement",
+                    },
+                )?;
                 self.store.replace(target, search, replacement).await?;
                 Ok(format!("ok — replaced in {}", target.label()))
             }
@@ -207,10 +208,18 @@ mod tests {
     #[tokio::test]
     async fn add_then_read_via_tool() {
         let (tool, _) = make();
-        let add = run(&tool, serde_json::json!({"action": "add", "target": "user", "content": "lives in Paris"})).await;
+        let add = run(
+            &tool,
+            serde_json::json!({"action": "add", "target": "user", "content": "lives in Paris"}),
+        )
+        .await;
         assert!(add.success, "{:?}", add.output);
 
-        let read = run(&tool, serde_json::json!({"action": "read", "target": "user"})).await;
+        let read = run(
+            &tool,
+            serde_json::json!({"action": "read", "target": "user"}),
+        )
+        .await;
         assert!(read.success);
         assert!(read.output.contains("lives in Paris"));
         assert!(read.output.contains("1 entries"));
@@ -219,7 +228,11 @@ mod tests {
     #[tokio::test]
     async fn add_missing_content_errors() {
         let (tool, _) = make();
-        let result = run(&tool, serde_json::json!({"action": "add", "target": "user"})).await;
+        let result = run(
+            &tool,
+            serde_json::json!({"action": "add", "target": "user"}),
+        )
+        .await;
         assert!(!result.success);
         assert!(result.output.contains("content"));
     }
@@ -227,7 +240,11 @@ mod tests {
     #[tokio::test]
     async fn invalid_action_errors() {
         let (tool, _) = make();
-        let result = run(&tool, serde_json::json!({"action": "yeet", "target": "memory"})).await;
+        let result = run(
+            &tool,
+            serde_json::json!({"action": "yeet", "target": "memory"}),
+        )
+        .await;
         assert!(!result.success);
         assert!(result.output.contains("yeet"));
     }
@@ -235,7 +252,11 @@ mod tests {
     #[tokio::test]
     async fn invalid_target_errors() {
         let (tool, _) = make();
-        let result = run(&tool, serde_json::json!({"action": "read", "target": "nope"})).await;
+        let result = run(
+            &tool,
+            serde_json::json!({"action": "read", "target": "nope"}),
+        )
+        .await;
         assert!(!result.success);
         assert!(result.output.contains("nope"));
     }
@@ -243,7 +264,11 @@ mod tests {
     #[tokio::test]
     async fn read_empty_reports_empty() {
         let (tool, _) = make();
-        let result = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        let result = run(
+            &tool,
+            serde_json::json!({"action": "read", "target": "memory"}),
+        )
+        .await;
         assert!(result.success);
         assert!(result.output.contains("empty"));
     }
@@ -251,15 +276,31 @@ mod tests {
     #[tokio::test]
     async fn full_flow_add_replace_remove_read() {
         let (tool, _) = make();
-        run(&tool, serde_json::json!({"action": "add", "target": "memory", "content": "uses fish shell"})).await;
+        run(
+            &tool,
+            serde_json::json!({"action": "add", "target": "memory", "content": "uses fish shell"}),
+        )
+        .await;
         run(&tool, serde_json::json!({"action": "replace", "target": "memory", "search": "fish", "replacement": "uses zsh shell"})).await;
-        let read = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        let read = run(
+            &tool,
+            serde_json::json!({"action": "read", "target": "memory"}),
+        )
+        .await;
         assert!(read.output.contains("zsh"));
         assert!(!read.output.contains("fish"));
 
-        let removed = run(&tool, serde_json::json!({"action": "remove", "target": "memory", "search": "zsh"})).await;
+        let removed = run(
+            &tool,
+            serde_json::json!({"action": "remove", "target": "memory", "search": "zsh"}),
+        )
+        .await;
         assert!(removed.success);
-        let after = run(&tool, serde_json::json!({"action": "read", "target": "memory"})).await;
+        let after = run(
+            &tool,
+            serde_json::json!({"action": "read", "target": "memory"}),
+        )
+        .await;
         assert!(after.output.contains("empty"));
     }
 
@@ -269,8 +310,16 @@ mod tests {
         // visible from the other (sanity check on Arc sharing).
         let (tool1, store) = make();
         let tool2 = MemoryTool::new(store);
-        run(&tool1, serde_json::json!({"action": "add", "target": "user", "content": "shared fact"})).await;
-        let read = run(&tool2, serde_json::json!({"action": "read", "target": "user"})).await;
+        run(
+            &tool1,
+            serde_json::json!({"action": "add", "target": "user", "content": "shared fact"}),
+        )
+        .await;
+        let read = run(
+            &tool2,
+            serde_json::json!({"action": "read", "target": "user"}),
+        )
+        .await;
         assert!(read.output.contains("shared fact"));
     }
 }

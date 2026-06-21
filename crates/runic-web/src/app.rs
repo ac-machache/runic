@@ -8,7 +8,9 @@ use leptos::task::spawn_local;
 use serde_json::Value;
 
 use crate::api::ApiClient;
-use crate::events::{append_live, apply_event, cluster_runs, flush_live, items_from_events, parse_ask, usage_of};
+use crate::events::{
+    append_live, apply_event, cluster_runs, flush_live, items_from_events, parse_ask, usage_of,
+};
 use crate::model::{Item, LiveBuf, LiveKind, PendingAsk};
 use crate::util::short_id;
 use crate::views::{render_item, render_run, render_state};
@@ -100,7 +102,11 @@ pub fn App() -> impl IntoView {
                     state_json.set(None);
                     match c.list_threads().await {
                         Ok(ids) => threads.set(ids),
-                        Err(_) => threads.update(|t| if !t.contains(&id) { t.push(id.clone()) }),
+                        Err(_) => threads.update(|t| {
+                            if !t.contains(&id) {
+                                t.push(id.clone())
+                            }
+                        }),
                     }
                 }
                 Err(e) => leptos::logging::warn!("create_thread failed: {e}"),
@@ -125,7 +131,9 @@ pub fn App() -> impl IntoView {
             match serde_json::from_str::<Value>(&schema_text) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    items.update(|its| its.push(Item::Warning(format!("invalid output schema JSON: {e}"))));
+                    items.update(|its| {
+                        its.push(Item::Warning(format!("invalid output schema JSON: {e}")))
+                    });
                     return;
                 }
             }
@@ -137,7 +145,9 @@ pub fn App() -> impl IntoView {
             match serde_json::from_str::<Value>(&context_text) {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    items.update(|its| its.push(Item::Warning(format!("invalid context JSON: {e}"))));
+                    items.update(|its| {
+                        its.push(Item::Warning(format!("invalid context JSON: {e}")))
+                    });
                     return;
                 }
             }
@@ -183,7 +193,16 @@ pub fn App() -> impl IntoView {
                     }
                 }
             };
-            let result = c.stream_run(&thread_id, &text, schema_val, context_val, signal.as_ref(), on_event).await;
+            let result = c
+                .stream_run(
+                    &thread_id,
+                    &text,
+                    schema_val,
+                    context_val,
+                    signal.as_ref(),
+                    on_event,
+                )
+                .await;
             flush_live(live, items);
             if let Err(e) = result {
                 if !e.to_lowercase().contains("abort") {
@@ -205,7 +224,9 @@ pub fn App() -> impl IntoView {
     };
 
     let fetch_state = move || {
-        let Some(id) = current.get_untracked() else { return };
+        let Some(id) = current.get_untracked() else {
+            return;
+        };
         let c = client();
         spawn_local(async move {
             match c.thread_state(&id).await {

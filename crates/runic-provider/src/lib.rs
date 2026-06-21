@@ -7,7 +7,7 @@
 //! A centralized retry combinator + a capabilities catalog land next.
 
 use async_trait::async_trait;
-use runic_types::{ContentBlock, Message, StopReason, ToolCall, ToolDefinition, TokenUsage};
+use runic_types::{ContentBlock, Message, StopReason, TokenUsage, ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -149,7 +149,10 @@ pub enum StreamEvent {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Send a completion request and get the assembled response.
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError>;
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError>;
 
     /// Stream a completion, sending incremental events to the channel and
     /// returning the full assembled response. The default wraps `complete()`;
@@ -203,8 +206,14 @@ mod tests {
     fn completion_response_text_joins_text_blocks() {
         let response = CompletionResponse {
             content: vec![
-                ContentBlock::Text { text: "Hello ".to_string(), provider_metadata: None },
-                ContentBlock::Text { text: "world!".to_string(), provider_metadata: None },
+                ContentBlock::Text {
+                    text: "Hello ".to_string(),
+                    provider_metadata: None,
+                },
+                ContentBlock::Text {
+                    text: "world!".to_string(),
+                    provider_metadata: None,
+                },
             ],
             stop_reason: StopReason::EndTurn,
             tool_calls: vec![],

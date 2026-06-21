@@ -44,7 +44,7 @@ pub mod routes;
 pub mod tenant;
 pub mod wire;
 
-pub use app::{router, AppState, ServeConfig};
+pub use app::{AppState, ServeConfig, router};
 pub use error::ServeError;
 pub use factory::{AgentFactory, BoxedAgentFactory};
 pub use human::{HumanChannel, HumanHub};

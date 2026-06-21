@@ -2,8 +2,8 @@
 //!
 //! Works with OpenAI, Ollama, vLLM, and any other OpenAI-compatible endpoint.
 
-use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent};
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
+use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
 use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
@@ -450,7 +450,10 @@ fn assemble_assistant_message(
 
 #[async_trait]
 impl Provider for OpenAIDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         let mut oai_messages: Vec<OaiMessage> = Vec::new();
 
         // Add system message if present

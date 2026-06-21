@@ -74,7 +74,14 @@ pub trait MemoryProvider: Send + Sync {
     async fn sync_turn(&self, _user: &str, _assistant: &str) {}
 
     /// Mirror a built-in `memory` tool write into this provider. Default: noop.
-    async fn on_memory_write(&self, _action: &str, _target: &str, _content: &str, _meta: &MemoryWriteMeta) {}
+    async fn on_memory_write(
+        &self,
+        _action: &str,
+        _target: &str,
+        _content: &str,
+        _meta: &MemoryWriteMeta,
+    ) {
+    }
 
     /// Tools this provider contributes to the agent's registry.
     fn tools(&self) -> Vec<Arc<dyn Tool>> {
@@ -95,7 +102,11 @@ pub struct BuiltinProvider {
 
 impl BuiltinProvider {
     pub fn new(store: Arc<BoundedMemoryStore>) -> Self {
-        Self { store, memory_enabled: true, user_enabled: true }
+        Self {
+            store,
+            memory_enabled: true,
+            user_enabled: true,
+        }
     }
 
     /// Gate the MEMORY.md block (default on).
@@ -167,7 +178,10 @@ mod tests {
     #[tokio::test]
     async fn builtin_block_renders_after_a_write() {
         let p = builtin();
-        p.store().add(Target::User, "user prefers terse answers").await.unwrap();
+        p.store()
+            .add(Target::User, "user prefers terse answers")
+            .await
+            .unwrap();
         let block = p.system_prompt_block().await.unwrap();
         assert!(block.contains("USER PROFILE"));
         assert!(block.contains("user prefers terse answers"));

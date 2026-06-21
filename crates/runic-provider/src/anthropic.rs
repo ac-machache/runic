@@ -6,8 +6,8 @@
 use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
-use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage};
 use runic_types::ToolCall;
+use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage};
 
 /// User-Agent sent on Anthropic API requests.
 const USER_AGENT: &str = "runic/0.1.0";
@@ -197,7 +197,10 @@ enum ContentBlockAccum {
 
 #[async_trait]
 impl Provider for AnthropicDriver {
-    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
         // Extract system prompt from messages or use the provided one
         let system = request.system.clone().or_else(|| {
             request.messages.iter().find_map(|m| {

@@ -70,7 +70,9 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 /// Host *names* that obviously point at the local machine or LAN, caught
 /// before we even resolve them.
 fn is_local_name(host: &str) -> bool {
-    let h = host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    let h = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
     h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local")
 }
 
@@ -230,9 +232,26 @@ pub fn html_to_text(html: &str) -> String {
                     .to_ascii_lowercase();
                 if matches!(
                     name.as_str(),
-                    "p" | "br" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
-                        | "section" | "article" | "header" | "footer" | "ul" | "ol" | "table"
-                        | "blockquote" | "pre" | "hr"
+                    "p" | "br"
+                        | "div"
+                        | "li"
+                        | "tr"
+                        | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "section"
+                        | "article"
+                        | "header"
+                        | "footer"
+                        | "ul"
+                        | "ol"
+                        | "table"
+                        | "blockquote"
+                        | "pre"
+                        | "hr"
                 ) {
                     out.push('\n');
                 }
@@ -314,7 +333,10 @@ impl WebFetchTool {
                 return Err(format!("unsupported content-type '{ctype}'"));
             }
 
-            let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| format!("read failed: {e}"))?;
             let body = String::from_utf8_lossy(&bytes);
             let text = if ctype.contains("html") || body.trim_start().starts_with('<') {
                 html_to_text(&body)
@@ -359,7 +381,11 @@ impl Tool for WebFetchTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(url) = args.get("url").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("web_fetch requires `url`"));
         };
@@ -398,7 +424,10 @@ pub struct WebSearchTool {
 
 impl WebSearchTool {
     pub fn new(provider: Arc<dyn SearchProvider>) -> Self {
-        Self { provider, max_results: 5 }
+        Self {
+            provider,
+            max_results: 5,
+        }
     }
     pub fn with_max_results(mut self, n: usize) -> Self {
         self.max_results = n.clamp(1, 10);
@@ -427,7 +456,11 @@ impl Tool for WebSearchTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(query) = args.get("query").and_then(|v| v.as_str()) else {
             return Ok(ToolResult::error("web_search requires `query`"));
         };
@@ -438,9 +471,18 @@ impl Tool for WebSearchTool {
         if results.is_empty() {
             return Ok(ToolResult::ok(format!("No results for \"{query}\".")));
         }
-        let mut out = format!("Search results for \"{query}\" (via {}):\n", self.provider.name());
+        let mut out = format!(
+            "Search results for \"{query}\" (via {}):\n",
+            self.provider.name()
+        );
         for (i, r) in results.iter().enumerate() {
-            out.push_str(&format!("\n{}. {}\n   {}\n   {}\n", i + 1, r.title, r.url, r.snippet));
+            out.push_str(&format!(
+                "\n{}. {}\n   {}\n   {}\n",
+                i + 1,
+                r.title,
+                r.url,
+                r.snippet
+            ));
         }
         Ok(ToolResult::ok(out))
     }
@@ -457,7 +499,10 @@ pub struct TavilyProvider {
 
 impl TavilyProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
-        Self { api_key: api_key.into(), client: reqwest::Client::new() }
+        Self {
+            api_key: api_key.into(),
+            client: reqwest::Client::new(),
+        }
     }
 }
 
@@ -499,7 +544,11 @@ impl SearchProvider for TavilyProvider {
         Ok(resp
             .results
             .into_iter()
-            .map(|h| SearchResult { title: h.title, url: h.url, snippet: h.content })
+            .map(|h| SearchResult {
+                title: h.title,
+                url: h.url,
+                snippet: h.content,
+            })
             .collect())
     }
 }
@@ -515,7 +564,10 @@ pub struct SearxngProvider {
 impl SearxngProvider {
     /// `base_url` is the instance root, e.g. `https://searx.example.com`.
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self { base_url: base_url.into().trim_end_matches('/').to_string(), client: reqwest::Client::new() }
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+        }
     }
 }
 
@@ -553,7 +605,11 @@ impl SearchProvider for SearxngProvider {
             .results
             .into_iter()
             .take(max_results)
-            .map(|h| SearchResult { title: h.title, url: h.url, snippet: h.content })
+            .map(|h| SearchResult {
+                title: h.title,
+                url: h.url,
+                snippet: h.content,
+            })
             .collect())
     }
 }
@@ -582,7 +638,11 @@ mod tests {
         assert!(guard_url("http://localhost/x").await.is_err());
         assert!(guard_url("http://foo.local/").await.is_err());
         assert!(guard_url("http://127.0.0.1:8080/").await.is_err());
-        assert!(guard_url("http://169.254.169.254/latest/meta-data").await.is_err());
+        assert!(
+            guard_url("http://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
         assert!(guard_url("ftp://example.com/").await.is_err()); // scheme
         assert!(guard_url("not a url").await.is_err());
     }
@@ -607,15 +667,24 @@ mod tests {
     fn entity_decoding_handles_numeric() {
         assert_eq!(decode_entities("a&#65;b"), "aAb");
         assert_eq!(decode_entities("&#x41;"), "A");
-        assert_eq!(decode_entities("plain &unknown; text"), "plain &unknown; text");
+        assert_eq!(
+            decode_entities("plain &unknown; text"),
+            "plain &unknown; text"
+        );
     }
 
     #[test]
     fn entity_decoding_is_char_boundary_safe() {
         // Regression: byte 12 after the `&` lands inside the multi-byte 'à'.
         // The old `tail[..12]` slice panicked here.
-        assert_eq!(decode_entities("&#039;aide à la décision"), "'aide à la décision");
+        assert_eq!(
+            decode_entities("&#039;aide à la décision"),
+            "'aide à la décision"
+        );
         // A bare `&` followed by multibyte text and no nearby ';' must not panic.
-        assert_eq!(decode_entities("R&D coûte à la société"), "R&D coûte à la société");
+        assert_eq!(
+            decode_entities("R&D coûte à la société"),
+            "R&D coûte à la société"
+        );
     }
 }

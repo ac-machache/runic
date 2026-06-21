@@ -2,7 +2,7 @@
 //! so callers can confirm runic-serve is up.
 
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub async fn healthz() -> Json<Value> {
     Json(json!({

@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use axum::Json;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -31,7 +31,7 @@ use crate::app::AppState;
 use crate::error::ServeError;
 use crate::human::HumanChannel;
 use crate::tenant::Tenant;
-use crate::wire::{from_agent_event, from_session_event, WireEvent};
+use crate::wire::{WireEvent, from_agent_event, from_session_event};
 
 /// The user turn for a run. Two shapes, checked in order:
 ///
@@ -285,15 +285,26 @@ mod tests {
 
     #[test]
     fn empty_content_array_falls_back_to_message_text() {
-        let msg = parse(r#"{"message":"fallback","content":[]}"#).into_message().unwrap();
+        let msg = parse(r#"{"message":"fallback","content":[]}"#)
+            .into_message()
+            .unwrap();
         assert!(msg.content.text_content().contains("fallback"));
     }
 
     #[test]
     fn neither_field_is_a_bad_request() {
-        assert!(matches!(parse(r#"{}"#).into_message(), Err(ServeError::BadRequest(_))));
-        assert!(matches!(parse(r#"{"message":"   "}"#).into_message(), Err(ServeError::BadRequest(_))));
-        assert!(matches!(parse(r#"{"content":[]}"#).into_message(), Err(ServeError::BadRequest(_))));
+        assert!(matches!(
+            parse(r#"{}"#).into_message(),
+            Err(ServeError::BadRequest(_))
+        ));
+        assert!(matches!(
+            parse(r#"{"message":"   "}"#).into_message(),
+            Err(ServeError::BadRequest(_))
+        ));
+        assert!(matches!(
+            parse(r#"{"content":[]}"#).into_message(),
+            Err(ServeError::BadRequest(_))
+        ));
     }
 
     #[test]

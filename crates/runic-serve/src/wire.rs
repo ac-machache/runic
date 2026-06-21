@@ -129,9 +129,21 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
         AgentEvent::RunStarted { run_id } => vec![WireEvent::RunStart { run_id, at: None }],
         AgentEvent::TextDelta(text) => vec![WireEvent::AssistantTextDelta { text }],
         AgentEvent::ThinkingDelta(text) => vec![WireEvent::AssistantThinkingDelta { text }],
-        AgentEvent::ToolStarted { id, name, input } => vec![WireEvent::ToolStart { id, name, input }],
-        AgentEvent::ToolFinished { id, name, is_error, result } => {
-            vec![WireEvent::ToolFinish { id, name, is_error, preview: truncate(&result, 4000) }]
+        AgentEvent::ToolStarted { id, name, input } => {
+            vec![WireEvent::ToolStart { id, name, input }]
+        }
+        AgentEvent::ToolFinished {
+            id,
+            name,
+            is_error,
+            result,
+        } => {
+            vec![WireEvent::ToolFinish {
+                id,
+                name,
+                is_error,
+                preview: truncate(&result, 4000),
+            }]
         }
         AgentEvent::TurnCompleted { turn, stop_reason } => {
             vec![WireEvent::TurnComplete { turn, stop_reason }]
@@ -141,7 +153,9 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
                 input_tokens: outcome.usage.input_tokens,
                 output_tokens: outcome.usage.output_tokens,
             },
-            WireEvent::Done { total_turns: outcome.total_turns },
+            WireEvent::Done {
+                total_turns: outcome.total_turns,
+            },
         ],
     }
 }
@@ -151,8 +165,15 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
 /// internal bookkeeping events (`TurnBoundary`, `HookRan`, `StateSnapshot`).
 pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
     match event {
-        SessionEvent::RunStart { run_id, at } => Some(WireEvent::RunStart { run_id, at: Some(at) }),
-        SessionEvent::RunEnd { run_id, outcome, at } => Some(WireEvent::RunEnd {
+        SessionEvent::RunStart { run_id, at } => Some(WireEvent::RunStart {
+            run_id,
+            at: Some(at),
+        }),
+        SessionEvent::RunEnd {
+            run_id,
+            outcome,
+            at,
+        } => Some(WireEvent::RunEnd {
             run_id,
             total_turns: outcome.total_turns,
             stop_reason: outcome.stop_reason,
@@ -191,7 +212,9 @@ mod tests {
     fn text_delta_maps_one_to_one() {
         let wires = from_agent_event(AgentEvent::TextDelta("hello".into()));
         assert_eq!(wires.len(), 1);
-        let WireEvent::AssistantTextDelta { text } = &wires[0] else { panic!() };
+        let WireEvent::AssistantTextDelta { text } = &wires[0] else {
+            panic!()
+        };
         assert_eq!(text, "hello");
     }
 
@@ -200,10 +223,19 @@ mod tests {
         let outcome = runic_state::RunOutcome {
             total_turns: 3,
             stop_reason: Some("end_turn".into()),
-            usage: runic_types::TokenUsage { input_tokens: 10, output_tokens: 20 },
+            usage: runic_types::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+            },
         };
         let wires = from_agent_event(AgentEvent::RunCompleted(outcome));
-        assert!(matches!(wires[0], WireEvent::Usage { input_tokens: 10, output_tokens: 20 }));
+        assert!(matches!(
+            wires[0],
+            WireEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 20
+            }
+        ));
         assert!(matches!(wires[1], WireEvent::Done { total_turns: 3 }));
     }
 
@@ -214,13 +246,18 @@ mod tests {
             msg: Message::user("hi"),
             at: Utc::now(),
         };
-        let Some(WireEvent::Message { run_id, .. }) = from_session_event(evt) else { panic!() };
+        let Some(WireEvent::Message { run_id, .. }) = from_session_event(evt) else {
+            panic!()
+        };
         assert_eq!(run_id, "r1");
     }
 
     #[test]
     fn turn_boundary_is_filtered_from_replay() {
-        let evt = SessionEvent::TurnBoundary { run_id: "r1".into(), at: Utc::now() };
+        let evt = SessionEvent::TurnBoundary {
+            run_id: "r1".into(),
+            at: Utc::now(),
+        };
         assert!(from_session_event(evt).is_none());
     }
 }

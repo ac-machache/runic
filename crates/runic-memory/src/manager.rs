@@ -113,7 +113,13 @@ impl MemoryManager {
 
     /// Mirror a built-in `memory` write into every provider (the built-in
     /// itself ignores its own mirror — it already persisted on the tool call).
-    pub async fn on_memory_write(&self, action: &str, target: &str, content: &str, meta: &MemoryWriteMeta) {
+    pub async fn on_memory_write(
+        &self,
+        action: &str,
+        target: &str,
+        content: &str,
+        meta: &MemoryWriteMeta,
+    ) {
         join_all(
             self.providers
                 .iter()
@@ -201,7 +207,9 @@ mod tests {
     #[tokio::test]
     async fn prefetch_is_empty_when_nothing_recalled() {
         let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
-        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(backend))));
+        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
+            backend,
+        ))));
         let mut m = MemoryManager::new();
         m.add_provider(builtin); // built-in has no prefetch
         assert!(m.prefetch_all("x").await.is_empty());
@@ -215,7 +223,8 @@ mod tests {
 
         m.sync_all("u", "a").await;
         m.queue_prefetch_all("q").await;
-        m.on_memory_write("add", "memory", "c", &MemoryWriteMeta::default()).await;
+        m.on_memory_write("add", "memory", "c", &MemoryWriteMeta::default())
+            .await;
 
         assert_eq!(fake.synced.load(Ordering::SeqCst), 1);
         assert_eq!(fake.queued.load(Ordering::SeqCst), 1);
@@ -225,7 +234,9 @@ mod tests {
     #[tokio::test]
     async fn tools_are_gathered_across_providers() {
         let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
-        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(backend))));
+        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
+            backend,
+        ))));
         let mut m = MemoryManager::new();
         m.add_provider(builtin);
         m.add_provider(Arc::new(FakeExternal::default()));

@@ -30,7 +30,10 @@ fn content_block() -> impl Strategy<Value = ContentBlock> {
             provider_metadata,
         }),
         prop::sample::select(vec!["image/png", "image/jpeg", "image/webp"]).prop_map(|mt| {
-            ContentBlock::Image { media_type: mt.into(), data: "YWJj".into() }
+            ContentBlock::Image {
+                media_type: mt.into(),
+                data: "YWJj".into(),
+            }
         }),
         ("[a-z]{1,8}", "[a-z_]{1,12}", json_value(), opt_meta()).prop_map(
             |(id, name, input, provider_metadata)| ContentBlock::ToolUse {
@@ -49,7 +52,11 @@ fn content_block() -> impl Strategy<Value = ContentBlock> {
             }
         ),
         ("[a-z ]{0,30}", prop::option::of("[a-z0-9]{0,16}")).prop_map(|(thinking, signature)| {
-            ContentBlock::Thinking { thinking, signature, provider_metadata: None }
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+                provider_metadata: None,
+            }
         }),
         "[a-z0-9]{0,16}".prop_map(|data| ContentBlock::RedactedThinking { data }),
     ]

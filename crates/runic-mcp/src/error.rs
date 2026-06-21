@@ -72,11 +72,13 @@ mod tests {
         // These must NOT trigger a reconnect:
         assert!(!McpError::Timeout(Duration::from_secs(1)).is_recoverable());
         assert!(!McpError::Protocol("bad shape".into()).is_recoverable());
-        assert!(!McpError::JsonRpc {
-            code: -32000,
-            message: "tool failed".into(),
-            data: None,
-        }
-        .is_recoverable());
+        assert!(
+            !McpError::JsonRpc {
+                code: -32000,
+                message: "tool failed".into(),
+                data: None,
+            }
+            .is_recoverable()
+        );
     }
 }

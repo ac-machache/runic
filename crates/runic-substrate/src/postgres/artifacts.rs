@@ -100,7 +100,10 @@ impl ArtifactStore for PostgresArtifactStore {
         .map_err(db)?;
 
         // Bytes go to the inner store; it owns the id.
-        let artifact = self.bytes.put(tenant, session_id, mime_type, source, bytes).await?;
+        let artifact = self
+            .bytes
+            .put(tenant, session_id, mime_type, source, bytes)
+            .await?;
 
         sqlx::query(
             "INSERT INTO artifacts

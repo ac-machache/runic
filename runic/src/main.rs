@@ -6,15 +6,15 @@ use async_trait::async_trait;
 use runic_agent::Agent;
 use runic_filesystem::{FilesystemBackend, LocalFs};
 use runic_memory::{BoundedMemoryStore, MemoryTool};
-use runic_provider::openai::OpenAIDriver;
 use runic_provider::Provider;
-use runic_serve::{router, AgentFactory, HumanHub, ServeConfig};
-use runic_skills::{skills_prompt_section, SkillRegistry, SkillViewTool};
+use runic_provider::openai::OpenAIDriver;
+use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
+use runic_skills::{SkillRegistry, SkillViewTool, skills_prompt_section};
 use runic_subagent::{
-    roster_prompt_section, AgentDef, AgentRoster, ChildBuilder, DelegateTool, DelegationCtx,
+    AgentDef, AgentRoster, ChildBuilder, DelegateTool, DelegationCtx, roster_prompt_section,
 };
 use runic_substrate::{PostgresSessionStore, SearchChatsTool, SessionStore};
-use runic_tools::{default_tools, WeatherHistoryTool, WeatherTool, WebFetchTool};
+use runic_tools::{WeatherHistoryTool, WeatherTool, WebFetchTool, default_tools};
 
 /// Default persona when no SOUL.md is found.
 const DEFAULT_PERSONA: &str = "You are a helpful assistant with persistent memory and tools. \
@@ -28,10 +28,10 @@ to load a skill's instructions, and `delegate` to hand a self-contained task to 
 struct RunicFactory {
     provider: Arc<dyn Provider>,
     model: String,
-    fs: Arc<dyn FilesystemBackend>,      // tool workspace
-    mem_fs: Arc<dyn FilesystemBackend>,  // curated memory (separate backend)
-    sessions: Arc<dyn SessionStore>,     // for search_chats
-    persona: String,                     // SOUL.md (or the default)
+    fs: Arc<dyn FilesystemBackend>,     // tool workspace
+    mem_fs: Arc<dyn FilesystemBackend>, // curated memory (separate backend)
+    sessions: Arc<dyn SessionStore>,    // for search_chats
+    persona: String,                    // SOUL.md (or the default)
     skills: Arc<SkillRegistry>,
     roster: Arc<AgentRoster>,
 }
@@ -84,7 +84,10 @@ impl AgentFactory for RunicFactory {
             model: self.model.clone(),
             fs: self.fs.clone(),
         });
-        b = b.tool(Arc::new(DelegateTool::new(self.roster.clone(), child_builder)));
+        b = b.tool(Arc::new(DelegateTool::new(
+            self.roster.clone(),
+            child_builder,
+        )));
 
         b.build()
     }
@@ -139,11 +142,20 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| DEFAULT_PERSONA.to_string());
 
     // Skills + subagents: load from dirs (empty registry/roster if absent).
-    let skills_dir = std::env::var("RUNIC_SKILLS_DIR").unwrap_or_else(|_| format!("{root_dir}/skills"));
-    let skills = Arc::new(SkillRegistry::from_dir(&skills_dir).unwrap_or_else(|_| SkillRegistry::new(vec![])));
-    let agents_dir = std::env::var("RUNIC_AGENTS_DIR").unwrap_or_else(|_| format!("{root_dir}/agents"));
-    let roster = Arc::new(AgentRoster::from_dir(&agents_dir).unwrap_or_else(|_| AgentRoster::new(vec![])));
-    tracing::info!("loaded {} skill(s), {} subagent(s)", skills.len(), roster.len());
+    let skills_dir =
+        std::env::var("RUNIC_SKILLS_DIR").unwrap_or_else(|_| format!("{root_dir}/skills"));
+    let skills = Arc::new(
+        SkillRegistry::from_dir(&skills_dir).unwrap_or_else(|_| SkillRegistry::new(vec![])),
+    );
+    let agents_dir =
+        std::env::var("RUNIC_AGENTS_DIR").unwrap_or_else(|_| format!("{root_dir}/agents"));
+    let roster =
+        Arc::new(AgentRoster::from_dir(&agents_dir).unwrap_or_else(|_| AgentRoster::new(vec![])));
+    tracing::info!(
+        "loaded {} skill(s), {} subagent(s)",
+        skills.len(),
+        roster.len()
+    );
 
     // Postgres session store — connect() also runs the migrations.
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL not set")?;

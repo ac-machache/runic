@@ -59,7 +59,11 @@ impl Tool for ReadFileTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(path) = arg_str(&args, "path") else {
             return Ok(ToolResult::error("read_file requires `path`"));
         };
@@ -95,9 +99,16 @@ impl Tool for WriteFileTool {
             "required": ["path", "content"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let (Some(path), Some(content)) = (arg_str(&args, "path"), arg_str(&args, "content")) else {
-            return Ok(ToolResult::error("write_file requires `path` and `content`"));
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        let (Some(path), Some(content)) = (arg_str(&args, "path"), arg_str(&args, "content"))
+        else {
+            return Ok(ToolResult::error(
+                "write_file requires `path` and `content`",
+            ));
         };
         Ok(match self.0.write(path, content).await {
             Ok(()) => ToolResult::ok(format!("wrote {path}")),
@@ -132,7 +143,11 @@ impl Tool for EditFileTool {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let (Some(path), Some(old), Some(new)) = (
             arg_str(&args, "path"),
             arg_str(&args, "old_string"),
@@ -142,7 +157,10 @@ impl Tool for EditFileTool {
                 "edit_file requires `path`, `old_string`, `new_string`",
             ));
         };
-        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let replace_all = args
+            .get("replace_all")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(match self.0.edit(path, old, new, replace_all).await {
             Ok(n) => ToolResult::ok(format!("edited {path} ({n} replacement(s))")),
             Err(e) => fs_err(e),
@@ -171,7 +189,11 @@ impl Tool for LsTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let path = arg_str(&args, "path").unwrap_or("/");
         Ok(match self.0.ls(path).await {
             Ok(entries) => {
@@ -179,7 +201,11 @@ impl Tool for LsTool {
                 for e in entries {
                     out.push_str(&format!("{}{}\n", e.path, if e.is_dir { "/" } else { "" }));
                 }
-                ToolResult::ok(if out.is_empty() { "(empty)".into() } else { out })
+                ToolResult::ok(if out.is_empty() {
+                    "(empty)".into()
+                } else {
+                    out
+                })
             }
             Err(e) => fs_err(e),
         })
@@ -212,7 +238,11 @@ impl Tool for GlobTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(pattern) = arg_str(&args, "pattern") else {
             return Ok(ToolResult::error("glob requires `pattern`"));
         };
@@ -220,7 +250,11 @@ impl Tool for GlobTool {
         Ok(match self.0.glob(pattern, path).await {
             Ok(found) if found.is_empty() => ToolResult::ok("(no matches)"),
             Ok(found) => ToolResult::ok(
-                found.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join("\n"),
+                found
+                    .iter()
+                    .map(|f| f.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             ),
             Err(e) => fs_err(e),
         })
@@ -255,7 +289,11 @@ impl Tool for GrepTool {
     fn parallelizable(&self) -> bool {
         true
     }
-    async fn execute(&self, args: serde_json::Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
         let Some(pattern) = arg_str(&args, "pattern") else {
             return Ok(ToolResult::error("grep requires `pattern`"));
         };
@@ -283,7 +321,11 @@ impl Tool for GrepTool {
                 for m in &matches {
                     *counts.entry(m.path.as_str()).or_default() += 1;
                 }
-                counts.iter().map(|(p, c)| format!("{p}: {c}")).collect::<Vec<_>>().join("\n")
+                counts
+                    .iter()
+                    .map(|(p, c)| format!("{p}: {c}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
             _ => matches
                 .iter()
@@ -322,7 +364,10 @@ mod tests {
         let fs: Fs = Arc::new(LocalFs::new(tmp.path()));
 
         WriteFileTool(fs.clone())
-            .execute(serde_json::json!({ "path": "/a.txt", "content": "one\ntwo" }), &ctx())
+            .execute(
+                serde_json::json!({ "path": "/a.txt", "content": "one\ntwo" }),
+                &ctx(),
+            )
             .await
             .unwrap();
 
@@ -333,7 +378,10 @@ mod tests {
         assert!(r.success && r.output.contains("1\tone") && r.output.contains("2\ttwo"));
 
         let e = EditFileTool(fs.clone())
-            .execute(serde_json::json!({ "path": "/a.txt", "old_string": "two", "new_string": "2" }), &ctx())
+            .execute(
+                serde_json::json!({ "path": "/a.txt", "old_string": "two", "new_string": "2" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(e.success);
@@ -346,11 +394,17 @@ mod tests {
 
         // ambiguous edit surfaces as an in-band error
         WriteFileTool(fs.clone())
-            .execute(serde_json::json!({ "path": "/d.txt", "content": "x x x" }), &ctx())
+            .execute(
+                serde_json::json!({ "path": "/d.txt", "content": "x x x" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         let bad = EditFileTool(fs)
-            .execute(serde_json::json!({ "path": "/d.txt", "old_string": "x", "new_string": "y" }), &ctx())
+            .execute(
+                serde_json::json!({ "path": "/d.txt", "old_string": "x", "new_string": "y" }),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(!bad.success);

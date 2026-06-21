@@ -1,0 +1,12 @@
+# Git hooks via Lefthook (https://lefthook.dev) — run `lefthook install` once.
+# fmt + clippy run in parallel and only when Rust files are staged; clippy
+# compiles, so it covers `cargo check` too. Skip a WIP commit with LEFTHOOK=0.
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.rs"
+      run: cargo fmt --check
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --workspace --all-targets -- -D warnings

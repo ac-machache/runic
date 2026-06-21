@@ -154,7 +154,9 @@ impl Parser {
     }
 }
 
-fn eval(input: &str) -> Result<f64, String> {
+/// Evaluate an arithmetic expression. Pure; exposed for fuzzing — must never
+/// panic on arbitrary input (errors are returned, not raised).
+pub fn eval(input: &str) -> Result<f64, String> {
     if input.trim().is_empty() {
         return Err("empty expression".into());
     }

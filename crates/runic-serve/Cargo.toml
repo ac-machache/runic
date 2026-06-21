@@ -32,3 +32,4 @@ uuid = { workspace = true }
 runic-provider = { path = "../runic-provider" }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+proptest = { workspace = true }

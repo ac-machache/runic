@@ -1,0 +1,40 @@
+[package]
+name = "runic-tools-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+runic-tools = { path = ".." }
+
+# Standalone workspace so the parent `cargo build --workspace` ignores it
+# (the fuzz crate needs nightly + a sanitizer and is built only via cargo-fuzz).
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "html_to_text"
+path = "fuzz_targets/html_to_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_entities"
+path = "fuzz_targets/decode_entities.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "calc_eval"
+path = "fuzz_targets/calc_eval.rs"
+test = false
+doc = false
+bench = false

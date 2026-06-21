@@ -7,6 +7,8 @@
 //! - **utility** — `calculator`, `system_time`.
 //! - **web** — `web_fetch` (SSRF-guarded) + `web_search` (over a pluggable
 //!   [`web::SearchProvider`]).
+//! - **weather** — `weather` (current + 7-day forecast) and `weather_history`
+//!   (past daily conditions, back to 1940), keyless via Open-Meteo.
 //! - **human-in-the-loop** — `ask_user` + `escalate_to_human`, over the
 //!   per-run [`runic_tool::HumanInterface`] the surface wires in.
 //! - **integrations** — `composio`, one meta-tool over Composio's 1000+
@@ -31,6 +33,7 @@ pub mod fs;
 pub mod hitl;
 pub mod patch;
 pub mod time;
+pub mod weather;
 pub mod web;
 
 pub use calc::CalculatorTool;
@@ -41,6 +44,13 @@ pub use fs::{
 pub use hitl::{AskUserTool, EscalateToHumanTool};
 pub use patch::ApplyPatchTool;
 pub use time::SystemTimeTool;
+pub use weather::{WeatherHistoryTool, WeatherTool};
+
+// Pure parsers exposed for fuzz/property testing — not part of the stable API.
+#[doc(hidden)]
+pub use calc::eval as eval_calc;
+#[doc(hidden)]
+pub use web::{decode_entities, html_to_text};
 pub use web::{SearchProvider, SearchResult, SearxngProvider, TavilyProvider, WebFetchTool, WebSearchTool};
 
 /// The native tools bound to a filesystem backend: the six fs tools +

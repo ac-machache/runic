@@ -14,7 +14,7 @@ use runic_subagent::{
     roster_prompt_section, AgentDef, AgentRoster, ChildBuilder, DelegateTool, DelegationCtx,
 };
 use runic_substrate::{PostgresSessionStore, SearchChatsTool, SessionStore};
-use runic_tools::{default_tools, WebFetchTool};
+use runic_tools::{default_tools, WeatherHistoryTool, WeatherTool, WebFetchTool};
 
 /// Default persona when no SOUL.md is found.
 const DEFAULT_PERSONA: &str = "You are a helpful assistant with persistent memory and tools. \
@@ -74,6 +74,8 @@ impl AgentFactory for RunicFactory {
         b = b.tool(Arc::new(MemoryTool::new(store)));
         b = b.tool(Arc::new(SearchChatsTool::new(self.sessions.clone())));
         b = b.tool(Arc::new(WebFetchTool::new()));
+        b = b.tool(Arc::new(WeatherTool::new()));
+        b = b.tool(Arc::new(WeatherHistoryTool::new()));
         b = b.tool(Arc::new(SkillViewTool::new(self.skills.clone())));
 
         // Subagent delegation.

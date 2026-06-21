@@ -22,3 +22,4 @@ runic-filesystem = { path = "../runic-filesystem" }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+proptest = { workspace = true }

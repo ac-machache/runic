@@ -336,14 +336,14 @@ pub fn App() -> impl IntoView {
                                 } else if matches!(lb.kind, LiveKind::Thinking) {
                                     view! {
                                         <div class="msg-assistant">
-                                            <div class="avatar">"⟡"</div>
+                                            <img class="avatar" src="favicon.png" alt="runic" />
                                             <div class="assistant-body"><div class="thinking-body">{lb.text}</div></div>
                                         </div>
                                     }.into_any()
                                 } else {
                                     view! {
                                         <div class="msg-assistant">
-                                            <div class="avatar">"⟡"</div>
+                                            <img class="avatar" src="favicon.png" alt="runic" />
                                             <div class="assistant-body">
                                                 <div class="prose"><p style="margin:0">{lb.text}<span class="caret"></span></p></div>
                                             </div>

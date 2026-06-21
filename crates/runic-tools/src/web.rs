@@ -137,7 +137,9 @@ fn remove_blocks(html: &str, tag: &str) -> String {
     out
 }
 
-fn decode_entities(s: &str) -> String {
+/// Decode HTML entities (`&amp;`, `&#39;`, `&#x41;`, …). Pure; exposed for
+/// fuzzing — must never panic on arbitrary input.
+pub fn decode_entities(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(amp) = rest.find('&') {
@@ -205,8 +207,9 @@ fn collapse_ws(s: &str) -> String {
 
 /// A small, dependency-free HTML→text pass: strip script/style, turn
 /// block-level tags into line breaks, drop the rest of the markup, decode
-/// entities. Good enough for a model to read; not a full renderer.
-fn html_to_text(html: &str) -> String {
+/// entities. Good enough for a model to read; not a full renderer. Pure;
+/// exposed for fuzzing — must never panic on arbitrary input.
+pub fn html_to_text(html: &str) -> String {
     let cleaned = remove_blocks(&remove_blocks(html, "script"), "style");
     let mut out = String::with_capacity(cleaned.len());
     let mut tag = String::new();

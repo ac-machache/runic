@@ -16,13 +16,13 @@ pub fn render_item(item: Item) -> AnyView {
         }.into_any(),
         Item::Assistant(text) => view! {
             <div class="msg-assistant">
-                <div class="avatar">"⟡"</div>
+                <img class="avatar" src="favicon.png" alt="runic" />
                 <div class="assistant-body"><div class="prose" inner_html=md_to_html(&text)></div></div>
             </div>
         }.into_any(),
         Item::Thinking(text) => view! {
             <div class="msg-assistant">
-                <div class="avatar">"⟡"</div>
+                <img class="avatar" src="favicon.png" alt="runic" />
                 <div class="assistant-body">
                     <details class="thinking"><summary>"thinking"</summary><div class="thinking-body">{text}</div></details>
                 </div>
@@ -59,7 +59,7 @@ fn render_tool_card(t: ToolView) -> AnyView {
                 <details class="tool-sec"><summary>"args"</summary><pre class="jsonpre">{input}</pre></details>
             })}
             {has_result.then(move || view! {
-                <details class="tool-sec" open=true>
+                <details class="tool-sec">
                     <summary>"result"</summary>
                     <pre class=res_cls>{result}</pre>
                     {(!sources.is_empty()).then(|| view! {

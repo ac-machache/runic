@@ -13,3 +13,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = "1"
+proptest = { workspace = true }

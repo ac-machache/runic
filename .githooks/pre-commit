@@ -1,0 +1,17 @@
+#!/bin/sh
+# runic pre-commit gate: formatting + lints must pass before a commit lands.
+# (clippy compiles, so it covers `cargo check` too.)
+# Bypass for a WIP commit with:  git commit --no-verify
+set -e
+cd "$(git rev-parse --show-toplevel)"
+
+echo "▶ cargo fmt --check"
+if ! cargo fmt --check; then
+    echo "✗ not formatted — run: cargo fmt" >&2
+    exit 1
+fi
+
+echo "▶ cargo clippy --workspace --all-targets -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "✓ pre-commit ok"

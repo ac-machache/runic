@@ -184,6 +184,9 @@ pub struct AgentConfig {
     /// On hitting `max_turns`: if `true`, make one final tools-free call to
     /// extract a best-effort answer; if `false`, error out.
     pub graceful_max_turns: bool,
+    /// JSON schema for a synthetic `final_answer` tool; its call is captured as
+    /// the run's structured output.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 impl Default for AgentConfig {
@@ -195,9 +198,12 @@ impl Default for AgentConfig {
             max_turns: DEFAULT_MAX_TURNS,
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
             graceful_max_turns: false,
+            output_schema: None,
         }
     }
 }
+
+pub(crate) const FINAL_ANSWER_TOOL: &str = "final_answer";
 
 /// What can go wrong during a run.
 #[derive(Debug, thiserror::Error)]
@@ -345,6 +351,13 @@ impl AgentBuilder {
     /// Register a tool.
     pub fn tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.tools.push(tool);
+        self
+    }
+
+    /// Have the model deliver its final answer as JSON matching `schema` (via a
+    /// synthetic `final_answer` tool). The result lands in [`RunOutcome::structured`].
+    pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.config.output_schema = Some(schema);
         self
     }
 

@@ -14,6 +14,7 @@ use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall
 struct ScriptedProvider {
     responses: Mutex<std::collections::VecDeque<CompletionResponse>>,
     calls: Mutex<usize>,
+    last_request: Mutex<Option<CompletionRequest>>,
 }
 
 impl ScriptedProvider {
@@ -21,7 +22,16 @@ impl ScriptedProvider {
         Self {
             responses: Mutex::new(responses.into()),
             calls: Mutex::new(0),
+            last_request: Mutex::new(None),
         }
+    }
+
+    fn last_request(&self) -> CompletionRequest {
+        self.last_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a request was sent")
     }
 }
 
@@ -29,9 +39,10 @@ impl ScriptedProvider {
 impl Provider for ScriptedProvider {
     async fn complete(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
         *self.calls.lock().unwrap() += 1;
+        *self.last_request.lock().unwrap() = Some(request);
         self.responses
             .lock()
             .unwrap()
@@ -506,4 +517,84 @@ async fn hard_max_turns_errors_without_graceful() {
         agent.run("go").await,
         Err(runic_agent::AgentError::MaxTurnsExceeded(1))
     ));
+}
+
+#[tokio::test]
+async fn output_schema_captures_final_answer_and_ends() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "answer": { "type": "string" } },
+        "required": ["answer"]
+    });
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response(
+        "f1",
+        "final_answer",
+        serde_json::json!({ "answer": "42" }),
+    )]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .output_schema(schema)
+        .build();
+
+    let outcome = agent.run("what is the answer").await.unwrap();
+
+    assert_eq!(outcome.total_turns, 1);
+    assert_eq!(outcome.stop_reason.as_deref(), Some("final_answer"));
+    assert_eq!(
+        outcome.structured,
+        Some(serde_json::json!({ "answer": "42" }))
+    );
+
+    let msgs = agent.state().messages_for_provider();
+    let acked = msgs.iter().any(|m| match &m.content {
+        runic_types::MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "final_answer")),
+        _ => false,
+    });
+    assert!(acked, "final_answer call must get a matching tool_result");
+}
+
+#[tokio::test]
+async fn prepare_request_carries_system_tools_and_user_message() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .system_prompt("be terse")
+        .tool(Arc::new(Echo))
+        .build();
+
+    agent.run("hello there").await.unwrap();
+
+    let req = provider.last_request();
+    assert_eq!(req.model, "test");
+    assert_eq!(req.system.as_deref(), Some("be terse"));
+    assert!(req.tools.iter().any(|t| t.name == "echo"));
+    assert!(req.tools.iter().all(|t| t.name != "final_answer"));
+    assert!(
+        req.messages
+            .iter()
+            .any(|m| matches!(&m.content, MessageContent::Text(t) if t == "hello there"))
+    );
+}
+
+#[tokio::test]
+async fn prepare_request_injects_final_answer_tool_when_schema_set() {
+    let schema =
+        serde_json::json!({ "type": "object", "properties": { "x": { "type": "number" } } });
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .output_schema(schema.clone())
+        .build();
+
+    agent.run("hi").await.unwrap();
+
+    let req = provider.last_request();
+    let fa = req
+        .tools
+        .iter()
+        .find(|t| t.name == "final_answer")
+        .expect("final_answer tool injected");
+    assert_eq!(fa.input_schema, schema);
 }

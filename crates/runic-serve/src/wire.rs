@@ -227,6 +227,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 20,
             },
+            structured: None,
         };
         let wires = from_agent_event(AgentEvent::RunCompleted(outcome));
         assert!(matches!(

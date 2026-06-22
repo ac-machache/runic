@@ -36,6 +36,14 @@ impl Agent {
             tools.extend(guard.specs().into_iter().map(spec_to_def));
         }
 
+        if let Some(schema) = &self.config.output_schema {
+            tools.push(ToolDefinition {
+                name: crate::FINAL_ANSWER_TOOL.to_string(),
+                description: "Call this with your final answer as JSON matching the schema, once the task is complete.".to_string(),
+                input_schema: schema.clone(),
+            });
+        }
+
         let system = if self.state.system_prompt.is_empty() {
             None
         } else {

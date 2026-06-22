@@ -17,3 +17,6 @@ Cargo.lock.bak
 /zeroclaw
 /openfang
 /runic_fs
+
+# codegraph local index
+/.codegraph

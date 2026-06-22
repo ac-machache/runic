@@ -30,6 +30,9 @@ pub struct RunOutcome {
     pub stop_reason: Option<String>,
     /// Token usage accumulated across the run.
     pub usage: TokenUsage,
+    /// Set when the run answered via the `final_answer` tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
 }
 
 /// One entry in the agent's event log. Tagged by `kind` on the wire.

@@ -8,7 +8,7 @@
 use chrono::Utc;
 
 use runic_state::{RunOutcome, SessionEvent, new_run_id};
-use runic_types::{Message, StopReason, TokenUsage};
+use runic_types::{ContentBlock, Message, StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
 use crate::turn::Point;
@@ -98,6 +98,7 @@ impl Agent {
 
         let mut total_turns: u32 = 0;
         let mut total_usage = TokenUsage::default();
+        let mut structured: Option<serde_json::Value> = None;
 
         // The loop yields the final stop-reason string, or an error.
         let result: Result<String, AgentError> = loop {
@@ -148,6 +149,25 @@ impl Agent {
                 stop_reason: stop_reason_str(turn.stop_reason).to_string(),
             });
 
+            if self.config.output_schema.is_some()
+                && let Some(call) = turn
+                    .tool_calls
+                    .iter()
+                    .find(|c| c.name == crate::FINAL_ANSWER_TOOL)
+            {
+                structured = Some(call.input.clone());
+                self.push_tool_results(
+                    Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        tool_name: crate::FINAL_ANSWER_TOOL.to_string(),
+                        content: "Recorded.".to_string(),
+                        is_error: false,
+                    }]),
+                    &run_id,
+                );
+                break Ok("final_answer".to_string());
+            }
+
             if turn.tool_calls.is_empty() {
                 break Ok(stop_reason_str(turn.stop_reason).to_string());
             }
@@ -165,6 +185,7 @@ impl Agent {
                     total_turns,
                     stop_reason: Some(stop_reason),
                     usage: total_usage,
+                    structured,
                 };
                 self.state.push_event(SessionEvent::RunEnd {
                     run_id,
@@ -181,6 +202,7 @@ impl Agent {
                         total_turns,
                         stop_reason: Some(format!("error: {e}")),
                         usage: total_usage,
+                        structured: None,
                     },
                     at: Utc::now(),
                 });

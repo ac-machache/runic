@@ -72,6 +72,8 @@ enum ApiContentBlock {
     Text { text: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
+    #[serde(rename = "document")]
+    Document { source: ApiImageSource },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -706,6 +708,13 @@ fn convert_message(msg: &Message) -> ApiMessage {
                             data: data.clone(),
                         },
                     }),
+                    ContentBlock::File { media_type, data } => Some(ApiContentBlock::Document {
+                        source: ApiImageSource {
+                            source_type: "base64".to_string(),
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        },
+                    }),
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => Some(ApiContentBlock::ToolUse {
@@ -836,6 +845,22 @@ mod tests {
         let msg = Message::user("Hello");
         let api_msg = convert_message(&msg);
         assert_eq!(api_msg.role, "user");
+    }
+
+    #[test]
+    fn file_block_maps_to_document() {
+        let msg = Message::user_with_blocks(vec![ContentBlock::File {
+            media_type: "application/pdf".into(),
+            data: "YWJj".into(),
+        }]);
+        let ApiContent::Blocks(blocks) = convert_message(&msg).content else {
+            panic!("expected blocks");
+        };
+        let v = serde_json::to_value(&blocks[0]).unwrap();
+        assert_eq!(v["type"], "document");
+        assert_eq!(v["source"]["type"], "base64");
+        assert_eq!(v["source"]["media_type"], "application/pdf");
+        assert_eq!(v["source"]["data"], "YWJj");
     }
 
     #[test]

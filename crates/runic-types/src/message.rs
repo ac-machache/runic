@@ -103,6 +103,10 @@ pub enum ContentBlock {
         /// Base64-encoded image data.
         data: String,
     },
+    /// An inline base64-encoded file (e.g. a PDF) for providers that accept
+    /// document input.
+    #[serde(rename = "file")]
+    File { media_type: String, data: String },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
     ToolUse {
@@ -218,6 +222,7 @@ impl MessageContent {
                         name.len() + input.to_string().len()
                     }
                     ContentBlock::Image { .. }
+                    | ContentBlock::File { .. }
                     | ContentBlock::RedactedThinking { .. }
                     | ContentBlock::Unknown => 0,
                 })

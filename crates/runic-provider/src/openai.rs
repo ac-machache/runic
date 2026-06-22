@@ -217,11 +217,19 @@ enum OaiContentPart {
     Text { text: String },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: OaiImageUrl },
+    #[serde(rename = "file")]
+    File { file: OaiFileData },
 }
 
 #[derive(Debug, Serialize)]
 struct OaiImageUrl {
     url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OaiFileData {
+    filename: String,
+    file_data: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -533,6 +541,15 @@ impl Provider for OpenAIDriver {
                                 parts.push(OaiContentPart::ImageUrl {
                                     image_url: OaiImageUrl {
                                         url: format!("data:{media_type};base64,{data}"),
+                                    },
+                                });
+                            }
+                            ContentBlock::File { media_type, data } => {
+                                let ext = media_type.rsplit('/').next().unwrap_or("bin");
+                                parts.push(OaiContentPart::File {
+                                    file: OaiFileData {
+                                        filename: format!("file.{ext}"),
+                                        file_data: format!("data:{media_type};base64,{data}"),
                                     },
                                 });
                             }
@@ -2185,6 +2202,20 @@ mod tests {
 
     /// Without thinking blocks, the outbound message should be a plain
     /// assistant message â€” preserve the legacy shape.
+    #[test]
+    fn file_part_serializes_to_openai_file_shape() {
+        let part = OaiContentPart::File {
+            file: OaiFileData {
+                filename: "file.pdf".to_string(),
+                file_data: "data:application/pdf;base64,YWJj".to_string(),
+            },
+        };
+        let v = serde_json::to_value(&part).unwrap();
+        assert_eq!(v["type"], "file");
+        assert_eq!(v["file"]["filename"], "file.pdf");
+        assert_eq!(v["file"]["file_data"], "data:application/pdf;base64,YWJj");
+    }
+
     #[test]
     fn test_assemble_assistant_no_thinking_is_plain() {
         let driver = OpenAIDriver::new("test".to_string(), "https://api.openai.com/v1".to_string());

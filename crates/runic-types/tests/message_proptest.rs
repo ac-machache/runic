@@ -35,6 +35,12 @@ fn content_block() -> impl Strategy<Value = ContentBlock> {
                 data: "YWJj".into(),
             }
         }),
+        prop::sample::select(vec!["application/pdf", "text/plain"]).prop_map(|mt| {
+            ContentBlock::File {
+                media_type: mt.into(),
+                data: "YWJj".into(),
+            }
+        }),
         ("[a-z]{1,8}", "[a-z_]{1,12}", json_value(), opt_meta()).prop_map(
             |(id, name, input, provider_metadata)| ContentBlock::ToolUse {
                 id,

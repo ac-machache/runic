@@ -2508,6 +2508,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "runic-filesystem",
  "runic-tool",
  "serde",
  "serde_json",
@@ -2539,6 +2540,7 @@ dependencies = [
  "chrono",
  "futures",
  "runic-agent",
+ "runic-filesystem",
  "runic-provider",
  "runic-tool",
  "runic-types",
@@ -2567,6 +2569,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2597,6 +2600,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

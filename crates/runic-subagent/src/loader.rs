@@ -1,15 +1,14 @@
+//! The `subagents(...)` builder — load `AGENT.md` rosters from one path / a
+//! `Vec` / a `HashMap`, merge them, and contribute the `delegate` tool (the
+//! caller supplies the [`ChildBuilder`] that constructs child agents).
+
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use runic_agent::Agent;
-use runic_filesystem::FilesystemBackend;
-use runic_provider::Provider;
-use runic_subagent::{AgentDef, AgentRoster, ChildBuilder, DelegateTool, DelegationCtx};
+use runic_filesystem::Dirs;
 use runic_tool::Tool;
-use runic_tools::default_tools;
 
-use crate::dirs::Dirs;
+use crate::{AgentDef, AgentRoster, ChildBuilder, DelegateTool};
 
 pub fn subagents(dirs: impl Dirs) -> Subagents {
     let dirs = dirs.dirs();
@@ -92,44 +91,13 @@ impl Subagents {
         self.roster.clone()
     }
 
-    pub fn tools(
-        &self,
-        provider: Arc<dyn Provider>,
-        model: impl Into<String>,
-        fs: Arc<dyn FilesystemBackend>,
-    ) -> Option<Arc<dyn Tool>> {
+    /// The `delegate` tool, given a [`ChildBuilder`] that constructs child
+    /// agents. `None` when the roster is empty.
+    pub fn tool(&self, child: Arc<dyn ChildBuilder>) -> Option<Arc<dyn Tool>> {
         if self.roster.is_empty() {
             return None;
         }
-        let child: Arc<dyn ChildBuilder> = Arc::new(FoundryChildBuilder {
-            provider,
-            model: model.into(),
-            fs,
-        });
         tracing::debug!(count = self.roster.len(), "delegate tool enabled");
         Some(Arc::new(DelegateTool::new(self.roster.clone(), child)) as Arc<dyn Tool>)
-    }
-}
-
-struct FoundryChildBuilder {
-    provider: Arc<dyn Provider>,
-    model: String,
-    fs: Arc<dyn FilesystemBackend>,
-}
-
-#[async_trait]
-impl ChildBuilder for FoundryChildBuilder {
-    async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
-        let model = def.model.clone().unwrap_or_else(|| self.model.clone());
-        let mut b = Agent::builder(self.provider.clone(), "subagent", &def.name)
-            .model(model)
-            .system_prompt(&def.system_prompt);
-        for t in default_tools(self.fs.clone()) {
-            b = b.tool(t);
-        }
-        if let Some(max_turns) = def.max_turns {
-            b = b.max_turns(max_turns);
-        }
-        Ok(b.build())
     }
 }

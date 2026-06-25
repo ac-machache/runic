@@ -28,6 +28,7 @@
 //!   prompt stays stable for the whole session (prefix-cache friendly).
 //!   Mid-session writes still land on disk; the next session picks them up.
 
+pub mod builder;
 pub mod config;
 pub mod error;
 pub mod lock;
@@ -38,6 +39,7 @@ pub mod store;
 pub mod threats;
 pub mod tool;
 
+pub use builder::{Memory, memory};
 pub use config::{DEFAULT_NUDGE_INTERVAL, ExternalProviderConfig, MemoryConfig, ProviderConfig};
 pub use error::MemoryError;
 pub use manager::MemoryManager;

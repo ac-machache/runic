@@ -39,6 +39,7 @@ pub mod client;
 pub mod config;
 pub mod deferred;
 pub mod error;
+pub mod loader;
 pub mod manager;
 pub mod pool;
 pub mod protocol;
@@ -53,6 +54,7 @@ pub use deferred::{
     DeferredMcpToolSet, DeferredMcpToolStub, ToolAccessPolicy, deferred_tools_prompt_section,
 };
 pub use error::McpError;
+pub use loader::{Mcp, McpConnection, mcp_file, mcp_json};
 pub use manager::McpManager;
 pub use pool::SharedMcpPool;
 pub use protocol::{

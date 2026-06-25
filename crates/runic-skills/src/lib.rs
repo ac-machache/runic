@@ -9,6 +9,9 @@
 //! Cheap context, lazy load — the same shape as MCP-deferred tools and the
 //! subagent roster.
 
+mod loader;
+pub use loader::{Skills, skills};
+
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;

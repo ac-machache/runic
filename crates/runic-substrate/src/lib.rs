@@ -18,6 +18,7 @@
 //! agent's working filesystem (`runic-filesystem`).
 
 mod artifacts;
+mod builders;
 mod local;
 mod memory;
 mod replay;
@@ -28,12 +29,15 @@ mod tool;
 mod postgres;
 
 pub use artifacts::{Artifact, ArtifactSource, ArtifactStore};
+pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{ChatHit, SessionMeta, SessionStore, StoredEvent};
 pub use tool::SearchChatsTool;
 
+#[cfg(feature = "postgres")]
+pub use builders::{blobs_postgres, sessions_postgres};
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresArtifactStore, PostgresSessionStore};
 

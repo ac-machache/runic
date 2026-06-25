@@ -15,12 +15,14 @@
 
 pub mod def;
 pub mod delegate;
+pub mod loader;
 
 pub use def::{AgentDef, AgentRoster};
 pub use delegate::{
     BackgroundTask, ChildBuilder, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH,
     DEFAULT_MAX_TOTAL_SPAWNS, DelegateTool, DelegationCtx, SpawnBudget, TaskStatus,
 };
+pub use loader::{Subagents, subagents};
 
 /// Render the roster into a system-prompt section so the model knows which
 /// subagents it can delegate to (the `delegate` tool's `&str` description

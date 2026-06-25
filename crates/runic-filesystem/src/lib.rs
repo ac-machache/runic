@@ -19,9 +19,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod composite;
+pub mod dirs;
 pub mod local;
 pub mod memory;
 pub use composite::CompositeBackend;
+pub use dirs::Dirs;
 pub use local::LocalFs;
 pub use memory::MemoryFs;
 

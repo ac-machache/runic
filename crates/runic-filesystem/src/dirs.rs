@@ -1,7 +1,10 @@
+//! `Dirs` — flexible directory-path input for loaders: accept one path, a
+//! `Vec` of paths, or a `HashMap` whose values are paths, and normalize to
+//! `Vec<PathBuf>`.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Accepts one path, a `Vec` of paths, or a `HashMap` whose values are paths.
 pub trait Dirs {
     fn dirs(self) -> Vec<PathBuf>;
 }

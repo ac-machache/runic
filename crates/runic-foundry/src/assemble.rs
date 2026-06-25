@@ -2,10 +2,17 @@ use std::sync::Arc;
 
 use runic_agent::Agent;
 use runic_filesystem::FilesystemBackend;
+use runic_mcp::McpConnection;
+use runic_memory::Memory;
 use runic_provider::Provider;
+use runic_skills::Skills;
+use runic_subagent::{ChildBuilder, Subagents};
+use runic_substrate::Sessions;
+use runic_tools::Tools;
 
+use crate::child::FoundryChildBuilder;
 use crate::context::Context;
-use crate::{McpConnection, Memory, Sessions, Skills, Subagents, Tools};
+use crate::memory_review::MemoryReviewHook;
 
 /// The bundle of parts an agent is assembled from. Set the optional slices you
 /// want; leave the rest `None`.
@@ -65,10 +72,15 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     {
         b = b.tool(tool);
     }
-    if let Some(s) = &a.subagents
-        && let Some(tool) = s.tools(a.provider.clone(), &a.model, a.workspace.clone())
-    {
-        b = b.tool(tool);
+    if let Some(s) = &a.subagents {
+        let child: Arc<dyn ChildBuilder> = Arc::new(FoundryChildBuilder {
+            provider: a.provider.clone(),
+            model: a.model.clone(),
+            fs: a.workspace.clone(),
+        });
+        if let Some(tool) = s.tool(child) {
+            b = b.tool(tool);
+        }
     }
     if let Some(s) = &a.sessions
         && let Some(tool) = s.tools()
@@ -85,9 +97,15 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     // ── hooks ────────────────────────────────────────────────────────────────
     if let Some(m) = &a.memory
         && let Some(store) = &store
-        && let Some(hook) = m.review_hook(a.provider.clone(), &a.model, store.clone())
+        && m.review_interval() > 0
     {
-        b = b.write_hook(hook);
+        let hook = MemoryReviewHook::new(
+            m.review_interval(),
+            a.provider.clone(),
+            &a.model,
+            store.clone(),
+        );
+        b = b.write_hook(Arc::new(hook));
     }
 
     tracing::info!(tenant, session, "agent assembled");

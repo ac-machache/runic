@@ -15,6 +15,7 @@ serde_yml = { workspace = true }
 tracing = { workspace = true }
 
 runic-tool = { path = "../runic-tool" }
+runic-filesystem = { path = "../runic-filesystem" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

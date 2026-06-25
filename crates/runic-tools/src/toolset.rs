@@ -1,15 +1,20 @@
+//! A configurable builder over the native tools: the always-on base set
+//! ([`default_tools`](crate::default_tools)) plus opt-in web / weather /
+//! composio / HITL tools.
+
 use std::sync::Arc;
 
 use runic_filesystem::FilesystemBackend;
 use runic_tool::Tool;
-use runic_tools::{
+
+use crate::{
     AskUserTool, ComposioTool, EscalateToHumanTool, WeatherHistoryTool, WeatherTool, WebFetchTool,
     default_tools,
 };
 
-/// runic's native tools. The base set (read/write/edit/ls/glob/grep +
-/// apply_patch + calculator + system_time) is always included by `collect`;
-/// the rest are opt-in.
+/// Start configuring a native tool set. The base set (read/write/edit/ls/glob/
+/// grep + apply_patch + calculator + system_time) is always included by
+/// [`Tools::collect`]; the rest are opt-in.
 pub fn tools() -> Tools {
     Tools {
         web: false,

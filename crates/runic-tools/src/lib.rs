@@ -33,6 +33,7 @@ pub mod fs;
 pub mod hitl;
 pub mod patch;
 pub mod time;
+pub mod toolset;
 pub mod weather;
 pub mod web;
 
@@ -42,6 +43,7 @@ pub use fs::{EditFileTool, GlobTool, GrepTool, LsTool, ReadFileTool, WriteFileTo
 pub use hitl::{AskUserTool, EscalateToHumanTool};
 pub use patch::ApplyPatchTool;
 pub use time::SystemTimeTool;
+pub use toolset::{Tools, tools};
 pub use weather::{WeatherHistoryTool, WeatherTool};
 
 // Pure parsers exposed for fuzz/property testing — not part of the stable API.

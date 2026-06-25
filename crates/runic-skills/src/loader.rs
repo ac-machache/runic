@@ -1,10 +1,13 @@
+//! The `skills(...)` builder — load skills from one path / a `Vec` / a
+//! `HashMap`, merge them, and contribute the `skill_view` tool.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use runic_skills::{Skill, SkillRegistry, SkillViewTool};
+use runic_filesystem::Dirs;
 use runic_tool::Tool;
 
-use crate::dirs::Dirs;
+use crate::{Skill, SkillRegistry, SkillViewTool};
 
 pub fn skills(dirs: impl Dirs) -> Skills {
     let dirs = dirs.dirs();

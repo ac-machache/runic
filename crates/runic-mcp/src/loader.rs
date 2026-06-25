@@ -1,12 +1,17 @@
+//! Ergonomic config-loading + connect over the MCP client: load servers from a
+//! file or inline JSON (with `${VAR}` env expansion so secrets stay out of the
+//! committed config), connect them, and produce the `tool_search` machinery.
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use runic_mcp::{
+use runic_tool::{ActivatedToolSet, Tool};
+
+use crate::{
     DeferredMcpToolSet, McpClient, McpConfig, McpServerConfig, ToolSearchTool,
     deferred_tools_prompt_section,
 };
-use runic_tool::{ActivatedToolSet, Tool};
 
 /// Load servers from an `mcp.json` file (the path is yours to pass).
 pub fn mcp_file(path: impl AsRef<Path>) -> Mcp {
@@ -112,7 +117,7 @@ impl Mcp {
     }
 }
 
-/// The result of connecting MCP servers — what `assemble` wires into the agent.
+/// The result of connecting MCP servers — what the assembler wires into the agent.
 pub struct McpConnection {
     activated: Arc<Mutex<ActivatedToolSet>>,
     tool_search: Option<Arc<dyn Tool>>,

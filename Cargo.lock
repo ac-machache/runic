@@ -2371,6 +2371,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "runic-foundry"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "runic-agent",
+ "runic-filesystem",
+ "runic-hook",
+ "runic-mcp",
+ "runic-memory",
+ "runic-provider",
+ "runic-skills",
+ "runic-state",
+ "runic-subagent",
+ "runic-substrate",
+ "runic-tool",
+ "runic-tools",
+ "runic-types",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "runic-hook"
 version = "0.1.0"
 dependencies = [

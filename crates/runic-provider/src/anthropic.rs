@@ -20,10 +20,14 @@ pub struct AnthropicDriver {
     api_key: Zeroizing<String>,
     base_url: String,
     client: reqwest::Client,
+    /// Mark the system prompt with `cache_control: ephemeral` so Anthropic
+    /// caches the stable tools+system prefix across a session's turns.
+    cache_system: bool,
 }
 
 impl AnthropicDriver {
-    /// Create a new Anthropic driver.
+    /// Create a new Anthropic driver. Prompt caching of the system prefix is
+    /// on by default (runic's system prompt is stable per session).
     pub fn new(api_key: String, base_url: String) -> Self {
         Self {
             api_key: Zeroizing::new(api_key),
@@ -32,8 +36,47 @@ impl AnthropicDriver {
                 .user_agent(USER_AGENT)
                 .build()
                 .unwrap_or_default(),
+            cache_system: true,
         }
     }
+
+    /// Toggle caching of the system prefix (default on).
+    pub fn with_prompt_caching(mut self, on: bool) -> Self {
+        self.cache_system = on;
+        self
+    }
+
+    /// Wrap the extracted system text in a structured block, attaching the
+    /// cache breakpoint when caching is enabled.
+    fn system_blocks(&self, text: Option<String>) -> Option<Vec<ApiSystemBlock>> {
+        text.map(|text| {
+            vec![ApiSystemBlock {
+                kind: "text",
+                text,
+                cache_control: self
+                    .cache_system
+                    .then_some(CacheControl { kind: "ephemeral" }),
+            }]
+        })
+    }
+}
+
+/// Anthropic prompt-cache breakpoint marker.
+#[derive(Debug, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    kind: &'static str, // "ephemeral"
+}
+
+/// One block of the structured `system` field. Carrying `cache_control` on it
+/// caches the tools+system prefix (Anthropic's cache order is tools→system).
+#[derive(Debug, Serialize)]
+struct ApiSystemBlock {
+    #[serde(rename = "type")]
+    kind: &'static str, // "text"
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 /// Anthropic Messages API request body.
@@ -42,7 +85,7 @@ struct ApiRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<ApiSystemBlock>>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
@@ -239,7 +282,7 @@ impl Provider for AnthropicDriver {
         let api_request = ApiRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
-            system,
+            system: self.system_blocks(system),
             messages: api_messages,
             tools: api_tools,
             temperature: Some(request.temperature),
@@ -346,7 +389,7 @@ impl Provider for AnthropicDriver {
         let api_request = ApiRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
-            system,
+            system: self.system_blocks(system),
             messages: api_messages,
             tools: api_tools,
             temperature: Some(request.temperature),
@@ -1211,5 +1254,33 @@ mod tests {
         assert!(blocks
             .iter()
             .any(|b| matches!(b, ApiContentBlock::Text { .. })));
+    }
+
+    #[test]
+    fn system_prompt_carries_cache_control() {
+        let driver = AnthropicDriver::new("k".into(), "http://x".into());
+
+        // caching on (default) → a cached text block
+        let blocks = driver
+            .system_blocks(Some("you are helpful".into()))
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&blocks).unwrap(),
+            serde_json::json!([{
+                "type": "text",
+                "text": "you are helpful",
+                "cache_control": { "type": "ephemeral" }
+            }])
+        );
+
+        // caching off → no cache_control marker
+        let off = AnthropicDriver::new("k".into(), "http://x".into()).with_prompt_caching(false);
+        assert_eq!(
+            serde_json::to_value(off.system_blocks(Some("hi".into())).unwrap()).unwrap(),
+            serde_json::json!([{ "type": "text", "text": "hi" }])
+        );
+
+        // no system → no blocks (field omitted on the wire)
+        assert!(driver.system_blocks(None).is_none());
     }
 }

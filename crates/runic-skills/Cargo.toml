@@ -6,6 +6,11 @@ authors.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# S3-backed skill sources. Off by default — pulls the AWS SDK. The trait and
+# wiring point exist regardless; this gates the concrete impl.
+s3 = []
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -13,9 +18,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true, features = ["fs", "rt"] }
 
 runic-tool = { path = "../runic-tool" }
-runic-filesystem = { path = "../runic-filesystem" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -4,14 +4,12 @@
 //! just records the review interval via [`Memory::review_interval`].
 
 use std::path::PathBuf;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
-use runic_filesystem::{FilesystemBackend, LocalFs};
 use runic_tool::Tool;
 
+use crate::storage::LocalStorage;
 use crate::{BoundedMemoryStore, MemoryTool};
-
-static LOCK_WARN: Once = Once::new();
 
 pub fn memory(path: impl Into<PathBuf>) -> Memory {
     Memory {
@@ -80,20 +78,16 @@ impl Memory {
             );
         }
 
-        LOCK_WARN.call_once(|| {
-            tracing::warn!(
-                "memory has no cross-process lock (with_lock_dir unset) — concurrent processes may clobber writes"
-            );
-        });
-
         if self.create
             && let Err(e) = std::fs::create_dir_all(&dir)
         {
             tracing::error!(dir = %dir.display(), error = %e, "failed to create memory dir");
         }
 
-        let fs: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir));
-        Arc::new(BoundedMemoryStore::new(fs))
+        // Cross-process flock is enabled: the sidecar `.lock` files land under
+        // the same real directory as the data.
+        let storage = Arc::new(LocalStorage::new(&dir));
+        Arc::new(BoundedMemoryStore::new(storage).with_lock_dir(dir))
     }
 
     pub fn tools(&self, store: Arc<BoundedMemoryStore>) -> Option<Arc<dyn Tool>> {

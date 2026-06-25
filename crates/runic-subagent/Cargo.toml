@@ -20,9 +20,9 @@ uuid = { workspace = true }
 
 runic-agent = { path = "../runic-agent" }
 runic-tool = { path = "../runic-tool" }
-runic-filesystem = { path = "../runic-filesystem" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 runic-provider = { path = "../runic-provider" }
 runic-types = { path = "../runic-types" }
+tempfile = { workspace = true }

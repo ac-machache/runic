@@ -332,3 +332,22 @@ async fn abandoned_run_does_not_brick_the_thread() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_to_string(resp).await.contains("pong"));
 }
+
+#[tokio::test]
+async fn answering_missing_human_ask_returns_bad_request() {
+    let app = make_router();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads/t1/runs/r1/asks/missing-ask")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"answer":"yes"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(body_to_string(resp).await.contains("no pending ask"));
+}

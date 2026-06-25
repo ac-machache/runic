@@ -8,7 +8,6 @@ publish.workspace = true
 
 [dependencies]
 runic-provider = { path = "../runic-provider" }
-runic-filesystem = { path = "../runic-filesystem" }
 runic-substrate = { path = "../runic-substrate", features = ["postgres"] }
 runic-tool = { path = "../runic-tool" }
 runic-hook = { path = "../runic-hook" }
@@ -26,3 +25,6 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

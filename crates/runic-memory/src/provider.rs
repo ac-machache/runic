@@ -162,10 +162,10 @@ impl BuiltinProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_filesystem::{FilesystemBackend, MemoryFs};
+    use crate::storage::MemStorage;
 
     fn builtin() -> BuiltinProvider {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(backend)))
     }
 
@@ -189,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn builtin_block_respects_target_gates() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let store = Arc::new(BoundedMemoryStore::new(backend));
         store.add(Target::Memory, "uses zsh").await.unwrap();
         store.add(Target::User, "lives in Paris").await.unwrap();

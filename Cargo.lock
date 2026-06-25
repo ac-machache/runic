@@ -248,16 +248,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bstr"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
-dependencies = [
- "memchr",
- "serde",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -831,19 +821,6 @@ dependencies = [
  "wasip2",
  "wasip3",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "globset"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52dfc19153a48bde0cbd630453615c8151bce3a5adfac7a0aebfbf0a1e1f57e3"
-dependencies = [
- "aho-corasick",
- "bstr",
- "log",
- "regex-automata",
- "regex-syntax",
 ]
 
 [[package]]
@@ -2314,7 +2291,6 @@ dependencies = [
  "axum",
  "dotenvy",
  "runic-agent",
- "runic-filesystem",
  "runic-memory",
  "runic-provider",
  "runic-serve",
@@ -2358,26 +2334,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "runic-filesystem"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "globset",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "runic-foundry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "runic-agent",
- "runic-filesystem",
  "runic-hook",
  "runic-mcp",
  "runic-memory",
@@ -2390,6 +2352,7 @@ dependencies = [
  "runic-tools",
  "runic-types",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -2434,7 +2397,6 @@ dependencies = [
  "libc",
  "proptest",
  "regex",
- "runic-filesystem",
  "runic-tool",
  "serde",
  "serde_json",
@@ -2451,7 +2413,10 @@ dependencies = [
  "runic-commands",
  "runic-skills",
  "runic-subagent",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -2508,7 +2473,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "runic-filesystem",
  "runic-tool",
  "serde",
  "serde_json",
@@ -2540,13 +2504,13 @@ dependencies = [
  "chrono",
  "futures",
  "runic-agent",
- "runic-filesystem",
  "runic-provider",
  "runic-tool",
  "runic-types",
  "serde",
  "serde_json",
  "serde_yml",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -2594,7 +2558,6 @@ dependencies = [
  "chrono-tz",
  "proptest",
  "reqwest",
- "runic-filesystem",
  "runic-tool",
  "serde",
  "serde_json",

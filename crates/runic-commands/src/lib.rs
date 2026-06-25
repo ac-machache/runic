@@ -22,6 +22,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+mod security;
+
 /// A parsed command (a named prompt template).
 #[derive(Debug, Clone)]
 pub struct Command {
@@ -50,14 +52,17 @@ impl Command {
             .ok_or_else(|| anyhow::anyhow!("COMMAND.md frontmatter is not terminated by `---`"))?;
         let fm: Frontmatter = serde_yml::from_str(&rest[..end])
             .map_err(|e| anyhow::anyhow!("invalid COMMAND.md frontmatter: {e}"))?;
-        if fm.name.trim().is_empty() {
-            anyhow::bail!("COMMAND.md frontmatter is missing `name`");
-        }
+
+        let name = security::sanitize_single_line(&fm.name);
+        security::validate_command_name(&name)?;
+        let description = security::sanitize_single_line(&fm.description);
+        security::validate_len(&description, security::MAX_DESCRIPTION, "description")?;
+
         let after = &rest[end + 4..];
         let body = after.strip_prefix('\n').unwrap_or(after).trim().to_string();
         Ok(Self {
-            name: fm.name,
-            description: fm.description,
+            name,
+            description,
             body,
         })
     }
@@ -104,19 +109,31 @@ impl CommandRegistry {
 
     /// Load every `<root>/<name>/COMMAND.md` and any top-level `<root>/*.md`.
     pub fn from_dir(root: impl AsRef<Path>) -> std::io::Result<Self> {
-        let mut commands = Vec::new();
+        let mut commands: Vec<Command> = Vec::new();
         let mut consider = |path: &Path| {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                match Command::parse(&text) {
-                    Ok(cmd) => commands.push(cmd),
-                    Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "skipping invalid COMMAND.md")
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            match Command::parse(&text) {
+                Ok(cmd) => {
+                    if commands.iter().any(|c| c.name == cmd.name) {
+                        tracing::warn!(command = %cmd.name, path = %path.display(), "duplicate command name; keeping the first");
+                    } else {
+                        commands.push(cmd);
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "skipping invalid COMMAND.md")
                 }
             }
         };
         for entry in std::fs::read_dir(root)?.flatten() {
             let path = entry.path();
+            // Skip hidden entries (.git, dotfiles, …).
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             if path.is_dir() {
                 let cmd = path.join("COMMAND.md");
                 if cmd.is_file() {
@@ -188,6 +205,47 @@ mod tests {
         assert_eq!(split_invocation("/help"), Some(("help", "")));
         assert_eq!(split_invocation("not a command"), None);
         assert_eq!(split_invocation("/"), None);
+    }
+
+    #[test]
+    fn parse_hardens_fields() {
+        // multi-line description collapses to one line
+        let c = cmd("---\nname: x\ndescription: |\n  one\n  two\n---\nbody");
+        assert_eq!(c.description, "one two");
+        // missing/empty description rejected
+        assert!(Command::parse("---\nname: x\n---\nbody").is_err());
+        // whitespace-in-name rejected (uninvokable as a slash command)
+        assert!(Command::parse("---\nname: two words\ndescription: d\n---\nb").is_err());
+        // over-long name rejected
+        let long = "n".repeat(65);
+        assert!(Command::parse(&format!("---\nname: {long}\ndescription: d\n---\nb")).is_err());
+    }
+
+    #[test]
+    fn from_dir_skips_dotfiles_and_dedupes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            "review/COMMAND.md",
+            "---\nname: review\ndescription: a\n---\nA",
+        );
+        // a top-level dup of "review" — kept-first, warned
+        write(
+            "review-again.md",
+            "---\nname: review\ndescription: b\n---\nB",
+        );
+        // a dotfile is ignored
+        write(".secret.md", "---\nname: secret\ndescription: c\n---\nC");
+
+        let reg = CommandRegistry::from_dir(root).unwrap();
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("review").is_some());
+        assert!(reg.get("secret").is_none());
     }
 
     #[test]

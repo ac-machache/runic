@@ -15,7 +15,11 @@
 
 pub mod def;
 pub mod delegate;
+pub mod dirs;
 pub mod loader;
+mod security;
+
+pub use dirs::Dirs;
 
 pub use def::{AgentDef, AgentRoster};
 pub use delegate::{

@@ -146,8 +146,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::provider::BuiltinProvider;
+    use crate::storage::MemStorage;
     use crate::store::{BoundedMemoryStore, Target};
-    use runic_filesystem::{FilesystemBackend, MemoryFs};
 
     /// A fake external provider that records the lifecycle fan-out and supplies
     /// a per-turn prefetch.
@@ -178,7 +178,7 @@ mod tests {
     }
 
     async fn builtin_with(entry: &str) -> Arc<BuiltinProvider> {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let store = Arc::new(BoundedMemoryStore::new(backend));
         store.add(Target::Memory, entry).await.unwrap();
         Arc::new(BuiltinProvider::new(store))
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefetch_is_empty_when_nothing_recalled() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
             backend,
         ))));
@@ -233,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_are_gathered_across_providers() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
             backend,
         ))));

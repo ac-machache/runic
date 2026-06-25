@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use runic_agent::Agent;
-use runic_filesystem::FilesystemBackend;
 use runic_mcp::McpConnection;
 use runic_memory::Memory;
 use runic_provider::Provider;
-use runic_skills::Skills;
+use runic_skills::SkillSet;
 use runic_subagent::{ChildBuilder, Subagents};
 use runic_substrate::Sessions;
 use runic_tools::Tools;
@@ -20,9 +19,8 @@ pub struct Assembly {
     pub provider: Arc<dyn Provider>,
     pub model: String,
     pub instructions: String,
-    pub workspace: Arc<dyn FilesystemBackend>,
     pub memory: Option<Memory>,
-    pub skills: Option<Skills>,
+    pub skills: Option<Arc<SkillSet>>,
     pub subagents: Option<Subagents>,
     pub mcp: Option<McpConnection>,
     pub sessions: Option<Sessions>,
@@ -42,7 +40,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         ctx.memory(store, true, true).await;
     }
     if let Some(s) = &a.skills {
-        ctx.skills(&s.registry());
+        ctx.skills(s);
     }
     if let Some(s) = &a.subagents {
         ctx.subagents(&s.roster());
@@ -57,7 +55,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
 
     // ── tools ──────────────────────────────────────────────────────────────
     if let Some(t) = &a.tools {
-        for tool in t.collect(a.workspace.clone()) {
+        for tool in t.collect() {
             b = b.tool(tool);
         }
     }
@@ -68,7 +66,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         b = b.tool(tool);
     }
     if let Some(s) = &a.skills
-        && let Some(tool) = s.tools()
+        && let Some(tool) = s.view_tool()
     {
         b = b.tool(tool);
     }
@@ -76,7 +74,6 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         let child: Arc<dyn ChildBuilder> = Arc::new(FoundryChildBuilder {
             provider: a.provider.clone(),
             model: a.model.clone(),
-            fs: a.workspace.clone(),
         });
         if let Some(tool) = s.tool(child) {
             b = b.tool(tool);

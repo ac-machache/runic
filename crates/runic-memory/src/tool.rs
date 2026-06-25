@@ -187,12 +187,12 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_filesystem::{FilesystemBackend, MemoryFs};
+    use crate::storage::MemStorage;
     use runic_tool::ToolContext;
     use std::sync::Arc;
 
     fn make() -> (MemoryTool, Arc<BoundedMemoryStore>) {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let store = Arc::new(BoundedMemoryStore::new(backend));
         (MemoryTool::new(store.clone()), store)
     }

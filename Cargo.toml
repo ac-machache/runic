@@ -9,7 +9,6 @@ members = [
     "crates/runic-hook",
     "crates/runic-agent",
     "crates/runic-subagent",
-    "crates/runic-filesystem",
     "crates/runic-tools",
     "crates/runic-skills",
     "crates/runic-commands",

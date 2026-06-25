@@ -1,6 +1,6 @@
-//! `Dirs` — flexible directory-path input for loaders: accept one path, a
-//! `Vec` of paths, or a `HashMap` whose values are paths, and normalize to
-//! `Vec<PathBuf>`.
+//! `Dirs` — flexible directory-path input for the subagent loader: accept one
+//! path, a `Vec` of paths, or a `HashMap` whose values are paths, and normalize
+//! to `Vec<PathBuf>`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

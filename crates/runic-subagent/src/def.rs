@@ -14,8 +14,12 @@
 //! ```
 
 use std::path::Path;
+use std::sync::Arc;
 
+use runic_tool::Tool;
 use serde::Deserialize;
+
+use crate::security;
 
 /// YAML frontmatter fields (kebab-case on the wire).
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -74,21 +78,55 @@ impl AgentDef {
 
         let fm: Frontmatter = serde_yml::from_str(fm_str)
             .map_err(|e| anyhow::anyhow!("invalid AGENT.md frontmatter: {e}"))?;
-        if fm.name.trim().is_empty() {
-            anyhow::bail!("AGENT.md frontmatter is missing `name`");
-        }
+
+        let name = security::sanitize_single_line(&fm.name);
+        security::validate_len(&name, security::MAX_NAME, "name")?;
+        let description = security::sanitize_single_line(&fm.description);
+        security::validate_len(&description, security::MAX_DESCRIPTION, "description")?;
+
+        let provider = sanitize_opt(fm.provider, security::MAX_PROVIDER, "provider")?;
+        let model = sanitize_opt(fm.model, security::MAX_MODEL, "model")?;
+        let allowed_tools =
+            security::sanitize_list(fm.allowed_tools, security::MAX_LIST, "allowed_tools")?;
+        let skills = security::sanitize_list(fm.skills, security::MAX_LIST, "skills")?;
 
         Ok(Self {
-            name: fm.name,
-            description: fm.description,
-            provider: fm.provider,
-            model: fm.model,
-            allowed_tools: fm.allowed_tools,
-            skills: fm.skills,
+            name,
+            description,
+            provider,
+            model,
+            allowed_tools,
+            skills,
             max_turns: fm.max_turns,
             system_prompt: body.trim().to_string(),
         })
     }
+
+    /// Narrow a parent tool pool to what this agent may use — the no-escalation
+    /// rule made real. An empty `allowed_tools` inherits the whole pool
+    /// (back-compat); names not present in the pool are simply not granted.
+    /// `ChildBuilder` implementations must route their tools through this.
+    pub fn scope_tools(&self, pool: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
+        if self.allowed_tools.is_empty() {
+            return pool.to_vec();
+        }
+        pool.iter()
+            .filter(|t| self.allowed_tools.iter().any(|a| a == t.name()))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Sanitize an optional single-line override, dropping it if it sanitizes to
+/// empty and length-checking it otherwise.
+fn sanitize_opt(value: Option<String>, max: usize, field: &str) -> anyhow::Result<Option<String>> {
+    let Some(raw) = value else { return Ok(None) };
+    let s = security::sanitize_single_line(&raw);
+    if s.is_empty() {
+        return Ok(None);
+    }
+    security::validate_len(&s, max, field)?;
+    Ok(Some(s))
 }
 
 /// A set of delegatable subagents — the `delegate` tool's roster.
@@ -181,6 +219,80 @@ mod tests {
     fn rejects_missing_frontmatter() {
         assert!(AgentDef::parse_markdown("no frontmatter here").is_err());
         assert!(AgentDef::parse_markdown("---\ndescription: x\n---\nbody").is_err()); // no name
+    }
+
+    #[test]
+    fn hardens_fields() {
+        // multi-line description collapses to one line
+        let def = AgentDef::parse_markdown(
+            "---\nname: a\ndescription: |\n  line one\n  line two\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(def.description, "line one line two");
+
+        // missing/empty description is rejected
+        assert!(AgentDef::parse_markdown("---\nname: a\n---\nbody").is_err());
+
+        // over-long name / model rejected
+        let long = "n".repeat(65);
+        assert!(
+            AgentDef::parse_markdown(&format!("---\nname: {long}\ndescription: d\n---\nb"))
+                .is_err()
+        );
+        let long_model = "m".repeat(129);
+        assert!(
+            AgentDef::parse_markdown(&format!(
+                "---\nname: a\ndescription: d\nmodel: {long_model}\n---\nb"
+            ))
+            .is_err()
+        );
+
+        // allowed_tools deduped + sanitized
+        let def = AgentDef::parse_markdown(
+            "---\nname: a\ndescription: d\ntools: [read, read, grep]\n---\nb",
+        )
+        .unwrap();
+        assert_eq!(def.allowed_tools, vec!["read", "grep"]);
+    }
+
+    #[test]
+    fn scope_tools_enforces_allow_list() {
+        use async_trait::async_trait;
+        use runic_tool::{ToolContext, ToolResult};
+
+        struct T(&'static str);
+        #[async_trait]
+        impl Tool for T {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn description(&self) -> &str {
+                "t"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _a: serde_json::Value,
+                _c: &ToolContext,
+            ) -> anyhow::Result<ToolResult> {
+                Ok(ToolResult::ok(""))
+            }
+        }
+
+        let pool: Vec<Arc<dyn Tool>> = vec![Arc::new(T("a")), Arc::new(T("b")), Arc::new(T("c"))];
+
+        let scoped =
+            AgentDef::parse_markdown("---\nname: x\ndescription: d\ntools: [a, c, ghost]\n---\nb")
+                .unwrap();
+        let scoped_tools = scoped.scope_tools(&pool);
+        let got: Vec<&str> = scoped_tools.iter().map(|t| t.name()).collect();
+        assert_eq!(got, vec!["a", "c"]); // ghost (not in pool) silently dropped
+
+        // empty allowed_tools inherits the whole pool
+        let open = AgentDef::parse_markdown("---\nname: x\ndescription: d\n---\nb").unwrap();
+        assert_eq!(open.scope_tools(&pool).len(), 3);
     }
 
     #[test]

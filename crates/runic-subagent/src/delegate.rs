@@ -42,9 +42,11 @@ pub struct DelegationCtx {
 }
 
 /// Builds the child [`Agent`] for a subagent definition. The app implements
-/// this — it owns provider resolution and tool scoping (and MUST enforce the
-/// no-escalation rule: a child's `allowed_tools` come only from the parent's
-/// pool). `runic-subagent` owns the orchestration (depth/budget/cancel).
+/// this — it owns provider resolution and tool scoping. It MUST enforce the
+/// no-escalation rule by routing the parent's tool pool through
+/// [`AgentDef::scope_tools`], which keeps only the tools the def's
+/// `allowed_tools` permits. `runic-subagent` owns the orchestration
+/// (depth/budget/cancel).
 #[async_trait]
 pub trait ChildBuilder: Send + Sync {
     async fn build(&self, def: &AgentDef, dctx: &DelegationCtx) -> anyhow::Result<Agent>;

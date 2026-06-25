@@ -7,6 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 
 runic-skills = { path = "../runic-skills" }
@@ -15,3 +17,4 @@ runic-commands = { path = "../runic-commands" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

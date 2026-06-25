@@ -5,8 +5,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use runic_filesystem::Dirs;
 use runic_tool::Tool;
+
+use crate::dirs::Dirs;
 
 use crate::{AgentDef, AgentRoster, ChildBuilder, DelegateTool};
 

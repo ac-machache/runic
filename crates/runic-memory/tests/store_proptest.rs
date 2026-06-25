@@ -2,7 +2,7 @@
 //! safe to expose as a model-writable tool: the cap is NEVER breached, entries
 //! round-trip through the `§` format, and `add` is idempotent.
 //!
-//! The store is async, so each generated case drives a fresh in-RAM `MemoryFs`
+//! The store is async, so each generated case drives a fresh in-RAM `MemStorage`
 //! on a small current-thread runtime.
 
 use std::sync::Arc;
@@ -10,13 +10,13 @@ use std::sync::Arc;
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
-use runic_filesystem::MemoryFs;
+use runic_memory::MemStorage;
 use runic_memory::{BoundedMemoryStore, Target};
 
 const CAP: usize = 200;
 
 fn store() -> BoundedMemoryStore {
-    BoundedMemoryStore::new(Arc::new(MemoryFs::new()))
+    BoundedMemoryStore::new(Arc::new(MemStorage::new()))
         .with_limits(CAP, CAP)
         .with_threat_scanning(false) // exercise arbitrary content, not the scanner
 }

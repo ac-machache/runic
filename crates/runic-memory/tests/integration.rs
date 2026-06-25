@@ -1,9 +1,9 @@
-//! Integration tests against the real `LocalFsBackend` so we exercise the
+//! Integration tests against the real `LocalStorage` so we exercise the
 //! actual filesystem path the REPL uses.
 
 use std::sync::Arc;
 
-use runic_filesystem::{FilesystemBackend, LocalFs};
+use runic_memory::LocalStorage;
 use runic_memory::{BoundedMemoryStore, MemoryTool, Target};
 use runic_tool::{Tool, ToolContext};
 use tempfile::tempdir;
@@ -15,7 +15,7 @@ fn ctx() -> ToolContext {
 #[tokio::test]
 async fn writes_land_under_memory_subdir_on_disk() {
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
+    let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
     let store = BoundedMemoryStore::new(backend);
 
     store.add(Target::User, "user prefers Rust").await.unwrap();
@@ -28,7 +28,7 @@ async fn writes_land_under_memory_subdir_on_disk() {
 #[tokio::test]
 async fn second_entry_uses_section_sign_delimiter() {
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
+    let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
     let store = BoundedMemoryStore::new(backend);
 
     store.add(Target::Memory, "first").await.unwrap();
@@ -47,7 +47,7 @@ async fn tool_writes_show_up_when_a_separate_reader_reads() {
     // Models the REPL flow: the tool writes through one Arc<store>,
     // a separate read path picks up the changes.
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
+    let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
     let store = Arc::new(BoundedMemoryStore::new(backend.clone()));
     let tool = MemoryTool::new(store.clone());
 
@@ -71,7 +71,7 @@ async fn concurrent_adds_dont_lose_writes() {
     // Hammer the same store from many tasks at once; every successful
     // add must show up in the final read.
     let dir = tempdir().unwrap();
-    let backend: Arc<dyn FilesystemBackend> = Arc::new(LocalFs::new(dir.path()));
+    let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
     let store = Arc::new(BoundedMemoryStore::new(backend).with_limits(100_000, 100_000));
 
     let mut joins = Vec::new();

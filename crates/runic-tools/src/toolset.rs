@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use runic_filesystem::FilesystemBackend;
 use runic_tool::Tool;
 
 use crate::{
@@ -12,9 +11,8 @@ use crate::{
     default_tools,
 };
 
-/// Start configuring a native tool set. The base set (read/write/edit/ls/glob/
-/// grep + apply_patch + calculator + system_time) is always included by
-/// [`Tools::collect`]; the rest are opt-in.
+/// Start configuring a native tool set. The base set (`calculator` +
+/// `system_time`) is always included by [`Tools::collect`]; the rest are opt-in.
 pub fn tools() -> Tools {
     Tools {
         web: false,
@@ -49,9 +47,9 @@ impl Tools {
         self
     }
 
-    /// Build the tool set over `workspace` (the agent's filesystem).
-    pub fn collect(&self, workspace: Arc<dyn FilesystemBackend>) -> Vec<Arc<dyn Tool>> {
-        let mut out = default_tools(workspace);
+    /// Build the configured tool set (always-on base + selected opt-ins).
+    pub fn collect(&self) -> Vec<Arc<dyn Tool>> {
+        let mut out = default_tools();
         if self.web {
             out.push(Arc::new(WebFetchTool::new()));
         }

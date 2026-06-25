@@ -19,10 +19,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use runic_filesystem::{FilesystemBackend, FsError};
 use tokio::sync::Mutex;
 
 use crate::error::MemoryError;
+use crate::storage::MemoryStorage;
 use crate::threats;
 
 /// Section-sign delimiter between entries. Same byte the hermes file
@@ -75,7 +75,7 @@ impl Target {
 }
 
 pub struct BoundedMemoryStore {
-    storage: Arc<dyn FilesystemBackend>,
+    storage: Arc<dyn MemoryStorage>,
     memory_limit: usize,
     user_limit: usize,
     /// In-process RMW serializer. Composes with the cross-process flock.
@@ -89,7 +89,7 @@ pub struct BoundedMemoryStore {
 }
 
 impl BoundedMemoryStore {
-    pub fn new(storage: Arc<dyn FilesystemBackend>) -> Self {
+    pub fn new(storage: Arc<dyn MemoryStorage>) -> Self {
         Self {
             storage,
             memory_limit: DEFAULT_MEMORY_LIMIT,
@@ -131,10 +131,14 @@ impl BoundedMemoryStore {
 
     /// Read entries from disk. Missing file → empty list.
     pub async fn read(&self, target: Target) -> Result<Vec<String>, MemoryError> {
-        match self.storage.read(target.key(), 0, usize::MAX).await {
-            Ok(r) => Ok(parse_entries(&r.content)),
-            Err(FsError::NotFound(_)) => Ok(Vec::new()),
-            Err(e) => Err(MemoryError::Storage(e.to_string())),
+        match self
+            .storage
+            .read(target.key())
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?
+        {
+            Some(content) => Ok(parse_entries(&content)),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -273,10 +277,14 @@ impl BoundedMemoryStore {
     /// the raw bytes to `{key}.bak.<unix-ts>` and return `DriftDetected`.
     /// MUST be called with `write_lock` held.
     async fn check_drift_or_backup(&self, target: Target) -> Result<(), MemoryError> {
-        let raw = match self.storage.read(target.key(), 0, usize::MAX).await {
-            Ok(r) => r.content,
-            Err(FsError::NotFound(_)) => return Ok(()),
-            Err(e) => return Err(MemoryError::Storage(e.to_string())),
+        let raw = match self
+            .storage
+            .read(target.key())
+            .await
+            .map_err(|e| MemoryError::Storage(e.to_string()))?
+        {
+            Some(content) => content,
+            None => return Ok(()),
         };
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -308,10 +316,7 @@ impl BoundedMemoryStore {
     /// MUST be called with `write_lock` held — does NOT re-acquire it.
     async fn write_unlocked(&self, target: Target, entries: &[String]) -> Result<(), MemoryError> {
         let content = render_entries(entries);
-        // The backend's `write` is create-only; delete first to overwrite. The
-        // surrounding lock (in-process mutex + optional flock) makes the
-        // delete+write safe against interleaving.
-        let _ = self.storage.delete(target.key()).await;
+        // Whole-file overwrite, serialized by the in-process mutex + optional flock.
         self.storage
             .write(target.key(), &content)
             .await
@@ -449,10 +454,10 @@ fn total_chars(entries: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_filesystem::MemoryFs;
+    use crate::storage::{MemStorage, MemoryStorage};
 
     fn store() -> BoundedMemoryStore {
-        BoundedMemoryStore::new(Arc::new(MemoryFs::new()))
+        BoundedMemoryStore::new(Arc::new(MemStorage::new()))
     }
 
     #[tokio::test]
@@ -573,7 +578,7 @@ mod tests {
 
     #[tokio::test]
     async fn separate_instances_share_backend() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let s1 = BoundedMemoryStore::new(backend.clone());
         let s2 = BoundedMemoryStore::new(backend);
         s1.add(Target::User, "written by s1").await.unwrap();
@@ -675,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn drift_detected_when_external_edit_breaks_roundtrip() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let s = BoundedMemoryStore::new(backend.clone());
 
         // External editor wrote per-entry trailing whitespace that our
@@ -691,11 +696,7 @@ mod tests {
             MemoryError::DriftDetected { target, backup_key } => {
                 assert_eq!(target, "user");
                 assert!(backup_key.starts_with("memory/USER.md.bak."));
-                let saved = backend
-                    .read(&backup_key, 0, usize::MAX)
-                    .await
-                    .unwrap()
-                    .content;
+                let saved = backend.read(&backup_key).await.unwrap().unwrap();
                 assert!(saved.contains("first entry   "));
                 assert!(saved.contains("second entry"));
             }
@@ -705,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn entry_over_cap_on_disk_is_treated_as_drift() {
-        let backend: Arc<dyn FilesystemBackend> = Arc::new(MemoryFs::new());
+        let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
         let s = BoundedMemoryStore::new(backend.clone()).with_limits(20, 20);
         // External writer slammed in a huge entry that exceeds our cap.
         let huge = "x".repeat(40);

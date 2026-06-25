@@ -1,9 +1,6 @@
 //! `runic-tools` — the agent's built-in, standalone tools.
 //!
 //! Native tools that don't belong to a specific subsystem:
-//! - **filesystem** — `read_file` / `write_file` / `edit_file` / `ls` / `glob`
-//!   / `grep` + `apply_patch`, thin wrappers over a
-//!   [`FilesystemBackend`](runic_filesystem::FilesystemBackend);
 //! - **utility** — `calculator`, `system_time`.
 //! - **web** — `web_fetch` (SSRF-guarded) + `web_search` (over a pluggable
 //!   [`web::SearchProvider`]).
@@ -24,14 +21,11 @@
 
 use std::sync::Arc;
 
-use runic_filesystem::FilesystemBackend;
 use runic_tool::Tool;
 
 pub mod calc;
 pub mod composio;
-pub mod fs;
 pub mod hitl;
-pub mod patch;
 pub mod time;
 pub mod toolset;
 pub mod weather;
@@ -39,9 +33,7 @@ pub mod web;
 
 pub use calc::CalculatorTool;
 pub use composio::ComposioTool;
-pub use fs::{EditFileTool, GlobTool, GrepTool, LsTool, ReadFileTool, WriteFileTool, fs_tools};
 pub use hitl::{AskUserTool, EscalateToHumanTool};
-pub use patch::ApplyPatchTool;
 pub use time::SystemTimeTool;
 pub use toolset::{Tools, tools};
 pub use weather::{WeatherHistoryTool, WeatherTool};
@@ -55,13 +47,9 @@ pub use web::{
 #[doc(hidden)]
 pub use web::{decode_entities, html_to_text};
 
-/// The native tools bound to a filesystem backend: the six fs tools +
-/// `apply_patch` + `calculator` + `system_time`. The app adds subsystem tools
+/// The always-on, fs-free base tools: `calculator` + `system_time`. The app
+/// adds opt-in tools (web/weather/composio/hitl) and subsystem tools
 /// (skills/MCP/subagents/search) and registers the lot on the agent.
-pub fn default_tools(fs: Arc<dyn FilesystemBackend>) -> Vec<Arc<dyn Tool>> {
-    let mut tools = fs_tools(fs.clone());
-    tools.push(Arc::new(ApplyPatchTool(fs)));
-    tools.push(Arc::new(CalculatorTool));
-    tools.push(Arc::new(SystemTimeTool));
-    tools
+pub fn default_tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(CalculatorTool), Arc::new(SystemTimeTool)]
 }

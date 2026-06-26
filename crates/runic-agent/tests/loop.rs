@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use runic_agent::{Agent, AgentEvent, CancelToken, RunContext};
+use runic_hook::{HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_state::AgentState;
 use runic_tool::{ActivatedToolSet, Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 
@@ -153,6 +155,98 @@ impl Tool for Echo {
     }
 }
 
+struct HookProbe {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl WriteHook for HookProbe {
+    fn name(&self) -> &str {
+        "hook-probe"
+    }
+
+    fn priority(&self) -> i32 {
+        -10
+    }
+
+    async fn before_agent(&self, _state: &mut AgentState) -> HookOutcome {
+        self.log.lock().unwrap().push("write:before_agent".into());
+        HookOutcome::Continue
+    }
+
+    async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        call.input = serde_json::json!({ "rewritten": true });
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("write:before_tool:{}", call.input));
+        HookOutcome::SubstituteToolResult(ToolResult::ok("cached by hook"))
+    }
+
+    async fn after_tool(
+        &self,
+        _state: &mut AgentState,
+        call: &ToolCall,
+        result: &ToolResult,
+    ) -> HookOutcome {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("write:after_tool:{}:{}", call.input, result.output));
+        HookOutcome::Continue
+    }
+
+    async fn after_agent(&self, _state: &mut AgentState) -> HookOutcome {
+        self.log.lock().unwrap().push("write:after_agent".into());
+        HookOutcome::Continue
+    }
+}
+
+struct ReadProbe {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ReadHook for ReadProbe {
+    fn name(&self) -> &str {
+        "read-probe"
+    }
+
+    async fn before_tool(&self, _state: &AgentState, call: &ToolCall) -> HookSignal {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("read:before_tool:{}", call.input));
+        HookSignal::Continue
+    }
+
+    async fn after_tool(
+        &self,
+        _state: &AgentState,
+        call: &ToolCall,
+        result: &ToolResult,
+    ) -> HookSignal {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("read:after_tool:{}:{}", call.input, result.output));
+        HookSignal::Continue
+    }
+}
+
+struct StopBeforeTool;
+
+#[async_trait]
+impl ReadHook for StopBeforeTool {
+    fn name(&self) -> &str {
+        "stop-before-tool"
+    }
+
+    async fn before_tool(&self, _state: &AgentState, _call: &ToolCall) -> HookSignal {
+        HookSignal::Stop
+    }
+}
+
 #[tokio::test]
 async fn text_only_turn_ends_the_run() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("hello there")]));
@@ -201,6 +295,86 @@ async fn tool_call_round_trips_then_finishes() {
         _ => false,
     });
     assert!(has_tool_result, "tool result should be in history");
+}
+
+#[tokio::test]
+async fn hooks_rewrite_and_substitute_tool_results_in_the_loop() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "echo", serde_json::json!({ "original": true })),
+        text_response("done"),
+    ]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(Echo))
+        .write_hook(Arc::new(HookProbe { log: log.clone() }))
+        .read_hook(Arc::new(ReadProbe { log: log.clone() }))
+        .build();
+
+    let outcome = agent.run("use the tool").await.unwrap();
+
+    assert_eq!(outcome.total_turns, 2);
+    let log = log.lock().unwrap().clone();
+    assert!(
+        log.iter()
+            .any(|entry| entry == "write:before_tool:{\"rewritten\":true}"),
+        "write hook should rewrite the call before read hooks see it: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry == "read:before_tool:{\"rewritten\":true}"),
+        "read hook should observe the rewritten call: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry.contains("write:after_tool:{\"rewritten\":true}:cached by hook")),
+        "write after_tool should receive substituted result: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry.contains("read:after_tool:{\"rewritten\":true}:cached by hook")),
+        "read after_tool should receive substituted result: {log:?}"
+    );
+
+    let messages = agent.state().messages_for_provider();
+    let cached = messages.iter().any(|m| {
+        matches!(&m.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b| matches!(b,
+                ContentBlock::ToolResult { content, .. } if content == "cached by hook")))
+    });
+    let actual_echo_ran = messages.iter().any(|m| {
+        matches!(&m.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b| matches!(b,
+                ContentBlock::ToolResult { content, .. } if content.contains("echo:"))))
+    });
+    assert!(cached, "substituted tool result should be persisted");
+    assert!(
+        !actual_echo_ran,
+        "substitution must skip real tool execution"
+    );
+}
+
+#[tokio::test]
+async fn read_hook_stop_halts_before_tool_execution() {
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response(
+        "t1",
+        "echo",
+        serde_json::json!({}),
+    )]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(Echo))
+        .read_hook(Arc::new(StopBeforeTool))
+        .build();
+
+    let err = agent.run("use the tool").await.unwrap_err();
+
+    assert!(matches!(err, runic_agent::AgentError::HookStop));
+    let tool_result_written = agent.state().messages_for_provider().iter().any(|m| {
+        matches!(&m.content, MessageContent::Blocks(blocks)
+            if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. })))
+    });
+    assert!(!tool_result_written, "stopped tools should not execute");
 }
 
 #[tokio::test]

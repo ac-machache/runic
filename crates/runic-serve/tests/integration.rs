@@ -14,7 +14,7 @@ use tower::ServiceExt;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
-use runic_substrate::MemorySessionStore;
+use runic_substrate::{MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 use serde_json::Value;
 
@@ -74,8 +74,13 @@ impl AgentFactory for ScriptedFactory {
 }
 
 fn scripted_router() -> axum::Router {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    scripted_router_with_store(store)
+}
+
+fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
     router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
+        session_store: store,
         agent_factory: Arc::new(ScriptedFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
@@ -103,6 +108,36 @@ async fn body_to_json(resp: axum::response::Response) -> Value {
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn sse_data(body: &str) -> Vec<Value> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .map(|json| serde_json::from_str(json.trim()).unwrap())
+        .collect()
+}
+
+fn sse_ids(body: &str) -> Vec<u64> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("id:"))
+        .map(|id| id.trim().parse().unwrap())
+        .collect()
+}
+
+async fn wait_for_stored_events(
+    store: &dyn SessionStore,
+    tenant: &str,
+    thread_id: &str,
+    min_events: usize,
+) -> Vec<runic_substrate::StoredEvent> {
+    for _ in 0..50 {
+        let events = store.read(tenant, thread_id).await.unwrap();
+        if events.len() >= min_events {
+            return events;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("stored event count did not reach {min_events}");
 }
 
 #[tokio::test]
@@ -292,6 +327,100 @@ async fn run_streams_agent_events() {
         body.contains("pong"),
         "streamed text missing from body: {body}"
     );
+}
+
+#[tokio::test]
+async fn run_persists_events_for_thread_history() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(run_request("persisted-thread", "remember me"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_to_string(resp).await.contains("pong"));
+
+    let events = wait_for_stored_events(store.as_ref(), "alice", "persisted-thread", 5).await;
+    assert!(events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if msg.content.text_content().contains("remember me"))
+    }));
+    assert!(events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if msg.content.text_content().contains("pong"))
+    }));
+    assert!(events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::RunEnd { outcome, .. }
+            if outcome.stop_reason.as_deref() == Some("end_turn"))
+    }));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/threads/persisted-thread/events")
+                .header("x-runic-tenant", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["events"].as_array().unwrap().len(), events.len());
+}
+
+#[tokio::test]
+async fn replay_run_respects_last_event_id_and_finishes_closed_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(run_request("replay-thread", "first"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let live_body = body_to_string(resp).await;
+    let run_id = sse_data(&live_body)
+        .into_iter()
+        .find_map(|event| {
+            (event["type"] == "run_start").then(|| event["run_id"].as_str().unwrap().to_string())
+        })
+        .expect("live stream contains run_start");
+
+    let stored = wait_for_stored_events(store.as_ref(), "alice", "replay-thread", 5).await;
+    let after_seq = stored
+        .iter()
+        .find(|stored| matches!(stored.event, runic_state::SessionEvent::RunStart { .. }))
+        .expect("run start persisted")
+        .seq;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/threads/replay-thread/runs/{run_id}/stream"))
+                .header("x-runic-tenant", "alice")
+                .header("last-event-id", after_seq.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let replay_body = tokio::time::timeout(std::time::Duration::from_secs(1), body_to_string(resp))
+        .await
+        .expect("replay stream should finish for a closed run");
+
+    assert!(!replay_body.contains("event: run_start"));
+    assert!(replay_body.contains("event: message"));
+    assert!(replay_body.contains("event: run_end"));
+    assert!(replay_body.contains("event: done"));
+    assert!(sse_ids(&replay_body).iter().all(|seq| *seq > after_seq));
 }
 
 #[tokio::test]

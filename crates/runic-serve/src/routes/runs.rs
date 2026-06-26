@@ -184,10 +184,18 @@ pub async fn replay_run(
             yield Ok(to_sse(&wire, Some(seq)));
         }
 
-        // 2) attach to the live broadcast for anything still in flight.
+        // 2) attach to the live broadcast only if this run is still in flight.
         let rx = {
             let agent = agent_arc.lock().await;
-            agent.state().subscribe_events()
+            let is_live = agent
+                .state()
+                .current_run()
+                .is_some_and(|run| run.id == run_id);
+            if is_live {
+                agent.state().subscribe_events()
+            } else {
+                None
+            }
         };
         let Some(rx) = rx else {
             yield Ok(to_sse(&WireEvent::Done { total_turns: 0 }, None));

@@ -163,6 +163,26 @@ async fn child_gets_base_tools_only() {
 }
 
 #[tokio::test]
+async fn child_allowed_tools_narrows_even_base_tools() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let def = def(
+        "---\nname: reviewer\ndescription: reviews\nallowed-tools: [calculator]\n---\nChild instructions.",
+    );
+    let mut agent = builder(provider.clone()).build(&def, &ctx()).await.unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let names: Vec<String> = provider
+        .last_request()
+        .tools
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert_eq!(names, vec!["calculator"]);
+}
+
+#[tokio::test]
 async fn child_respects_max_turns() {
     let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response("calculator")]));
     let def =

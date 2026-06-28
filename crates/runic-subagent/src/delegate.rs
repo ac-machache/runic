@@ -4,7 +4,7 @@
 //!
 //! Safeguards (all from ZeroClaw):
 //! - **depth limit** — a child at `max_depth` can't delegate further;
-//! - **no-escalation** — the [`ChildBuilder`] scopes the child's tools to a
+//! - **no-escalation** — the [`SubagentBuilder`] scopes the child's tools to a
 //!   subset of the parent's (rejecting unknown names);
 //! - **spawn budget** — caps total + concurrent child runs per parent;
 //! - **cancellation cascade** — children carry a [`CancelToken`]; a background
@@ -31,14 +31,18 @@ pub const DEFAULT_MAX_TOTAL_SPAWNS: u32 = 16;
 /// Default cap on concurrently-running children.
 pub const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
-/// Context handed to a [`ChildBuilder`] — the child's depth (already
-/// incremented), the depth ceiling, and the cancel token to wire into the
-/// child's run.
+/// Context handed to a [`SubagentBuilder`] — the child's depth (already
+/// incremented), the depth ceiling, the cancel token, and the parent run's
+/// open config map, propagated to the child so per-run values (tenant ids,
+/// etc.) reach the child's tools/hooks. Open by design: add whatever the app
+/// needs onto `config` (it already carries `user_id`/`org_id` when set).
 #[derive(Clone)]
 pub struct DelegationCtx {
     pub depth: u32,
     pub max_depth: u32,
     pub cancel: CancelToken,
+    /// The parent run's open per-run config map, carried to the child.
+    pub config: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Builds the child [`Agent`] for a subagent definition. The app implements
@@ -48,7 +52,7 @@ pub struct DelegationCtx {
 /// `allowed_tools` permits. `runic-subagent` owns the orchestration
 /// (depth/budget/cancel).
 #[async_trait]
-pub trait ChildBuilder: Send + Sync {
+pub trait SubagentBuilder: Send + Sync {
     async fn build(&self, def: &AgentDef, dctx: &DelegationCtx) -> anyhow::Result<Agent>;
 }
 
@@ -129,7 +133,7 @@ pub struct BackgroundTask {
 /// The `delegate` tool.
 pub struct DelegateTool {
     roster: Arc<AgentRoster>,
-    builder: Arc<dyn ChildBuilder>,
+    builder: Arc<dyn SubagentBuilder>,
     depth: u32,
     max_depth: u32,
     budget: Arc<SpawnBudget>,
@@ -139,7 +143,7 @@ pub struct DelegateTool {
 
 impl DelegateTool {
     /// A root delegate tool (depth 0) with default safeguards.
-    pub fn new(roster: Arc<AgentRoster>, builder: Arc<dyn ChildBuilder>) -> Self {
+    pub fn new(roster: Arc<AgentRoster>, builder: Arc<dyn SubagentBuilder>) -> Self {
         Self {
             roster,
             builder,
@@ -173,15 +177,16 @@ impl DelegateTool {
         self.depth < self.max_depth
     }
 
-    fn child_ctx(&self, cancel: CancelToken) -> DelegationCtx {
+    fn child_ctx(&self, cancel: CancelToken, ctx: &ToolContext) -> DelegationCtx {
         DelegationCtx {
             depth: self.depth + 1,
             max_depth: self.max_depth,
             cancel,
+            config: ctx.config_map().clone(),
         }
     }
 
-    async fn delegate_one(&self, agent: &str, prompt: String) -> ToolResult {
+    async fn delegate_one(&self, agent: &str, prompt: String, ctx: &ToolContext) -> ToolResult {
         let Some(def) = self.roster.get(agent).cloned() else {
             return ToolResult::error(format!(
                 "unknown subagent '{agent}'. Available:\n{}",
@@ -192,7 +197,7 @@ impl DelegateTool {
             Ok(g) => g,
             Err(e) => return ToolResult::error(e),
         };
-        let dctx = self.child_ctx(self.cancel.clone());
+        let dctx = self.child_ctx(self.cancel.clone(), ctx);
         let result = run_child(&self.builder, &def, &dctx, &prompt).await;
         drop(guard);
         match result {
@@ -201,14 +206,19 @@ impl DelegateTool {
         }
     }
 
-    async fn delegate_parallel(&self, agents: &[String], prompt: String) -> ToolResult {
+    async fn delegate_parallel(
+        &self,
+        agents: &[String],
+        prompt: String,
+        ctx: &ToolContext,
+    ) -> ToolResult {
         let futures = agents.iter().map(|name| {
             let name = name.clone();
             let prompt = prompt.clone();
             let def = self.roster.get(&name).cloned();
             let builder = self.builder.clone();
             let acquired = self.budget.acquire();
-            let dctx = self.child_ctx(self.cancel.clone());
+            let dctx = self.child_ctx(self.cancel.clone(), ctx);
             async move {
                 let Some(def) = def else {
                     return format!("[{name}] error: unknown subagent");
@@ -229,7 +239,7 @@ impl DelegateTool {
         ToolResult::ok(outputs.join("\n\n---\n\n"))
     }
 
-    fn delegate_background(&self, agent: &str, prompt: String) -> ToolResult {
+    fn delegate_background(&self, agent: &str, prompt: String, ctx: &ToolContext) -> ToolResult {
         let Some(def) = self.roster.get(agent).cloned() else {
             return ToolResult::error(format!("unknown subagent '{agent}'"));
         };
@@ -253,7 +263,7 @@ impl DelegateTool {
 
         let builder = self.builder.clone();
         let tasks = self.tasks.clone();
-        let dctx = self.child_ctx(cancel);
+        let dctx = self.child_ctx(cancel, ctx);
         let tid = task_id.clone();
         tokio::spawn(async move {
             let _guard = guard; // hold the concurrent slot until done
@@ -325,13 +335,15 @@ impl DelegateTool {
 
 /// Build + run a child agent to completion; return its final assistant text.
 async fn run_child(
-    builder: &Arc<dyn ChildBuilder>,
+    builder: &Arc<dyn SubagentBuilder>,
     def: &AgentDef,
     dctx: &DelegationCtx,
     prompt: &str,
 ) -> anyhow::Result<String> {
     let mut child = builder.build(def, dctx).await?;
-    let rc = RunContext::new().with_cancel(dctx.cancel.clone());
+    let rc = RunContext::new()
+        .with_cancel(dctx.cancel.clone())
+        .with_config(dctx.config.clone());
     child
         .run_with(prompt.to_string(), rc)
         .await
@@ -388,7 +400,7 @@ impl Tool for DelegateTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let action = args
             .get("action")
@@ -426,7 +438,7 @@ impl Tool for DelegateTool {
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect();
                     if !agents.is_empty() {
-                        return Ok(self.delegate_parallel(&agents, full).await);
+                        return Ok(self.delegate_parallel(&agents, full, ctx).await);
                     }
                 }
 
@@ -440,9 +452,9 @@ impl Tool for DelegateTool {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if background {
-                    self.delegate_background(agent, full)
+                    self.delegate_background(agent, full, ctx)
                 } else {
-                    self.delegate_one(agent, full).await
+                    self.delegate_one(agent, full, ctx).await
                 }
             }
             other => ToolResult::error(format!("unknown action '{other}'")),

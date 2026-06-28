@@ -28,14 +28,14 @@ struct Frontmatter {
     name: String,
     #[serde(default)]
     description: String,
-    /// Named provider override (resolved by the app's `ChildBuilder`).
+    /// Named provider override (resolved by the app's `SubagentBuilder`).
     #[serde(default)]
     provider: Option<String>,
     /// Model id override.
     #[serde(default)]
     model: Option<String>,
     /// Tool allow-list by name. Must be a subset of the parent's tools — the
-    /// `ChildBuilder` rejects any name not in the parent pool (no escalation).
+    /// `SubagentBuilder` rejects any name not in the parent pool (no escalation).
     #[serde(default, alias = "tools")]
     allowed_tools: Vec<String>,
     /// Skill allow-list by name.
@@ -105,7 +105,7 @@ impl AgentDef {
     /// Narrow a parent tool pool to what this agent may use — the no-escalation
     /// rule made real. An empty `allowed_tools` inherits the whole pool
     /// (back-compat); names not present in the pool are simply not granted.
-    /// `ChildBuilder` implementations must route their tools through this.
+    /// `SubagentBuilder` implementations must route their tools through this.
     pub fn scope_tools(&self, pool: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
         if self.allowed_tools.is_empty() {
             return pool.to_vec();

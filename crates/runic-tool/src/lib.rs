@@ -150,6 +150,11 @@ impl ToolContext {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    /// The full per-run config map (e.g. to propagate to a delegated child).
+    pub fn config_map(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.config
+    }
+
     /// Set the per-run config map (builder-style).
     pub fn with_config(mut self, config: serde_json::Map<String, serde_json::Value>) -> Self {
         self.config = config;

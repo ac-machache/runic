@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic_agent::AgentError;
-use runic_foundry::FoundryChildBuilder;
+use runic_foundry::FoundrySubagentBuilder;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{AgentDef, ChildBuilder, DelegationCtx};
+use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -80,11 +80,12 @@ fn ctx() -> DelegationCtx {
         depth: 1,
         max_depth: 3,
         cancel: runic_agent::CancelToken::new(),
+        config: serde_json::Map::new(),
     }
 }
 
-fn builder(provider: Arc<dyn Provider>) -> FoundryChildBuilder {
-    FoundryChildBuilder {
+fn builder(provider: Arc<dyn Provider>) -> FoundrySubagentBuilder {
+    FoundrySubagentBuilder {
         provider,
         model: "parent-model".into(),
     }

@@ -7,6 +7,7 @@ use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderEr
 use runic_skills::SkillSet;
 use runic_subagent::subagents;
 use runic_substrate::sessions_memory;
+use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_tools::tools;
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -56,9 +57,14 @@ fn base_assembly(provider: Arc<dyn Provider>) -> Assembly {
         memory: None,
         skills: None,
         subagents: None,
+        subagent_builder: None,
         mcp: None,
         sessions: None,
         tools: None,
+        custom_tools: Vec::new(),
+        output_schema: None,
+        max_turns: None,
+        write_hooks: Vec::new(),
     }
 }
 
@@ -265,4 +271,45 @@ async fn memory_review_waits_until_interval() {
     agent.run("hello").await.unwrap();
 
     assert_eq!(provider.count(), 1);
+}
+
+struct EchoTool;
+#[async_trait]
+impl Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "echoes"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("echoed"))
+    }
+}
+
+#[tokio::test]
+async fn assemble_registers_custom_tools_and_output_schema() {
+    let provider = Arc::new(RecordingProvider::default());
+    let mut assembly = base_assembly(provider.clone());
+    assembly.custom_tools = vec![Arc::new(EchoTool)];
+    assembly.output_schema = Some(serde_json::json!({ "type": "object" }));
+    assembly.max_turns = Some(2);
+
+    let mut agent = assemble(&assembly, "alice", "s1").await;
+    agent.run("hello").await.unwrap();
+
+    let names: Vec<String> = provider
+        .last_request()
+        .tools
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert!(names.iter().any(|n| n == "echo"), "custom tool registered");
+    assert!(
+        names.iter().any(|n| n == "final_answer"),
+        "output_schema injects final_answer"
+    );
 }

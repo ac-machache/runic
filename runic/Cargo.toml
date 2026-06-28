@@ -14,16 +14,24 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+chrono = { workspace = true }
 dotenvy = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # New stack (path deps — not in workspace.dependencies yet).
 runic-agent = { path = "../crates/runic-agent" }
-runic-provider = { path = "../crates/runic-provider", features = ["anthropic", "openai"] }
+runic-provider = { path = "../crates/runic-provider", features = ["anthropic", "openai", "gemini"] }
+runic-tool = { path = "../crates/runic-tool" }
 runic-tools = { path = "../crates/runic-tools" }
+runic-mcp = { path = "../crates/runic-mcp" }
+runic-hook = { path = "../crates/runic-hook" }
+runic-state = { path = "../crates/runic-state" }
+runic-types = { path = "../crates/runic-types" }
 runic-subagent = { path = "../crates/runic-subagent" }
+runic-foundry = { path = "../crates/runic-foundry" }
 
 # New stack (already in workspace.dependencies).
 runic-memory = { workspace = true }

@@ -55,7 +55,8 @@ impl WriteHook for MemoryReviewHook {
                 .model(model)
                 .system_prompt(MEMORY_REVIEW_GUIDANCE)
                 .tool(Arc::new(MemoryTool::new(store)))
-                .max_turns(3)
+                .max_turns(8)
+                .graceful_max_turns(true)
                 .build();
             if let Err(e) = curator.run(transcript).await {
                 tracing::warn!(error = %e, "memory review curator failed");

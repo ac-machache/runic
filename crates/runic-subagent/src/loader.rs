@@ -1,6 +1,6 @@
 //! The `subagents(...)` builder — load `AGENT.md` rosters from one path / a
 //! `Vec` / a `HashMap`, merge them, and contribute the `delegate` tool (the
-//! caller supplies the [`ChildBuilder`] that constructs child agents).
+//! caller supplies the [`SubagentBuilder`] that constructs child agents).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use runic_tool::Tool;
 
 use crate::dirs::Dirs;
 
-use crate::{AgentDef, AgentRoster, ChildBuilder, DelegateTool};
+use crate::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder};
 
 pub fn subagents(dirs: impl Dirs) -> Subagents {
     let dirs = dirs.dirs();
@@ -92,13 +92,13 @@ impl Subagents {
         self.roster.clone()
     }
 
-    /// The `delegate` tool, given a [`ChildBuilder`] that constructs child
+    /// The `delegate` tool, given a [`SubagentBuilder`] that constructs child
     /// agents. `None` when the roster is empty.
-    pub fn tool(&self, child: Arc<dyn ChildBuilder>) -> Option<Arc<dyn Tool>> {
+    pub fn tool(&self, builder: Arc<dyn SubagentBuilder>) -> Option<Arc<dyn Tool>> {
         if self.roster.is_empty() {
             return None;
         }
         tracing::debug!(count = self.roster.len(), "delegate tool enabled");
-        Some(Arc::new(DelegateTool::new(self.roster.clone(), child)) as Arc<dyn Tool>)
+        Some(Arc::new(DelegateTool::new(self.roster.clone(), builder)) as Arc<dyn Tool>)
     }
 }

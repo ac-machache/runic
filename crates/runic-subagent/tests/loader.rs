@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{AgentDef, ChildBuilder, DelegationCtx, subagents};
+use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder, subagents};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 fn write_agent_file(root: &std::path::Path, name: &str, body: &str) {
@@ -36,10 +36,10 @@ impl Provider for OneShot {
     }
 }
 
-struct FakeChildBuilder;
+struct FakeSubagentBuilder;
 
 #[async_trait]
-impl ChildBuilder for FakeChildBuilder {
+impl SubagentBuilder for FakeSubagentBuilder {
     async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
         Ok(Agent::builder(Arc::new(OneShot), "u", &def.name)
             .model("test")
@@ -114,14 +114,14 @@ fn delegate_tool_is_exposed_only_for_non_empty_rosters() {
 
     assert!(
         subagents(root.path())
-            .tool(Arc::new(FakeChildBuilder))
+            .tool(Arc::new(FakeSubagentBuilder))
             .is_some()
     );
 
     let empty = tempfile::tempdir().unwrap();
     assert!(
         subagents(empty.path())
-            .tool(Arc::new(FakeChildBuilder))
+            .tool(Arc::new(FakeSubagentBuilder))
             .is_none()
     );
 }

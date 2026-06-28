@@ -4,10 +4,10 @@
 //! runic's primitives**. One `delegate` tool selects a subagent from a roster
 //! of Markdown `AGENT.md` definitions; the child runs as a fresh [`Agent`] and
 //! its final answer comes back as the tool result. Safeguards: depth limit,
-//! no-escalation tool scoping (in the app's [`ChildBuilder`]), spawn budget,
+//! no-escalation tool scoping (in the app's [`SubagentBuilder`]), spawn budget,
 //! cancellation cascade.
 //!
-//! The app supplies a [`ChildBuilder`] (provider resolution + tool scoping);
+//! The app supplies a [`SubagentBuilder`] (provider resolution + tool scoping);
 //! this crate owns the orchestration. The loop needs no special-casing —
 //! `delegate` is an ordinary [`runic_tool::Tool`].
 //!
@@ -23,8 +23,8 @@ pub use dirs::Dirs;
 
 pub use def::{AgentDef, AgentRoster};
 pub use delegate::{
-    BackgroundTask, ChildBuilder, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH,
-    DEFAULT_MAX_TOTAL_SPAWNS, DelegateTool, DelegationCtx, SpawnBudget, TaskStatus,
+    BackgroundTask, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TOTAL_SPAWNS,
+    DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder, TaskStatus,
 };
 pub use loader::{Subagents, subagents};
 

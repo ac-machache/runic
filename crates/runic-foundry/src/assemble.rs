@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
 use runic_agent::Agent;
+use runic_hook::WriteHook;
 use runic_mcp::McpConnection;
 use runic_memory::Memory;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{ChildBuilder, Subagents};
+use runic_subagent::{SubagentBuilder, Subagents};
 use runic_substrate::Sessions;
+use runic_tool::Tool;
 use runic_tools::Tools;
 
-use crate::child::FoundryChildBuilder;
+use crate::child::FoundrySubagentBuilder;
 use crate::context::Context;
 use crate::memory_review::MemoryReviewHook;
 
@@ -22,9 +24,19 @@ pub struct Assembly {
     pub memory: Option<Memory>,
     pub skills: Option<Arc<SkillSet>>,
     pub subagents: Option<Subagents>,
+    pub subagent_builder: Option<Arc<dyn SubagentBuilder>>,
     pub mcp: Option<McpConnection>,
     pub sessions: Option<Sessions>,
     pub tools: Option<Tools>,
+    /// App-specific tools to register as-is (e.g. domain tools the standard
+    /// surfaces don't cover).
+    pub custom_tools: Vec<Arc<dyn Tool>>,
+    /// Force structured output via the synthetic `final_answer` tool.
+    pub output_schema: Option<serde_json::Value>,
+    /// Cap the agent's turns per run.
+    pub max_turns: Option<u32>,
+    /// App-specific read-edit hooks (e.g. tenant-id injection into tool calls).
+    pub write_hooks: Vec<Arc<dyn WriteHook>>,
 }
 
 /// Wire every configured part into a fresh agent for `(tenant, session)`:
@@ -71,11 +83,13 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         b = b.tool(tool);
     }
     if let Some(s) = &a.subagents {
-        let child: Arc<dyn ChildBuilder> = Arc::new(FoundryChildBuilder {
-            provider: a.provider.clone(),
-            model: a.model.clone(),
+        let builder: Arc<dyn SubagentBuilder> = a.subagent_builder.clone().unwrap_or_else(|| {
+            Arc::new(FoundrySubagentBuilder {
+                provider: a.provider.clone(),
+                model: a.model.clone(),
+            })
         });
-        if let Some(tool) = s.tool(child) {
+        if let Some(tool) = s.tool(builder) {
             b = b.tool(tool);
         }
     }
@@ -90,6 +104,17 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         }
         b = b.activated_tools(m.activated());
     }
+    for t in &a.custom_tools {
+        b = b.tool(t.clone());
+    }
+
+    // ── agent config ────────────────────────────────────────────────────────
+    if let Some(schema) = &a.output_schema {
+        b = b.output_schema(schema.clone());
+    }
+    if let Some(n) = a.max_turns {
+        b = b.max_turns(n);
+    }
 
     // ── hooks ────────────────────────────────────────────────────────────────
     if let Some(m) = &a.memory
@@ -103,6 +128,9 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
             store.clone(),
         );
         b = b.write_hook(Arc::new(hook));
+    }
+    for hook in &a.write_hooks {
+        b = b.write_hook(hook.clone());
     }
 
     tracing::info!(tenant, session, "agent assembled");

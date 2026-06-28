@@ -1,4 +1,4 @@
-//! End-to-end delegate tests: a fake `ChildBuilder` builds scripted child
+//! End-to-end delegate tests: a fake `SubagentBuilder` builds scripted child
 //! agents, exercising the four safeguards + the action surface.
 
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{
-    AgentDef, AgentRoster, ChildBuilder, DelegateTool, DelegationCtx, SpawnBudget,
+    AgentDef, AgentRoster, DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder,
 };
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -39,7 +39,7 @@ impl Provider for OneShot {
 struct FakeBuilder;
 
 #[async_trait]
-impl ChildBuilder for FakeBuilder {
+impl SubagentBuilder for FakeBuilder {
     async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
         let provider = Arc::new(OneShot(format!("done: {}", def.name)));
         Ok(Agent::builder(provider, "u", "s")

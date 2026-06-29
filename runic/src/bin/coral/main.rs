@@ -20,7 +20,7 @@ use runic_subagent::SubagentBuilder;
 use runic_substrate::sessions_postgres;
 
 use builder::CoralBuilder;
-use factory::{CoralFactory, load_toolsets};
+use factory::{CoralFactory, load_toolsets, parse_hook_provider_names};
 use providers::Providers;
 
 #[tokio::main]
@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
     let factory = Arc::new(CoralFactory {
         providers,
         provider_name: std::env::var("CORAL_PROVIDER").unwrap_or_else(|_| "sonnet".to_string()),
+        hook_provider_names: parse_hook_provider_names(std::env::var("CORAL_HOOK_PROVIDERS").ok()),
         toolsets,
         builder,
         store: store.clone(),

@@ -54,13 +54,19 @@ impl Providers {
         }
     }
 
-    /// The orchestrator's (provider, model) for a `CORAL_PROVIDER` choice.
-    pub fn main_model(&self, name: &str) -> (Arc<dyn Provider>, &'static str) {
+    /// A named (provider, model) pair for Coral surfaces (`CORAL_PROVIDER`,
+    /// hook-specific providers, etc.).
+    pub fn model(&self, name: &str) -> (Arc<dyn Provider>, &'static str) {
         match name {
             "haiku" => (self.anthropic.clone(), HAIKU),
             "flash" => (self.gemini.clone(), FLASH),
             "mistral" => (self.mistral.clone(), MISTRAL),
             _ => (self.anthropic.clone(), SONNET),
         }
+    }
+
+    /// The orchestrator's (provider, model) for a `CORAL_PROVIDER` choice.
+    pub fn main_model(&self, name: &str) -> (Arc<dyn Provider>, &'static str) {
+        self.model(name)
     }
 }

@@ -11,7 +11,7 @@ use crate::api::ApiClient;
 use crate::events::{
     append_live, apply_event, cluster_runs, flush_live, items_from_events, parse_ask, usage_of,
 };
-use crate::model::{Item, LiveBuf, LiveKind, PendingAsk};
+use crate::model::{Item, LiveBuf, LiveKind, PendingAsk, ThreadInfo};
 use crate::util::short_id;
 use crate::views::{render_item, render_run, render_state};
 
@@ -22,7 +22,8 @@ pub fn App() -> impl IntoView {
     let tenant = RwSignal::new("default".to_string());
 
     // ── thread + transcript state ──────────────────────────────────────
-    let threads = RwSignal::new(Vec::<String>::new());
+    let threads = RwSignal::new(Vec::<ThreadInfo>::new());
+    let threads_cursor = RwSignal::new(None::<String>);
     let current = RwSignal::new(None::<String>);
     let items = RwSignal::new(Vec::<Item>::new());
     let live = RwSignal::new(LiveBuf::default());
@@ -30,7 +31,6 @@ pub fn App() -> impl IntoView {
     let usage = RwSignal::new(None::<(u64, u64)>);
     let input = RwSignal::new(String::new());
     let streaming = RwSignal::new(false);
-    let output_schema = RwSignal::new(String::new());
     let context_json = RwSignal::new(String::new());
     let pending = RwSignal::new(None::<PendingAsk>);
     let ask_answer = RwSignal::new(String::new());
@@ -65,9 +65,28 @@ pub fn App() -> impl IntoView {
     let refresh_threads = move || {
         let c = client();
         spawn_local(async move {
-            match c.list_threads().await {
-                Ok(ids) => threads.set(ids),
+            match c.list_threads(None).await {
+                Ok((ts, cursor)) => {
+                    threads.set(ts);
+                    threads_cursor.set(cursor);
+                }
                 Err(e) => leptos::logging::warn!("list_threads failed: {e}"),
+            }
+        });
+    };
+
+    let load_more_threads = move || {
+        let Some(cursor) = threads_cursor.get_untracked() else {
+            return;
+        };
+        let c = client();
+        spawn_local(async move {
+            match c.list_threads(Some(&cursor)).await {
+                Ok((mut more, next)) => {
+                    threads.update(|t| t.append(&mut more));
+                    threads_cursor.set(next);
+                }
+                Err(e) => leptos::logging::warn!("list_threads page failed: {e}"),
             }
         });
     };
@@ -100,11 +119,17 @@ pub fn App() -> impl IntoView {
                     live.set(LiveBuf::default());
                     events.set(Vec::new());
                     state_json.set(None);
-                    match c.list_threads().await {
-                        Ok(ids) => threads.set(ids),
+                    match c.list_threads(None).await {
+                        Ok((ts, cursor)) => {
+                            threads.set(ts);
+                            threads_cursor.set(cursor);
+                        }
                         Err(_) => threads.update(|t| {
-                            if !t.contains(&id) {
-                                t.push(id.clone())
+                            if !t.iter().any(|x| x.id == id) {
+                                t.push(ThreadInfo {
+                                    id: id.clone(),
+                                    label: None,
+                                })
                             }
                         }),
                     }
@@ -123,20 +148,6 @@ pub fn App() -> impl IntoView {
         let thread_id = match current.get_untracked() {
             Some(id) => id,
             None => return,
-        };
-        let schema_text = output_schema.get_untracked();
-        let schema_val: Option<Value> = if schema_text.trim().is_empty() {
-            None
-        } else {
-            match serde_json::from_str::<Value>(&schema_text) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    items.update(|its| {
-                        its.push(Item::Warning(format!("invalid output schema JSON: {e}")))
-                    });
-                    return;
-                }
-            }
         };
         let context_text = context_json.get_untracked();
         let context_val: Option<Value> = if context_text.trim().is_empty() {
@@ -194,14 +205,7 @@ pub fn App() -> impl IntoView {
                 }
             };
             let result = c
-                .stream_run(
-                    &thread_id,
-                    &text,
-                    schema_val,
-                    context_val,
-                    signal.as_ref(),
-                    on_event,
-                )
+                .stream_run(&thread_id, &text, context_val, signal.as_ref(), on_event)
                 .await;
             flush_live(live, items);
             if let Err(e) = result {
@@ -210,6 +214,13 @@ pub fn App() -> impl IntoView {
                 } else {
                     items.update(|its| its.push(Item::Warning("— stopped —".into())));
                 }
+            }
+            match c.list_threads(None).await {
+                Ok((ts, cursor)) => {
+                    threads.set(ts);
+                    threads_cursor.set(cursor);
+                }
+                Err(e) => leptos::logging::warn!("list_threads refresh failed: {e}"),
             }
             streaming.set(false);
             abort.set(None);
@@ -297,22 +308,28 @@ pub fn App() -> impl IntoView {
                     </div>
 
                     <div class="thread-list">
-                        {move || threads.get().into_iter().map(|id| {
+                        {move || threads.get().into_iter().map(|t| {
+                            let id = t.id;
                             let id_active = id.clone();
                             let id_click = id.clone();
-                            let label = short_id(&id);
+                            let short = short_id(&id);
+                            let untitled = t.label.is_none();
+                            let title = t.label.unwrap_or_else(|| "untitled".to_string());
                             view! {
                                 <div class="thread"
                                     class:active=move || current.get().as_deref() == Some(id_active.as_str())
                                     on:click=move |_| load_thread(id_click.clone())>
                                     <span class="thread-accent"></span>
                                     <div class="thread-row1">
-                                        <span class="thread-id">{label}</span>
+                                        <span class="thread-id">{short}</span>
                                     </div>
-                                    <div class="thread-title untitled">"untitled"</div>
+                                    <div class="thread-title" class:untitled=untitled>{title}</div>
                                 </div>
                             }
                         }).collect_view()}
+                        {move || threads_cursor.get().map(|_| view! {
+                            <button class="newthread" on:click=move |_| load_more_threads()>"Load more"</button>
+                        })}
                     </div>
 
                     <div class="theme-bar">
@@ -446,13 +463,6 @@ pub fn App() -> impl IntoView {
                                             placeholder=r#"{ "user_id": "u1", "provider": "sonnet", "allow_web_search": true }"#
                                             prop:value=move || context_json.get()
                                             on:input=move |e| context_json.set(event_target_value(&e))></textarea>
-                                        <details class="config-schema">
-                                            <summary>"output schema (optional JSON)"</summary>
-                                            <textarea class="config-schema-ta" spellcheck="false"
-                                                placeholder=r#"{ "type": "object", "properties": ... }"#
-                                                prop:value=move || output_schema.get()
-                                                on:input=move |e| output_schema.set(event_target_value(&e))></textarea>
-                                        </details>
                                     </div>
                                 </div>
                             })}

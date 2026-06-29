@@ -10,6 +10,8 @@ use futures::StreamExt;
 use gloo_net::http::Request;
 use serde_json::Value;
 
+use crate::model::ThreadInfo;
+
 #[derive(Clone)]
 pub struct ApiClient {
     base: String,
@@ -22,26 +24,42 @@ impl ApiClient {
         Self { base, tenant }
     }
 
-    pub async fn list_threads(&self) -> Result<Vec<String>, String> {
-        let url = format!("{}/threads", self.base);
-        let resp = Request::get(&url)
+    /// A page of threads (id + label). `next_cursor` is `Some` when more remain;
+    /// pass it back to fetch the next page.
+    pub async fn list_threads(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<ThreadInfo>, Option<String>), String> {
+        let mut req = Request::get(&format!("{}/threads", self.base));
+        if let Some(c) = cursor {
+            req = req.query([("cursor", c)]);
+        }
+        let v: Value = req
             .header("x-runic-tenant", &self.tenant)
             .send()
             .await
+            .map_err(e2s)?
+            .json()
+            .await
             .map_err(e2s)?;
-        let v: Value = resp.json().await.map_err(e2s)?;
-        Ok(v.get("threads")
+        let threads = v
+            .get("threads")
             .and_then(|t| t.as_array())
             .map(|a| {
                 a.iter()
                     .filter_map(|t| {
-                        t.get("thread_id")
-                            .and_then(|x| x.as_str())
-                            .map(String::from)
+                        let id = t.get("thread_id").and_then(|x| x.as_str())?.to_string();
+                        let label = t.get("label").and_then(|x| x.as_str()).map(String::from);
+                        Some(ThreadInfo { id, label })
                     })
                     .collect()
             })
-            .unwrap_or_default())
+            .unwrap_or_default();
+        let next_cursor = v
+            .get("next_cursor")
+            .and_then(|c| c.as_str())
+            .map(String::from);
+        Ok((threads, next_cursor))
     }
 
     pub async fn create_thread(&self, id: Option<&str>) -> Result<String, String> {
@@ -66,17 +84,40 @@ impl ApiClient {
 
     /// Full stored event log for a thread (snapshot, not a stream).
     pub async fn thread_events(&self, id: &str) -> Result<Vec<Value>, String> {
-        let url = format!("{}/threads/{id}/events", self.base);
-        let resp = Request::get(&url)
-            .header("x-runic-tenant", &self.tenant)
-            .send()
-            .await
-            .map_err(e2s)?;
-        let v: Value = resp.json().await.map_err(e2s)?;
-        Ok(v.get("events")
-            .and_then(|e| e.as_array())
-            .cloned()
-            .unwrap_or_default())
+        let mut all = Vec::new();
+        let mut after_seq = 0_u64;
+
+        loop {
+            let url = format!("{}/threads/{id}/events", self.base);
+            let v: Value = Request::get(&url)
+                .query([("after_seq", after_seq.to_string())])
+                .header("x-runic-tenant", &self.tenant)
+                .send()
+                .await
+                .map_err(e2s)?
+                .json()
+                .await
+                .map_err(e2s)?;
+
+            if let Some(events) = v.get("events").and_then(|e| e.as_array()) {
+                all.extend(events.iter().cloned());
+            }
+
+            let has_more = v.get("has_more").and_then(|x| x.as_bool()).unwrap_or(false);
+            let next = v.get("next_after_seq").and_then(|x| x.as_u64());
+            if !has_more {
+                break;
+            }
+            let Some(next_after_seq) = next else {
+                return Err("events page missing next_after_seq".into());
+            };
+            if next_after_seq <= after_seq {
+                return Err("events pagination did not advance".into());
+            }
+            after_seq = next_after_seq;
+        }
+
+        Ok(all)
     }
 
     /// Full thread state: system prompt + messages (as sent to the model) +
@@ -91,16 +132,15 @@ impl ApiClient {
         resp.json().await.map_err(e2s)
     }
 
-    /// Answer a parked HITL `ask_user`. The server resolves by `ask_id`
-    /// (keyed globally), so the `run_id` path segment is ignored — a `live`
-    /// placeholder is fine.
+    /// Answer a parked HITL `ask_user`. The server scopes the answer by
+    /// `(tenant, thread_id, ask_id)`.
     pub async fn submit_answer(
         &self,
         thread: &str,
         ask_id: &str,
         answer: String,
     ) -> Result<(), String> {
-        let url = format!("{}/threads/{thread}/runs/live/asks/{ask_id}", self.base);
+        let url = format!("{}/threads/{thread}/asks/{ask_id}", self.base);
         let resp = Request::post(&url)
             .header("x-runic-tenant", &self.tenant)
             .json(&serde_json::json!({ "answer": answer }))
@@ -121,16 +161,12 @@ impl ApiClient {
         &self,
         thread: &str,
         message: &str,
-        output_schema: Option<Value>,
         context: Option<Value>,
         abort: Option<&web_sys::AbortSignal>,
         mut on_event: impl FnMut(Value),
     ) -> Result<(), String> {
         let url = format!("{}/threads/{thread}/runs/stream", self.base);
         let mut body = serde_json::json!({ "message": message });
-        if let Some(schema) = output_schema {
-            body["output_schema"] = schema;
-        }
         // Per-run context (user_id, provider, allow_web_search, …) — sent
         // verbatim; the server's build_run_context decides what keys mean.
         if let Some(ctx) = context {

@@ -22,6 +22,7 @@ const DEFAULT_TOOLBOX_URL: &str = "http://127.0.0.1:5050";
 pub struct CoralFactory {
     pub providers: Providers,
     pub provider_name: String,
+    pub hook_provider_names: HashMap<String, String>,
     pub toolsets: HashMap<String, Vec<Arc<dyn Tool>>>,
     pub builder: Arc<dyn SubagentBuilder>,
     pub store: Arc<dyn SessionStore>,
@@ -33,6 +34,7 @@ pub struct CoralFactory {
 impl AgentFactory for CoralFactory {
     async fn build(&self, tenant: &str, session_id: &str) -> Agent {
         let (provider, model) = self.providers.main_model(&self.provider_name);
+        let (title_provider, title_model) = self.hook_model("thread-title");
 
         let mut custom: Vec<Arc<dyn Tool>> =
             self.toolsets.get("coral").cloned().unwrap_or_default();
@@ -49,7 +51,7 @@ impl AgentFactory for CoralFactory {
         }
 
         let assembly = Assembly {
-            provider,
+            provider: provider.clone(),
             model: model.into(),
             instructions: include_str!("coral.md").into(),
             memory: Some(crate::memory::coral_memory()),
@@ -63,6 +65,11 @@ impl AgentFactory for CoralFactory {
             output_schema: None,
             max_turns: Some(16),
             write_hooks: vec![
+                Arc::new(crate::hooks::ThreadTitle::new(
+                    self.store.clone(),
+                    title_provider,
+                    title_model,
+                )),
                 Arc::new(crate::hooks::InjectIds::new("mcp__coral__", ["user_id"])),
                 Arc::new(crate::hooks::ComposioEntity),
             ],
@@ -85,6 +92,33 @@ impl AgentFactory for CoralFactory {
         }
         rc
     }
+}
+
+impl CoralFactory {
+    fn hook_model(&self, hook_name: &str) -> (Arc<dyn runic_provider::Provider>, &'static str) {
+        let provider_name = self
+            .hook_provider_names
+            .get(hook_name)
+            .or_else(|| self.hook_provider_names.get("*"))
+            .map(String::as_str)
+            .unwrap_or(&self.provider_name);
+        self.providers.model(provider_name)
+    }
+}
+
+pub fn parse_hook_provider_names(raw: Option<String>) -> HashMap<String, String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .filter_map(|entry| {
+            let (hook, provider) = entry.split_once('=')?;
+            let hook = hook.trim();
+            let provider = provider.trim();
+            if hook.is_empty() || provider.is_empty() {
+                return None;
+            }
+            Some((hook.to_string(), provider.to_string()))
+        })
+        .collect()
 }
 
 /// Connect each toolset endpoint from `mcp.json` and wrap its remote tools as
@@ -120,4 +154,27 @@ pub async fn load_toolsets() -> HashMap<String, Vec<Arc<dyn Tool>>> {
         }
     }
     toolsets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hook_provider_names() {
+        let providers = parse_hook_provider_names(Some(
+            "thread-title=haiku, memory-review = flash, broken, *=mistral".into(),
+        ));
+
+        assert_eq!(
+            providers.get("thread-title").map(String::as_str),
+            Some("haiku")
+        );
+        assert_eq!(
+            providers.get("memory-review").map(String::as_str),
+            Some("flash")
+        );
+        assert_eq!(providers.get("*").map(String::as_str), Some("mistral"));
+        assert!(!providers.contains_key("broken"));
+    }
 }

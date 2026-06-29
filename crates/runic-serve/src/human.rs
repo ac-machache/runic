@@ -5,7 +5,7 @@
 //!
 //!   1. registers a one-shot in the [`HumanHub`] under a fresh `ask_id`,
 //!   2. emits an `ask_required` event onto this run's live SSE stream,
-//!   3. parks on the one-shot until `POST /threads/:id/runs/:run_id/asks/:ask_id`
+//!   3. parks on the one-shot until `POST /threads/:id/asks/:ask_id`
 //!      calls [`HumanHub::resolve`], firing it.
 //!
 //! `escalate_to_human` is fire-and-forget: it emits an `escalated` event and

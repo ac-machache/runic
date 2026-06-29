@@ -1,6 +1,13 @@
 //! Plain data types for the dev console — the UI model the event stream and
 //! persisted log fold into. No Leptos, no I/O.
 
+/// A thread in the sidebar list — its id plus the optional label (title).
+#[derive(Clone, PartialEq)]
+pub struct ThreadInfo {
+    pub id: String,
+    pub label: Option<String>,
+}
+
 /// The actively-streaming tail. Tokens append here (one reactive text node)
 /// instead of mutating the `items` list, so per-token cost is O(1) DOM. On a
 /// boundary (a non-text event) or run end it flushes into `items` as a

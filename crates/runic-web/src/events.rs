@@ -185,6 +185,16 @@ pub fn cluster_runs(events: &[Value]) -> Vec<RunCluster> {
                     run.errored = true;
                 }
             }
+            "run_error" => {
+                if let Some(run) = runs.last_mut() {
+                    run.running = false;
+                    run.ended = true;
+                    run.errored = true;
+                    if let Some(m) = ev.get("message").and_then(|v| v.as_str()) {
+                        run.stop_reason = Some(m.to_string());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -520,6 +530,13 @@ pub fn apply_event(items: &mut Vec<Item>, ev: &Value) {
         "escalated" => {
             let reason = ev.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             items.push(Item::Warning(format!("escalated to human: {reason}")));
+        }
+        "run_error" => {
+            let m = ev
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("run failed");
+            items.push(Item::Warning(format!("run failed: {m}")));
         }
         "message" => {
             if let Some(msg) = ev.get("msg") {

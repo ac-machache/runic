@@ -67,6 +67,10 @@ pub fn router(config: ServeConfig) -> Router {
         )
         .route(
             "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
+            post(runs::submit_answer_legacy),
+        )
+        .route(
+            "/threads/{thread_id}/asks/{ask_id}",
             post(runs::submit_answer),
         )
         // Permissive CORS so a browser dev UI served from another origin can

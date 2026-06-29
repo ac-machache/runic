@@ -219,6 +219,22 @@ async fn list_threads_starts_empty() {
 }
 
 #[tokio::test]
+async fn list_threads_rejects_invalid_cursor() {
+    let app = make_router();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/threads?cursor=not-a-cursor")
+                .header("x-runic-tenant", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn get_unknown_thread_returns_404() {
     let app = make_router();
     let resp = app
@@ -263,6 +279,36 @@ async fn create_then_get_thread_is_materialized() {
     let body = body_to_json(got).await;
     assert_eq!(body["thread_id"], "t1");
     assert_eq!(body["event_count"], 0);
+}
+
+#[tokio::test]
+async fn thread_events_unknown_thread_returns_404() {
+    let app = make_router();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/threads/never-created/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn thread_state_unknown_thread_returns_404() {
+    let app = make_router();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/threads/never-created/state")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -498,7 +544,7 @@ async fn answering_missing_human_ask_returns_bad_request() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/threads/t1/runs/r1/asks/missing-ask")
+                .uri("/threads/t1/asks/missing-ask")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"answer":"yes"}"#))
                 .unwrap(),

@@ -3,8 +3,7 @@
 //! - `POST /threads/:id/runs/stream` — drive a fresh turn, stream events live.
 //! - `GET  /threads/:id/runs/:run_id/stream` — replay a past run's persisted
 //!   events and, if it's still in flight, attach to the live broadcast.
-//! - `POST /threads/:id/runs/:run_id/asks/:ask_id` — answer a parked
-//!   `ask_user` (HITL).
+//! - `POST /threads/:id/asks/:ask_id` — answer a parked `ask_user` (HITL).
 //!
 //! The wire format is in [`crate::wire`]. Each SSE event carries the
 //! `WireEvent` JSON body, the matching `event:` field, and (for replay) the
@@ -125,7 +124,9 @@ pub async fn create_and_stream_run(
         let mut agent = agent_arc.lock().await;
         if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
             // Surface the failure, then a terminal Done so the client closes.
-            let run_id = agent.state().current_run().map(|r| r.id);
+            // The failed run already recorded its RunEnd, so it's the last run,
+            // not the "current" (in-flight) one.
+            let run_id = agent.state().runs().last().map(|r| r.id.clone());
             let _ = err_tx.send(WireEvent::RunError {
                 run_id,
                 message: e.to_string(),
@@ -272,19 +273,39 @@ pub async fn replay_run(
     ))
 }
 
-/// `POST /threads/:id/runs/:run_id/asks/:ask_id`
+/// `POST /threads/:id/asks/:ask_id`
 ///
 /// Deliver an operator's answer to a parked `ask_user`. The parked tool wakes,
 /// returns the answer into the conversation, and the run streams on.
 pub async fn submit_answer(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
+    Path((thread_id, ask_id)): Path<(String, String)>,
+    Json(body): Json<AnswerRequest>,
+) -> Result<StatusCode, ServeError> {
+    resolve_answer(state, tenant, thread_id, ask_id, body.answer)
+}
+
+/// Legacy alias for clients still posting through the old run-shaped path.
+pub async fn submit_answer_legacy(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
     Path((thread_id, _run_id, ask_id)): Path<(String, String, String)>,
     Json(body): Json<AnswerRequest>,
 ) -> Result<StatusCode, ServeError> {
+    resolve_answer(state, tenant, thread_id, ask_id, body.answer)
+}
+
+fn resolve_answer(
+    state: AppState,
+    tenant: String,
+    thread_id: String,
+    ask_id: String,
+    answer: String,
+) -> Result<StatusCode, ServeError> {
     if state
         .human_hub
-        .resolve(&tenant, &thread_id, &ask_id, body.answer)
+        .resolve(&tenant, &thread_id, &ask_id, answer)
     {
         Ok(StatusCode::ACCEPTED)
     } else {

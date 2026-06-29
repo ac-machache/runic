@@ -156,7 +156,13 @@ pub async fn list_threads(
     Query(q): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadList>, ServeError> {
     let limit = q.limit.clamp(1, 200);
-    let after = q.cursor.as_deref().and_then(decode_cursor);
+    let after = match q.cursor.as_deref() {
+        Some(cursor) => Some(
+            decode_cursor(cursor)
+                .ok_or_else(|| ServeError::BadRequest("invalid thread cursor".into()))?,
+        ),
+        None => None,
+    };
     let mut metas = state
         .session_store
         .list_sessions_page(&tenant, after, limit + 1)
@@ -238,6 +244,15 @@ pub async fn thread_events(
     Path(thread_id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
+    if state
+        .session_store
+        .session_meta(&tenant, &thread_id)
+        .await?
+        .is_none()
+    {
+        return Err(ServeError::ThreadNotFound { id: thread_id });
+    }
+
     let limit = q.limit.clamp(1, 1000);
     let mut stored = state
         .session_store
@@ -268,13 +283,17 @@ pub async fn thread_state(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
-    // Authoritative label + event_count from metadata; same in both branches.
-    let meta = state
+    // Authoritative label + event_count from metadata; 404 if the thread was
+    // never created (don't build a warm agent for a phantom thread).
+    let Some(meta) = state
         .session_store
         .session_meta(&tenant, &thread_id)
-        .await?;
-    let label = meta.as_ref().and_then(|m| m.label.clone());
-    let event_count = meta.as_ref().map(|m| m.event_count).unwrap_or(0);
+        .await?
+    else {
+        return Err(ServeError::ThreadNotFound { id: thread_id });
+    };
+    let label = meta.label;
+    let event_count = meta.event_count;
 
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     if let Ok(agent) = agent_arc.try_lock() {

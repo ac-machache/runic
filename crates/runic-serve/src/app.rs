@@ -3,20 +3,22 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
-use runic_substrate::SessionStore;
+use runic_substrate::{ArtifactStore, SessionStore};
 use tower_http::cors::CorsLayer;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
 use crate::pool::ThreadPool;
-use crate::routes::{health, runs, threads};
+use crate::routes::{artifacts, health, runs, threads};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
 /// `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
 #[derive(Clone)]
 pub struct AppState {
     pub session_store: Arc<dyn SessionStore>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
     pub pool: Arc<ThreadPool>,
     /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
     pub human_hub: Arc<HumanHub>,
@@ -26,6 +28,7 @@ pub struct AppState {
 /// [`router`].
 pub struct ServeConfig {
     pub session_store: Arc<dyn SessionStore>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
     pub agent_factory: BoxedAgentFactory,
     /// Shared HITL hub; the serve crate builds a per-run `HumanChannel` over it
     /// and installs it on each run's context, so an `ask_user` raised mid-run
@@ -39,6 +42,7 @@ pub struct ServeConfig {
 pub fn router(config: ServeConfig) -> Router {
     let state = AppState {
         session_store: config.session_store.clone(),
+        artifact_store: config.artifact_store,
         pool: Arc::new(ThreadPool::new(config.agent_factory, config.session_store)),
         human_hub: config.human_hub,
     };
@@ -57,6 +61,12 @@ pub fn router(config: ServeConfig) -> Router {
         )
         .route("/threads/{thread_id}/events", get(threads::thread_events))
         .route("/threads/{thread_id}/state", get(threads::thread_state))
+        .route(
+            "/threads/{thread_id}/artifacts",
+            post(artifacts::upload_artifact)
+                .get(artifacts::list_artifacts)
+                .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BYTES)),
+        )
         .route(
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),

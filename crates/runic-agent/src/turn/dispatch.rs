@@ -184,19 +184,32 @@ impl Agent {
                 }
             }
 
+            // Persist the summary when one is given; the full output reaches
+            // only the next model call, via the transient overlay.
+            let persisted = result
+                .persisted_output
+                .clone()
+                .unwrap_or_else(|| result.output.clone());
+            if result.persisted_output.is_some() {
+                self.transient_tool_outputs
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(call.id.clone(), result.output.clone());
+            }
+
             if let CallPlan::Dispatch { .. } = plan {
                 self.emit(crate::AgentEvent::ToolFinished {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     is_error: !result.success,
-                    result: result.output.clone(),
+                    result: persisted.clone(),
                 });
             }
 
             blocks.push(ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
                 tool_name: call.name.clone(),
-                content: result.output.clone(),
+                content: persisted,
                 is_error: !result.success,
             });
 

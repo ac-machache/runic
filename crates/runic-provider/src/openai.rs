@@ -554,6 +554,9 @@ impl Provider for OpenAIDriver {
                                 });
                             }
                             ContentBlock::Thinking { .. } => {}
+                            ContentBlock::ArtifactRef { id, .. } => {
+                                tracing::warn!(artifact = %id, "unresolved ArtifactRef reached OpenAI — dropping");
+                            }
                             _ => {}
                         }
                     }

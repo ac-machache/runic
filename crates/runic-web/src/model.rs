@@ -8,13 +8,15 @@ pub struct ThreadInfo {
     pub label: Option<String>,
 }
 
-/// A file the user attached to the next message — base64 `data` ready to send
-/// as an image/file content block.
+/// A file the user attached to the next message. Uploaded to the artifact
+/// store on pick; the message carries the `id` as an `artifact_ref` block, not
+/// the bytes.
 #[derive(Clone, PartialEq)]
 pub struct Attachment {
+    pub id: String,
     pub name: String,
     pub media_type: String,
-    pub data: String,
+    pub size: u64,
 }
 
 /// The actively-streaming tail. Tokens append here (one reactive text node)

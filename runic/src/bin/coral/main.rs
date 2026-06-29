@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use runic_serve::{HumanHub, ServeConfig, router};
 use runic_subagent::SubagentBuilder;
-use runic_substrate::sessions_postgres;
+use runic_substrate::{blobs_postgres, sessions_postgres};
 
 use builder::CoralBuilder;
 use factory::{CoralFactory, load_toolsets, parse_hook_provider_names};
@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
     let sessions = sessions_postgres(&database_url).await;
     let store = sessions.store();
 
+    let artifact_root =
+        std::env::var("RUNIC_ARTIFACT_ROOT").unwrap_or_else(|_| "./data/artifacts".to_string());
+    let artifact_store = blobs_postgres(&database_url, artifact_root).await.store();
+
     let builder: Arc<dyn SubagentBuilder> =
         Arc::new(CoralBuilder::new(providers.clone(), toolsets.clone()));
 
@@ -46,6 +50,7 @@ async fn main() -> Result<()> {
         toolsets,
         builder,
         store: store.clone(),
+        artifact_store: artifact_store.clone(),
         tavily_key: std::env::var("TAVILY_API_KEY")
             .ok()
             .filter(|s| !s.is_empty()),
@@ -56,6 +61,7 @@ async fn main() -> Result<()> {
 
     let app = router(ServeConfig {
         session_store: store,
+        artifact_store,
         agent_factory: factory,
         human_hub: Arc::new(HumanHub::new()),
     });

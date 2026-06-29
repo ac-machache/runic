@@ -14,8 +14,8 @@ use tower::ServiceExt;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
-use runic_substrate::{MemorySessionStore, SessionStore};
-use runic_types::{ContentBlock, StopReason, TokenUsage};
+use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use serde_json::Value;
 
 /// Build-on-demand fixture: panics if anyone tries to actually use the agent.
@@ -32,6 +32,7 @@ impl AgentFactory for PanicFactory {
 fn make_router() -> axum::Router {
     router(ServeConfig {
         session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
         agent_factory: Arc::new(PanicFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
@@ -81,6 +82,7 @@ fn scripted_router() -> axum::Router {
 fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
     router(ServeConfig {
         session_store: store,
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
         agent_factory: Arc::new(ScriptedFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
@@ -331,6 +333,7 @@ async fn delete_thread_returns_204() {
 async fn tenant_header_isolates_thread_listings() {
     let app = router(ServeConfig {
         session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
         agent_factory: Arc::new(PanicFactory),
         human_hub: Arc::new(HumanHub::new()),
     });
@@ -554,4 +557,406 @@ async fn answering_missing_human_ask_returns_bad_request() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(body_to_string(resp).await.contains("no pending ask"));
+}
+
+// ── artifacts ────────────────────────────────────────────────────────────
+
+fn upload_request(thread: &str, mime: &str, filename: &str, bytes: &[u8]) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/threads/{thread}/artifacts"))
+        .header("content-type", mime)
+        .header("x-runic-tenant", "alice")
+        .header("x-runic-filename", filename)
+        .body(Body::from(bytes.to_vec()))
+        .unwrap()
+}
+
+async fn create_thread(app: &axum::Router, thread_id: &str) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads")
+                .header("content-type", "application/json")
+                .header("x-runic-tenant", "alice")
+                .body(Body::from(format!(r#"{{"thread_id":"{thread_id}"}}"#)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn upload_artifact_stores_and_lists() {
+    let app = scripted_router();
+    create_thread(&app, "t1").await;
+    let bytes = b"%PDF-1.7 hello world";
+
+    let resp = app
+        .clone()
+        .oneshot(upload_request("t1", "application/pdf", "doc.pdf", bytes))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let v = body_to_json(resp).await;
+    let id = v["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("art-"));
+    assert_eq!(v["size"].as_u64().unwrap(), bytes.len() as u64);
+    assert_eq!(v["mime_type"], "application/pdf");
+    assert_eq!(v["filename"], "doc.pdf");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/threads/t1/artifacts")
+                .header("x-runic-tenant", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_to_json(resp).await;
+    assert!(list.as_array().unwrap().iter().any(|a| a["id"] == id));
+}
+
+#[tokio::test]
+async fn empty_upload_is_rejected() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(upload_request("t1", "application/pdf", "x.pdf", b""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn run_with_artifact_ref_persists_only_the_reference() {
+    let (app, store, _artifacts, _last) = resolving_setup();
+    create_thread(&app, "reflike").await;
+
+    // Upload first, then reference the returned id from the run.
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "reflike",
+            "application/pdf",
+            "r.pdf",
+            b"%PDF some bytes",
+        ))
+        .await
+        .unwrap();
+    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let body = serde_json::json!({
+        "content": [
+            { "type": "text", "text": "summarize the file" },
+            { "type": "artifact_ref", "id": id, "media_type": "application/pdf", "filename": "r.pdf" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/reflike/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_to_string(resp).await.contains("pong"));
+
+    let events = wait_for_stored_events(store.as_ref(), "alice", "reflike", 3).await;
+    // The event log keeps the lean pointer …
+    let kept_ref = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { id: rid, .. } if rid == &id))))
+    });
+    assert!(kept_ref, "the artifact_ref pointer should be persisted");
+    // … and never the inline bytes.
+    let inlined = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
+    });
+    assert!(
+        !inlined,
+        "no inline image/file bytes should reach the event log"
+    );
+}
+
+#[tokio::test]
+async fn inline_media_in_run_body_is_stored_as_a_ref() {
+    let (app, store, _artifacts, _last) = resolving_setup();
+    create_thread(&app, "inline").await;
+
+    // Client posts inline base64 media directly to /runs/stream (bypassing
+    // /artifacts) — the server must store it and persist only a ref.
+    let body = serde_json::json!({
+        "content": [
+            { "type": "text", "text": "look" },
+            { "type": "image", "media_type": "image/png", "data": "aGVsbG8gcG5n" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/inline/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_to_string(resp).await.contains("pong"));
+
+    let events = wait_for_stored_events(store.as_ref(), "alice", "inline", 3).await;
+    let kept_ref = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { .. }))))
+    });
+    assert!(kept_ref, "inline media should be persisted as a ref");
+    let inlined = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
+    });
+    assert!(!inlined, "no inline bytes should reach the event log");
+}
+
+#[tokio::test]
+async fn run_body_ref_persists_canonical_mime_not_the_clients_claim() {
+    let (app, session, _artifacts, _last) = resolving_setup();
+    create_thread(&app, "mimethread").await;
+
+    // Stored as a PDF.
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "mimethread",
+            "application/pdf",
+            "r.pdf",
+            b"%PDF bytes",
+        ))
+        .await
+        .unwrap();
+    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
+
+    // The run references it but LIES that it's an image.
+    let body = serde_json::json!({
+        "content": [
+            { "type": "text", "text": "hi" },
+            { "type": "artifact_ref", "id": id, "media_type": "image/png" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/mimethread/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_to_string(resp).await.contains("pong"));
+
+    let events = wait_for_stored_events(session.as_ref(), "alice", "mimethread", 3).await;
+    let canonical = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c,
+                    ContentBlock::ArtifactRef { media_type, .. } if media_type == "application/pdf"))))
+    });
+    assert!(canonical, "persisted ref should carry the stored mime");
+    let lied = events.iter().any(|stored| {
+        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(b)
+                if b.iter().any(|c| matches!(c,
+                    ContentBlock::ArtifactRef { media_type, .. } if media_type == "image/png"))))
+    });
+    assert!(!lied, "the client's fake mime must not be persisted");
+}
+
+#[tokio::test]
+async fn foreign_artifact_ref_in_run_body_is_rejected() {
+    let app = scripted_router();
+    let body = serde_json::json!({
+        "content": [
+            { "type": "artifact_ref", "id": "art-not-mine", "media_type": "image/png" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/whatever/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rejected_run_stores_no_orphan_artifacts() {
+    let (app, _session, artifacts, _last) = resolving_setup();
+    create_thread(&app, "orphan").await;
+
+    // A valid inline image followed by a foreign ref → the whole request is
+    // rejected, and the inline block before it must not have been stored.
+    let body = serde_json::json!({
+        "content": [
+            { "type": "image", "media_type": "image/png", "data": "aGVsbG8=" },
+            { "type": "artifact_ref", "id": "art-not-mine", "media_type": "image/png" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/orphan/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let stored = artifacts.list("alice", "orphan").await.unwrap();
+    assert!(
+        stored.is_empty(),
+        "a rejected request must store no artifacts"
+    );
+}
+
+/// Records the (post-resolution) request the model layer receives.
+struct RecordingProvider {
+    last: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        *self.last.lock().unwrap() = Some(req);
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: "pong".into(),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+/// Builds a real agent on the foundry `ArtifactResolver`, so a run through serve
+/// exercises the actual resolution path.
+struct ResolvingFactory {
+    store: Arc<dyn ArtifactStore>,
+    last: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl AgentFactory for ResolvingFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(
+            Arc::new(RecordingProvider {
+                last: self.last.clone(),
+            }),
+            tenant,
+            session_id,
+        )
+        .system_prompt("test")
+        .media_resolver(Arc::new(runic_foundry::ArtifactResolver::new(
+            self.store.clone(),
+            tenant,
+            session_id,
+        )))
+        .build()
+    }
+}
+
+type Recorder = Arc<std::sync::Mutex<Option<CompletionRequest>>>;
+
+fn resolving_setup() -> (
+    axum::Router,
+    Arc<dyn SessionStore>,
+    Arc<dyn ArtifactStore>,
+    Recorder,
+) {
+    let session: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
+    let last: Recorder = Arc::new(std::sync::Mutex::new(None));
+    let app = router(ServeConfig {
+        session_store: session.clone(),
+        artifact_store: artifacts.clone(),
+        agent_factory: Arc::new(ResolvingFactory {
+            store: artifacts.clone(),
+            last: last.clone(),
+        }),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+    (app, session, artifacts, last)
+}
+
+#[tokio::test]
+async fn run_resolves_latest_artifact_ref_through_serve() {
+    let (app, _session, _artifacts, last) = resolving_setup();
+
+    create_thread(&app, "img-thread").await;
+    let png = b"\x89PNG fake png bytes";
+    let resp = app
+        .clone()
+        .oneshot(upload_request("img-thread", "image/png", "p.png", png))
+        .await
+        .unwrap();
+    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let body = serde_json::json!({
+        "content": [
+            { "type": "text", "text": "what is in this image" },
+            { "type": "artifact_ref", "id": id, "media_type": "image/png", "filename": "p.png" }
+        ]
+    })
+    .to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/threads/img-thread/runs/stream")
+        .header("content-type", "application/json")
+        .header("x-runic-tenant", "alice")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_to_string(resp).await; // drive the stream to completion
+
+    // The model layer received the RESOLVED request: an inline image, no ref.
+    let captured = last.lock().unwrap().clone().expect("a model request");
+    let user = captured
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .expect("a user message");
+    let blocks = match &user.content {
+        MessageContent::Blocks(b) => b.clone(),
+        MessageContent::Text(_) => vec![],
+    };
+    assert!(
+        blocks
+            .iter()
+            .any(|c| matches!(c, ContentBlock::Image { media_type, data }
+        if media_type == "image/png" && !data.is_empty()))
+    );
+    assert!(
+        !blocks
+            .iter()
+            .any(|c| matches!(c, ContentBlock::ArtifactRef { .. }))
+    );
 }

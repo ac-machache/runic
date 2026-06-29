@@ -28,6 +28,12 @@ pub struct ToolResult {
     /// Error detail when `success` is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// When set, this (a summary) is persisted to the event log instead of
+    /// `output`; the full `output` reaches the model only for the immediate
+    /// next call. Lets a tool feed the model a large payload (e.g. a re-read
+    /// file) without writing the bytes into history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persisted_output: Option<String>,
 }
 
 impl ToolResult {
@@ -37,6 +43,7 @@ impl ToolResult {
             success: true,
             output: output.into(),
             error: None,
+            persisted_output: None,
         }
     }
     /// A failed result (the message is both the output and the error).
@@ -46,7 +53,13 @@ impl ToolResult {
             success: false,
             output: m.clone(),
             error: Some(m),
+            persisted_output: None,
         }
+    }
+    /// Persist `summary` to the log instead of the full `output`.
+    pub fn with_persisted_summary(mut self, summary: impl Into<String>) -> Self {
+        self.persisted_output = Some(summary.into());
+        self
     }
 }
 

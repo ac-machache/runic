@@ -19,7 +19,34 @@ fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
 
 impl Agent {
     pub(crate) fn prepare_request(&self) -> CompletionRequest {
-        let messages = self.state.messages_for_provider();
+        let mut messages = self.state.messages_for_provider();
+
+        // Swap summarized tool results for their full output, for this call
+        // only; the overlay is consumed (cleared) here.
+        let mut overlay = self
+            .transient_tool_outputs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if !overlay.is_empty() {
+            for msg in &mut messages {
+                let runic_types::MessageContent::Blocks(blocks) = &mut msg.content else {
+                    continue;
+                };
+                for block in blocks {
+                    if let runic_types::ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = block
+                        && let Some(full) = overlay.get(tool_use_id)
+                    {
+                        *content = full.clone();
+                    }
+                }
+            }
+            overlay.clear();
+        }
+        drop(overlay);
 
         let mut tools: Vec<ToolDefinition> = self
             .tools

@@ -31,6 +31,7 @@ pub fn App() -> impl IntoView {
     let usage = RwSignal::new(None::<(u64, u64)>);
     let input = RwSignal::new(String::new());
     let attachments = RwSignal::new(Vec::<Attachment>::new());
+    let uploading = RwSignal::new(0usize);
     let streaming = RwSignal::new(false);
     let context_json = RwSignal::new(String::new());
     let pending = RwSignal::new(None::<PendingAsk>);
@@ -143,7 +144,10 @@ pub fn App() -> impl IntoView {
     let send = move || {
         let text = input.get_untracked();
         let atts = attachments.get_untracked();
-        if (text.trim().is_empty() && atts.is_empty()) || streaming.get_untracked() {
+        if (text.trim().is_empty() && atts.is_empty())
+            || streaming.get_untracked()
+            || uploading.get_untracked() > 0
+        {
             return;
         }
         let c = client();
@@ -262,25 +266,34 @@ pub fn App() -> impl IntoView {
         let Some(files) = el.files() else {
             return;
         };
+        let Some(thread_id) = current.get_untracked() else {
+            leptos::logging::warn!("pick or create a thread before attaching files");
+            return;
+        };
         for i in 0..files.length() {
             let Some(file) = files.get(i) else { continue };
             let name = file.name();
+            let mut media_type = file.type_();
+            if media_type.is_empty() {
+                media_type = "application/octet-stream".to_string();
+            }
+            let c = client();
+            let thread_id = thread_id.clone();
+            // Upload to the artifact store now; the message will carry the id.
+            uploading.update(|n| *n += 1);
             spawn_local(async move {
                 let gfile = gloo_file::File::from(file);
-                match gloo_file::futures::read_as_data_url(&gfile).await {
-                    Ok(url) => {
-                        if let Some((media_type, data)) = parse_data_url(&url) {
-                            attachments.update(|a| {
-                                a.push(Attachment {
-                                    name,
-                                    media_type,
-                                    data,
-                                })
-                            });
-                        }
-                    }
+                match gloo_file::futures::read_as_bytes(&gfile).await {
+                    Ok(bytes) => match c
+                        .upload_artifact(&thread_id, bytes, &media_type, &name)
+                        .await
+                    {
+                        Ok(att) => attachments.update(|a| a.push(att)),
+                        Err(e) => leptos::logging::warn!("upload failed: {e}"),
+                    },
                     Err(e) => leptos::logging::warn!("read file failed: {e:?}"),
                 }
+                uploading.update(|n| *n = n.saturating_sub(1));
             });
         }
         // Reset so re-selecting the same file fires `change` again.
@@ -566,7 +579,9 @@ pub fn App() -> impl IntoView {
                                 } else {
                                     view! {
                                         <button class="send-btn" on:click=move |_| send()
-                                            prop:disabled=move || current.get().is_none()>"Send ↵"</button>
+                                            prop:disabled=move || current.get().is_none() || (uploading.get() > 0)>
+                                            {move || if uploading.get() > 0 { "Uploading…" } else { "Send ↵" }}
+                                        </button>
                                     }.into_any()
                                 }}
                             </div>
@@ -629,12 +644,4 @@ pub fn App() -> impl IntoView {
             </div>
         </div>
     }
-}
-
-/// Split a `data:<media_type>;base64,<data>` URL into its media type and base64.
-fn parse_data_url(s: &str) -> Option<(String, String)> {
-    let rest = s.strip_prefix("data:")?;
-    let (meta, data) = rest.split_once(',')?;
-    let media_type = meta.strip_suffix(";base64").unwrap_or(meta).to_string();
-    Some((media_type, data.to_string()))
 }

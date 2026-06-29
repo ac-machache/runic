@@ -7,10 +7,11 @@ use runic_memory::Memory;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_subagent::{SubagentBuilder, Subagents};
-use runic_substrate::Sessions;
+use runic_substrate::{ArtifactStore, Sessions};
 use runic_tool::Tool;
 use runic_tools::Tools;
 
+use crate::artifact_resolver::ArtifactResolver;
 use crate::child::FoundrySubagentBuilder;
 use crate::context::Context;
 use crate::memory_review::MemoryReviewHook;
@@ -37,6 +38,9 @@ pub struct Assembly {
     pub max_turns: Option<u32>,
     /// App-specific read-edit hooks (e.g. tenant-id injection into tool calls).
     pub write_hooks: Vec<Arc<dyn WriteHook>>,
+    /// When set, `ArtifactRef` blocks resolve to the stored bytes just before
+    /// each model call (the event log keeps only the reference).
+    pub artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 /// Wire every configured part into a fresh agent for `(tenant, session)`:
@@ -64,6 +68,14 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     let mut b = Agent::builder(a.provider.clone(), tenant, session)
         .model(&a.model)
         .system_prompt(ctx.render());
+
+    if let Some(store) = &a.artifact_store {
+        b = b.media_resolver(Arc::new(ArtifactResolver::new(
+            store.clone(),
+            tenant,
+            session,
+        )));
+    }
 
     // ── tools ──────────────────────────────────────────────────────────────
     if let Some(t) = &a.tools {

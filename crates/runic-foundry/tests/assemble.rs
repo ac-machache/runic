@@ -65,6 +65,7 @@ fn base_assembly(provider: Arc<dyn Provider>) -> Assembly {
         output_schema: None,
         max_turns: None,
         write_hooks: Vec::new(),
+        artifact_store: None,
     }
 }
 

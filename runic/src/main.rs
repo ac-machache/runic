@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
         output_schema: Some(report_schema()),
         max_turns: Some(8),
         write_hooks: vec![],
+        artifact_store: None,
     };
     let mut agent = assemble(&assembly, "local-user", "reportlog-smoke").await;
 

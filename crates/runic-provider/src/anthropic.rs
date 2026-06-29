@@ -807,6 +807,10 @@ fn convert_message(msg: &Message) -> ApiMessage {
                             Some(ApiContentBlock::RedactedThinking { data: data.clone() })
                         }
                     }
+                    ContentBlock::ArtifactRef { id, .. } => {
+                        tracing::warn!(artifact = %id, "unresolved ArtifactRef reached Anthropic — dropping");
+                        None
+                    }
                     ContentBlock::Unknown => None,
                 })
                 .collect();

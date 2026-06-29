@@ -7,7 +7,7 @@ use runic_foundry::{Assembly, assemble};
 use runic_mcp::{McpClient, McpTool, mcp_json};
 use runic_serve::AgentFactory;
 use runic_subagent::{SubagentBuilder, subagents};
-use runic_substrate::{SearchChatsTool, SessionStore};
+use runic_substrate::{ArtifactStore, ReadThreadArtifactTool, SearchChatsTool, SessionStore};
 use runic_tool::Tool;
 use runic_tools::{TavilyProvider, WebSearchTool, tools};
 
@@ -26,6 +26,7 @@ pub struct CoralFactory {
     pub toolsets: HashMap<String, Vec<Arc<dyn Tool>>>,
     pub builder: Arc<dyn SubagentBuilder>,
     pub store: Arc<dyn SessionStore>,
+    pub artifact_store: Arc<dyn ArtifactStore>,
     pub tavily_key: Option<String>,
     pub composio_key: Option<String>,
 }
@@ -39,6 +40,9 @@ impl AgentFactory for CoralFactory {
         let mut custom: Vec<Arc<dyn Tool>> =
             self.toolsets.get("coral").cloned().unwrap_or_default();
         custom.push(Arc::new(SearchChatsTool::new(self.store.clone())));
+        custom.push(Arc::new(ReadThreadArtifactTool::new(
+            self.artifact_store.clone(),
+        )));
         if let Some(key) = &self.tavily_key {
             custom.push(Arc::new(WebSearchTool::new(Arc::new(TavilyProvider::new(
                 key.clone(),
@@ -73,6 +77,7 @@ impl AgentFactory for CoralFactory {
                 Arc::new(crate::hooks::InjectIds::new("mcp__coral__", ["user_id"])),
                 Arc::new(crate::hooks::ComposioEntity),
             ],
+            artifact_store: Some(self.artifact_store.clone()),
         };
 
         assemble(&assembly, tenant, session_id).await

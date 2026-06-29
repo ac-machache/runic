@@ -8,6 +8,7 @@
 //!   (resilience over token-streaming for the recovery call).
 
 use runic_provider::{CompletionRequest, CompletionResponse, ProviderError, StreamEvent};
+use runic_types::{ContentBlock, MessageContent};
 use tokio::sync::mpsc;
 
 use crate::{Agent, AgentError, AgentEvent, retry};
@@ -15,8 +16,21 @@ use crate::{Agent, AgentError, AgentEvent, retry};
 impl Agent {
     pub(crate) async fn call_model(
         &self,
-        request: CompletionRequest,
+        mut request: CompletionRequest,
     ) -> Result<CompletionResponse, AgentError> {
+        if let Some(resolver) = &self.media_resolver {
+            resolver
+                .resolve(&mut request)
+                .await
+                .map_err(AgentError::Media)?;
+        }
+        // No artifact pointer may reach a provider — fail loud, never silently
+        // drop a file the model was meant to see.
+        if let Some(id) = first_artifact_ref(&request) {
+            return Err(AgentError::Media(format!(
+                "unresolved artifact reference {id} reached the model call"
+            )));
+        }
         if self.events.is_some() {
             self.call_model_streaming(request).await
         } else {
@@ -94,6 +108,18 @@ impl Agent {
 
         Err(primary_err.into())
     }
+}
+
+fn first_artifact_ref(request: &CompletionRequest) -> Option<&str> {
+    request.messages.iter().find_map(|m| {
+        let MessageContent::Blocks(blocks) = &m.content else {
+            return None;
+        };
+        blocks.iter().find_map(|b| match b {
+            ContentBlock::ArtifactRef { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+    })
 }
 
 /// Whether an error is worth retrying on a different model/provider.

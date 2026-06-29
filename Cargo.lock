@@ -2307,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "runic"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "runic-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "runic-commands"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2366,10 +2366,11 @@ dependencies = [
 
 [[package]]
 name = "runic-foundry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "runic-agent",
  "runic-hook",
  "runic-mcp",
@@ -2390,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "runic-hook"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "runic-state",
@@ -2402,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "runic-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2420,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "runic-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2439,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "runic-plugins"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "runic-commands",
  "runic-skills",
@@ -2453,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "runic-provider"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2471,16 +2472,18 @@ dependencies = [
 
 [[package]]
 name = "runic-serve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "futures",
  "proptest",
  "runic-agent",
+ "runic-foundry",
  "runic-provider",
  "runic-state",
  "runic-substrate",
@@ -2500,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "runic-skills"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2515,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "runic-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -2528,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "runic-subagent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2549,10 +2552,11 @@ dependencies = [
 
 [[package]]
 name = "runic-substrate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "chrono",
  "proptest",
  "runic-state",
@@ -2570,7 +2574,7 @@ dependencies = [
 
 [[package]]
 name = "runic-tool"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2581,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "runic-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2599,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "runic-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "rmp-serde",
@@ -2610,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "runic-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "futures",

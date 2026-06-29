@@ -17,6 +17,7 @@
 //! `PostgresArtifactStore`. This is the durable layer — separate from the
 //! agent's working filesystem (`runic-filesystem`).
 
+mod artifact_tool;
 mod artifacts;
 mod builders;
 mod local;
@@ -28,6 +29,7 @@ mod tool;
 #[cfg(feature = "postgres")]
 mod postgres;
 
+pub use artifact_tool::ReadThreadArtifactTool;
 pub use artifacts::{Artifact, ArtifactSource, ArtifactStore};
 pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use local::LocalArtifactStore;

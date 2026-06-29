@@ -107,6 +107,17 @@ pub enum ContentBlock {
     /// document input.
     #[serde(rename = "file")]
     File { media_type: String, data: String },
+    /// A reference to a stored artifact (filesystem/S3/…). Persisted in the
+    /// event log in place of inline bytes; a media-aware provider resolves it
+    /// to an `Image`/`File` (bytes loaded from the store) just before the model
+    /// call, so the log stays lean.
+    #[serde(rename = "artifact_ref")]
+    ArtifactRef {
+        id: String,
+        media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
     ToolUse {
@@ -223,6 +234,7 @@ impl MessageContent {
                     }
                     ContentBlock::Image { .. }
                     | ContentBlock::File { .. }
+                    | ContentBlock::ArtifactRef { .. }
                     | ContentBlock::RedactedThinking { .. }
                     | ContentBlock::Unknown => 0,
                 })
@@ -412,6 +424,30 @@ mod tests {
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "image");
         assert_eq!(json["media_type"], "image/png");
+    }
+
+    #[test]
+    fn test_content_block_artifact_ref_roundtrip() {
+        let block = ContentBlock::ArtifactRef {
+            id: "art-abc".to_string(),
+            media_type: "application/pdf".to_string(),
+            filename: Some("invoice.pdf".to_string()),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["type"], "artifact_ref");
+        assert_eq!(json["id"], "art-abc");
+        assert_eq!(json["filename"], "invoice.pdf");
+        let back: ContentBlock = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ContentBlock::ArtifactRef { id, .. } if id == "art-abc"));
+
+        // filename is optional and omitted when None
+        let no_name = ContentBlock::ArtifactRef {
+            id: "art-x".to_string(),
+            media_type: "image/png".to_string(),
+            filename: None,
+        };
+        let json = serde_json::to_value(&no_name).unwrap();
+        assert!(json.get("filename").is_none());
     }
 
     #[test]

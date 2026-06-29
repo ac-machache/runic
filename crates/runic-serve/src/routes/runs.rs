@@ -23,13 +23,16 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 
+use base64::Engine;
 use runic_agent::AgentEvent;
 use runic_state::SessionEvent;
-use runic_types::{ContentBlock, Message};
+use runic_substrate::ArtifactSource;
+use runic_types::{ContentBlock, Message, MessageContent};
 
 use crate::app::AppState;
 use crate::error::ServeError;
 use crate::human::HumanChannel;
+use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 use crate::tenant::Tenant;
 use crate::wire::{WireEvent, from_agent_event, from_session_event};
 
@@ -66,6 +69,103 @@ impl RunMessageRequest {
     }
 }
 
+/// One block after validation, before any write.
+enum Planned {
+    /// Inline media to store (decoded, not yet written).
+    Inline { media_type: String, bytes: Vec<u8> },
+    /// A block to keep as-is (text, or an already-validated ref).
+    Keep(ContentBlock),
+}
+
+/// Replace inline media with stored `ArtifactRef`s and validate any
+/// client-supplied `ArtifactRef` against `(tenant, thread)` — so the event log
+/// only ever receives references, regardless of what the client posted.
+///
+/// Validates *every* block (base64 decodes, ref ownership) before writing
+/// anything, so a request that's ultimately rejected stores no orphan bytes.
+async fn normalize_message(
+    state: &AppState,
+    tenant: &str,
+    thread_id: &str,
+    msg: Message,
+) -> Result<Message, ServeError> {
+    if !matches!(msg.content, MessageContent::Blocks(_)) {
+        return Ok(msg);
+    }
+    let MessageContent::Blocks(blocks) = msg.content else {
+        unreachable!()
+    };
+
+    let has_ref = blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ArtifactRef { .. }));
+    let owned = if has_ref {
+        state.artifact_store.list(tenant, thread_id).await?
+    } else {
+        Vec::new()
+    };
+
+    // Pass 1 — validate everything, write nothing.
+    let mut plan = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        match block {
+            ContentBlock::Image { media_type, data } | ContentBlock::File { media_type, data } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data.as_bytes())
+                    .map_err(|_| {
+                        ServeError::BadRequest("invalid base64 in content block".into())
+                    })?;
+                if bytes.len() > MAX_ARTIFACT_BYTES {
+                    return Err(ServeError::BadRequest(
+                        "inline media exceeds size limit".into(),
+                    ));
+                }
+                plan.push(Planned::Inline { media_type, bytes });
+            }
+            ContentBlock::ArtifactRef { id, filename, .. } => {
+                let Some(art) = owned.iter().find(|a| a.id == id) else {
+                    return Err(ServeError::BadRequest(
+                        "artifact_ref does not belong to this thread".into(),
+                    ));
+                };
+                // Persist the canonical stored MIME, not the client's claim.
+                plan.push(Planned::Keep(ContentBlock::ArtifactRef {
+                    media_type: art.mime_type.clone(),
+                    id,
+                    filename,
+                }));
+            }
+            other => plan.push(Planned::Keep(other)),
+        }
+    }
+
+    // Pass 2 — request is fully valid; now store inline media.
+    let mut out = Vec::with_capacity(plan.len());
+    for planned in plan {
+        match planned {
+            Planned::Keep(block) => out.push(block),
+            Planned::Inline { media_type, bytes } => {
+                let art = state
+                    .artifact_store
+                    .put(
+                        tenant,
+                        thread_id,
+                        &media_type,
+                        ArtifactSource::UserUpload,
+                        &bytes,
+                    )
+                    .await?;
+                out.push(ContentBlock::ArtifactRef {
+                    id: art.id,
+                    media_type,
+                    filename: None,
+                });
+            }
+        }
+    }
+    Ok(Message::user_with_blocks(out))
+}
+
 /// Body for `POST .../asks/:ask_id` — the operator's answer to an `ask_user`.
 #[derive(Debug, Deserialize)]
 pub struct AnswerRequest {
@@ -94,6 +194,8 @@ pub async fn create_and_stream_run(
     // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
+    // Inline media → stored refs; client refs validated. State only sees refs.
+    let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
 
     // App-resolved per-run context (provider override, identity keys, …).
     let mut run_ctx = state

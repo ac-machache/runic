@@ -62,6 +62,43 @@ impl ApiClient {
         Ok((threads, next_cursor))
     }
 
+    /// Upload a file to the thread's artifact store (raw body). Returns the
+    /// stored [`Attachment`] (id + size) the message will reference.
+    pub async fn upload_artifact(
+        &self,
+        thread: &str,
+        bytes: Vec<u8>,
+        media_type: &str,
+        filename: &str,
+    ) -> Result<Attachment, String> {
+        let url = format!("{}/threads/{thread}/artifacts", self.base);
+        let arr = js_sys::Uint8Array::from(bytes.as_slice());
+        let v: Value = Request::post(&url)
+            .header("x-runic-tenant", &self.tenant)
+            .header("content-type", media_type)
+            .header("x-runic-filename", filename)
+            .body(arr)
+            .map_err(e2s)?
+            .send()
+            .await
+            .map_err(e2s)?
+            .json()
+            .await
+            .map_err(e2s)?;
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| "upload response missing id".to_string())?
+            .to_string();
+        let size = v.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+        Ok(Attachment {
+            id,
+            name: filename.to_string(),
+            media_type: media_type.to_string(),
+            size,
+        })
+    }
+
     pub async fn create_thread(&self, id: Option<&str>) -> Result<String, String> {
         let url = format!("{}/threads", self.base);
         let body = match id {
@@ -170,18 +207,15 @@ impl ApiClient {
         let mut body = if attachments.is_empty() {
             serde_json::json!({ "message": message })
         } else {
-            // A text block + one image/file block per attachment.
+            // A text block + one artifact_ref pointer per attachment (the bytes
+            // already live in the store; the run body keeps only the reference).
             let mut content = vec![serde_json::json!({ "type": "text", "text": message })];
             for a in attachments {
-                let kind = if a.media_type.starts_with("image/") {
-                    "image"
-                } else {
-                    "file"
-                };
                 content.push(serde_json::json!({
-                    "type": kind,
+                    "type": "artifact_ref",
+                    "id": a.id,
                     "media_type": a.media_type,
-                    "data": a.data,
+                    "filename": a.name,
                 }));
             }
             serde_json::json!({ "content": content })

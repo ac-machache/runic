@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use runic_hook::{ReadHook, WriteHook};
-use runic_provider::{Provider, ProviderError};
+use runic_provider::{CompletionRequest, Provider, ProviderError};
 use runic_state::AgentState;
 use runic_tool::{ActivatedToolSet, HumanInterface, Tool};
 use tokio::sync::mpsc;
@@ -220,6 +220,16 @@ pub enum AgentError {
     /// The loop guard tripped its circuit breaker.
     #[error("loop guard circuit-broke: {0}")]
     CircuitBreak(String),
+    #[error("media resolution failed: {0}")]
+    Media(String),
+}
+
+/// Rewrites a request before the model call (e.g. swapping `artifact_ref` for
+/// stored bytes). Applied once per call so fallback providers see it too;
+/// `Err` fails the run.
+#[async_trait::async_trait]
+pub trait MediaResolver: Send + Sync {
+    async fn resolve(&self, request: &mut CompletionRequest) -> Result<(), String>;
 }
 
 /// What one model turn produced — the orchestrator's per-iteration record.
@@ -237,6 +247,7 @@ pub(crate) struct TurnRecord {
 pub struct Agent {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) fallbacks: Vec<FallbackProvider>,
+    pub(crate) media_resolver: Option<Arc<dyn MediaResolver>>,
     pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
     pub(crate) read_hooks: Vec<Arc<dyn ReadHook>>,
     pub(crate) write_hooks: Vec<Arc<dyn WriteHook>>,
@@ -253,6 +264,9 @@ pub struct Agent {
     /// `tool_search`). The loop adds their specs to each request and resolves
     /// calls against them. Shared with the activating tool.
     pub(crate) activated: Option<Arc<Mutex<ActivatedToolSet>>>,
+    /// Full tool outputs (keyed by tool_use_id) whose persisted form was
+    /// summarized — re-applied to the *next* request only, then cleared.
+    pub(crate) transient_tool_outputs: Mutex<HashMap<String, String>>,
 }
 
 impl Agent {
@@ -293,6 +307,7 @@ pub struct AgentBuilder {
     read_hooks: Vec<Arc<dyn ReadHook>>,
     write_hooks: Vec<Arc<dyn WriteHook>>,
     fallbacks: Vec<FallbackProvider>,
+    media_resolver: Option<Arc<dyn MediaResolver>>,
     activated: Option<Arc<Mutex<ActivatedToolSet>>>,
     config: AgentConfig,
 }
@@ -312,6 +327,7 @@ impl AgentBuilder {
             read_hooks: Vec::new(),
             write_hooks: Vec::new(),
             fallbacks: Vec::new(),
+            media_resolver: None,
             activated: None,
             config: AgentConfig::default(),
         }
@@ -371,6 +387,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn media_resolver(mut self, resolver: Arc<dyn MediaResolver>) -> Self {
+        self.media_resolver = Some(resolver);
+        self
+    }
+
     /// Share an [`ActivatedToolSet`] for on-demand tool activation (e.g. an
     /// MCP `tool_search` registered via [`AgentBuilder::tool`] writes into the
     /// same set the loop reads). Enables deferred/lazy tools.
@@ -404,6 +425,7 @@ impl AgentBuilder {
         Agent {
             provider: self.provider,
             fallbacks: self.fallbacks,
+            media_resolver: self.media_resolver,
             tools,
             read_hooks: self.read_hooks,
             write_hooks: self.write_hooks,
@@ -413,6 +435,7 @@ impl AgentBuilder {
             events: None,
             human: None,
             activated: self.activated,
+            transient_tool_outputs: Mutex::new(HashMap::new()),
         }
     }
 }

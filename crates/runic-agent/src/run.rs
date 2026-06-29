@@ -47,6 +47,9 @@ impl Agent {
     ) -> Result<RunOutcome, AgentError> {
         // Per-run config overwrites the map every run, so it can't leak.
         self.state.config = std::mem::take(&mut ctx.config);
+        // Drop any transient tool output a prior run left unconsumed (e.g. it
+        // stopped after dispatch) — it must never swap into this run's history.
+        self.clear_transient_tool_outputs();
         // Provider override is restored after the run.
         let saved_provider = ctx
             .provider
@@ -63,10 +66,18 @@ impl Agent {
 
         self.events = None; // drop the sink (closes the receiver)
         self.human = None; // drop the per-run human channel
+        self.clear_transient_tool_outputs();
         if let Some(p) = saved_provider {
             self.provider = p;
         }
         result
+    }
+
+    pub(crate) fn clear_transient_tool_outputs(&self) {
+        self.transient_tool_outputs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     /// The turn loop proper.

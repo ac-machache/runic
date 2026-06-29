@@ -354,6 +354,9 @@ fn convert_messages(
                                 });
                             }
                         }
+                        ContentBlock::ArtifactRef { id, .. } => {
+                            tracing::warn!(artifact = %id, "unresolved ArtifactRef reached Gemini — dropping");
+                        }
                         _ => {}
                     }
                 }

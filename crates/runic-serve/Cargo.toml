@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 runic-agent = { path = "../runic-agent" }
@@ -30,6 +31,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 runic-provider = { path = "../runic-provider" }
+runic-foundry = { path = "../runic-foundry" }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 proptest = { workspace = true }

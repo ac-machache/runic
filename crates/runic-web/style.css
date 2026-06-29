@@ -231,6 +231,11 @@ button { font-family: inherit; }
 .gear-btn { position: relative; appearance: none; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--ink-2); width: 36px; height: 36px; border-radius: 9px; cursor: pointer; flex: none; font-size: 15px; }
 .gear-btn:hover { color: var(--ink); }
 .gear-dot { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); }
+.attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 7px; padding: 4px 6px 4px 9px; font-size: 12px; color: var(--ink-2); max-width: 220px; }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-x { appearance: none; border: none; background: none; color: var(--ink-3); cursor: pointer; font-size: 12px; line-height: 1; padding: 2px; }
+.attach-x:hover { color: var(--brick); }
 .send-btn { appearance: none; border: none; background: var(--accent); color: var(--on-accent); height: 36px; padding: 0 16px; border-radius: 9px; cursor: pointer; font: 600 13px var(--sans); flex: none; display: flex; align-items: center; gap: 7px; }
 .send-btn:hover { background: var(--accent-press); }
 .send-btn:disabled { opacity: .5; cursor: not-allowed; }

@@ -11,7 +11,7 @@ use crate::api::ApiClient;
 use crate::events::{
     append_live, apply_event, cluster_runs, flush_live, items_from_events, parse_ask, usage_of,
 };
-use crate::model::{Item, LiveBuf, LiveKind, PendingAsk, ThreadInfo};
+use crate::model::{Attachment, Item, LiveBuf, LiveKind, PendingAsk, ThreadInfo};
 use crate::util::short_id;
 use crate::views::{render_item, render_run, render_state};
 
@@ -30,6 +30,7 @@ pub fn App() -> impl IntoView {
     let events = RwSignal::new(Vec::<Value>::new());
     let usage = RwSignal::new(None::<(u64, u64)>);
     let input = RwSignal::new(String::new());
+    let attachments = RwSignal::new(Vec::<Attachment>::new());
     let streaming = RwSignal::new(false);
     let context_json = RwSignal::new(String::new());
     let pending = RwSignal::new(None::<PendingAsk>);
@@ -141,7 +142,8 @@ pub fn App() -> impl IntoView {
 
     let send = move || {
         let text = input.get_untracked();
-        if text.trim().is_empty() || streaming.get_untracked() {
+        let atts = attachments.get_untracked();
+        if (text.trim().is_empty() && atts.is_empty()) || streaming.get_untracked() {
             return;
         }
         let c = client();
@@ -165,7 +167,18 @@ pub fn App() -> impl IntoView {
         };
 
         input.set(String::new());
-        items.update(|its| its.push(Item::User(text.clone())));
+        attachments.set(Vec::new());
+        let display = if atts.is_empty() {
+            text.clone()
+        } else {
+            let names = atts
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{text}\n📎 {names}")
+        };
+        items.update(|its| its.push(Item::User(display)));
         // The live SSE stream carries only agent deltas (no run_start / user
         // message), so mark the run boundary + prompt ourselves for the
         // Events clusterer.
@@ -205,7 +218,14 @@ pub fn App() -> impl IntoView {
                 }
             };
             let result = c
-                .stream_run(&thread_id, &text, context_val, signal.as_ref(), on_event)
+                .stream_run(
+                    &thread_id,
+                    &text,
+                    &atts,
+                    context_val,
+                    signal.as_ref(),
+                    on_event,
+                )
                 .await;
             flush_live(live, items);
             if let Err(e) = result {
@@ -232,6 +252,39 @@ pub fn App() -> impl IntoView {
         if let Some(c) = abort.get_untracked() {
             c.abort();
         }
+    };
+
+    let file_input_ref = NodeRef::<leptos::html::Input>::new();
+    let pick_files = move || {
+        let Some(el) = file_input_ref.get() else {
+            return;
+        };
+        let Some(files) = el.files() else {
+            return;
+        };
+        for i in 0..files.length() {
+            let Some(file) = files.get(i) else { continue };
+            let name = file.name();
+            spawn_local(async move {
+                let gfile = gloo_file::File::from(file);
+                match gloo_file::futures::read_as_data_url(&gfile).await {
+                    Ok(url) => {
+                        if let Some((media_type, data)) = parse_data_url(&url) {
+                            attachments.update(|a| {
+                                a.push(Attachment {
+                                    name,
+                                    media_type,
+                                    data,
+                                })
+                            });
+                        }
+                    }
+                    Err(e) => leptos::logging::warn!("read file failed: {e:?}"),
+                }
+            });
+        }
+        // Reset so re-selecting the same file fires `change` again.
+        el.set_value("");
     };
 
     let fetch_state = move || {
@@ -467,6 +520,21 @@ pub fn App() -> impl IntoView {
                                 </div>
                             })}
 
+                            {move || {
+                                let a = attachments.get();
+                                (!a.is_empty()).then(|| view! {
+                                    <div class="attach-row">
+                                        {a.into_iter().enumerate().map(|(i, att)| view! {
+                                            <span class="attach-chip" title=att.media_type.clone()>
+                                                <span class="attach-name">{att.name}</span>
+                                                <button class="attach-x" title="Remove"
+                                                    on:click=move |_| attachments.update(|v| { if i < v.len() { v.remove(i); } })>"✕"</button>
+                                            </span>
+                                        }).collect_view()}
+                                    </div>
+                                })
+                            }}
+
                             <div class="input-row">
                                 <textarea class="composer-input" spellcheck="false"
                                     rows=move || input.get().lines().count().clamp(1, 6).to_string()
@@ -484,6 +552,11 @@ pub fn App() -> impl IntoView {
                                     } else {
                                         "Create or pick a thread first".to_string()
                                     }></textarea>
+                                <button class="gear-btn" title="Attach files"
+                                    on:click=move |_| { if let Some(el) = file_input_ref.get() { el.click(); } }
+                                    prop:disabled=move || current.get().is_none() || streaming.get()>"📎"</button>
+                                <input type="file" multiple node_ref=file_input_ref style="display:none"
+                                    on:change=move |_| pick_files() />
                                 <button class="gear-btn" title="Configurable" on:click=move |_| config_open.update(|c| *c = !*c)>
                                     "⚙"
                                     {move || (!context_json.get().trim().is_empty()).then(|| view! { <span class="gear-dot"></span> })}
@@ -556,4 +629,12 @@ pub fn App() -> impl IntoView {
             </div>
         </div>
     }
+}
+
+/// Split a `data:<media_type>;base64,<data>` URL into its media type and base64.
+fn parse_data_url(s: &str) -> Option<(String, String)> {
+    let rest = s.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64").unwrap_or(meta).to_string();
+    Some((media_type, data.to_string()))
 }

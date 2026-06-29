@@ -8,6 +8,15 @@ pub struct ThreadInfo {
     pub label: Option<String>,
 }
 
+/// A file the user attached to the next message — base64 `data` ready to send
+/// as an image/file content block.
+#[derive(Clone, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    pub media_type: String,
+    pub data: String,
+}
+
 /// The actively-streaming tail. Tokens append here (one reactive text node)
 /// instead of mutating the `items` list, so per-token cost is O(1) DOM. On a
 /// boundary (a non-text event) or run end it flushes into `items` as a

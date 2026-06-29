@@ -10,7 +10,7 @@ use futures::StreamExt;
 use gloo_net::http::Request;
 use serde_json::Value;
 
-use crate::model::ThreadInfo;
+use crate::model::{Attachment, ThreadInfo};
 
 #[derive(Clone)]
 pub struct ApiClient {
@@ -161,12 +161,31 @@ impl ApiClient {
         &self,
         thread: &str,
         message: &str,
+        attachments: &[Attachment],
         context: Option<Value>,
         abort: Option<&web_sys::AbortSignal>,
         mut on_event: impl FnMut(Value),
     ) -> Result<(), String> {
         let url = format!("{}/threads/{thread}/runs/stream", self.base);
-        let mut body = serde_json::json!({ "message": message });
+        let mut body = if attachments.is_empty() {
+            serde_json::json!({ "message": message })
+        } else {
+            // A text block + one image/file block per attachment.
+            let mut content = vec![serde_json::json!({ "type": "text", "text": message })];
+            for a in attachments {
+                let kind = if a.media_type.starts_with("image/") {
+                    "image"
+                } else {
+                    "file"
+                };
+                content.push(serde_json::json!({
+                    "type": kind,
+                    "media_type": a.media_type,
+                    "data": a.data,
+                }));
+            }
+            serde_json::json!({ "content": content })
+        };
         // Per-run context (user_id, provider, allow_web_search, …) — sent
         // verbatim; the server's build_run_context decides what keys mean.
         if let Some(ctx) = context {

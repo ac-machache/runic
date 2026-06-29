@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 
 use runic_agent::AgentEvent;
+use runic_state::SessionEvent;
 use runic_types::{ContentBlock, Message};
 
 use crate::app::AppState;
@@ -107,14 +108,30 @@ pub async fn create_and_stream_run(
     // its event sender and the human channel).
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let (ask_tx, mut ask_rx) = mpsc::unbounded_channel::<WireEvent>();
+    // Clone the wire sender so the run task can report a failure on the same
+    // channel the HITL asks use (no third channel needed).
+    let err_tx = ask_tx.clone();
     run_ctx = run_ctx
         .with_events(evt_tx)
-        .with_human(Arc::new(HumanChannel::new(state.human_hub.clone(), ask_tx)));
+        .with_human(Arc::new(HumanChannel::new(
+            state.human_hub.clone(),
+            ask_tx,
+            tenant.clone(),
+            thread_id.clone(),
+        )));
 
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
-        let _ = agent.run_message_with(user_msg, run_ctx).await;
+        if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
+            // Surface the failure, then a terminal Done so the client closes.
+            let run_id = agent.state().current_run().map(|r| r.id);
+            let _ = err_tx.send(WireEvent::RunError {
+                run_id,
+                message: e.to_string(),
+            });
+            let _ = err_tx.send(WireEvent::Done { total_turns: None });
+        }
         // Guard drops → the next queued run on this thread proceeds. The agent
         // clears its event sender + human channel here, closing both rx ends.
     });
@@ -164,55 +181,88 @@ pub async fn replay_run(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let stored = state
+    // Thread must exist.
+    if state
         .session_store
-        .read_run_after(&tenant, &thread_id, &run_id, after_seq)
+        .session_meta(&tenant, &thread_id)
+        .await?
+        .is_none()
+    {
+        return Err(ServeError::ThreadNotFound { id: thread_id });
+    }
+
+    // All persisted events for this run (from seq 0) — for existence + the real
+    // terminal turn count; the replay payload is the slice after `after_seq`.
+    let all = state
+        .session_store
+        .read_run_after(&tenant, &thread_id, &run_id, 0)
         .await?;
 
-    // Internal-only kinds dropped; the run filter is in the store query.
-    let filtered: Vec<(u64, WireEvent)> = stored
+    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
+    let is_live = agent_arc
+        .lock()
+        .await
+        .state()
+        .current_run()
+        .is_some_and(|run| run.id == run_id);
+
+    if all.is_empty() && !is_live {
+        return Err(ServeError::RunNotFound {
+            id: run_id,
+            thread: thread_id,
+        });
+    }
+
+    let completed_turns = all.iter().rev().find_map(|s| match &s.event {
+        SessionEvent::RunEnd { outcome, .. } => Some(outcome.total_turns),
+        _ => None,
+    });
+
+    let replay: Vec<(u64, WireEvent)> = all
         .into_iter()
+        .filter(|s| s.seq > after_seq)
         .filter_map(|s| from_session_event(s.event).map(|w| (s.seq, w)))
         .collect();
 
-    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-
     let stream = stream! {
         // 1) replay the persisted events the client missed.
-        for (seq, wire) in filtered {
+        for (seq, wire) in replay {
             yield Ok(to_sse(&wire, Some(seq)));
         }
 
-        // 2) attach to the live broadcast only if this run is still in flight.
+        // 2) attach to the live broadcast only if still in flight, following
+        // until this run's RunEnd (capturing its real turn count).
         let rx = {
             let agent = agent_arc.lock().await;
-            let is_live = agent
-                .state()
-                .current_run()
-                .is_some_and(|run| run.id == run_id);
-            if is_live {
+            if agent.state().current_run().is_some_and(|run| run.id == run_id) {
                 agent.state().subscribe_events()
             } else {
                 None
             }
         };
-        let Some(rx) = rx else {
-            yield Ok(to_sse(&WireEvent::Done { total_turns: 0 }, None));
-            return;
-        };
-
-        let mut live = BroadcastStream::new(rx);
-        while let Some(received) = live.next().await {
-            let Ok(event) = received else { continue }; // skip Lagged
-            if event.run_id() != run_id {
-                continue;
-            }
-            if let Some(wire) = from_session_event(event) {
-                yield Ok(to_sse(&wire, None));
+        let mut total_turns = completed_turns;
+        if let Some(rx) = rx {
+            let mut live = BroadcastStream::new(rx);
+            while let Some(received) = live.next().await {
+                let Ok(event) = received else { continue }; // skip Lagged
+                if event.run_id() != run_id {
+                    continue;
+                }
+                let end_turns = match &event {
+                    SessionEvent::RunEnd { outcome, .. } => Some(outcome.total_turns),
+                    _ => None,
+                };
+                if let Some(wire) = from_session_event(event) {
+                    yield Ok(to_sse(&wire, None));
+                }
+                if let Some(t) = end_turns {
+                    total_turns = Some(t);
+                    break;
+                }
             }
         }
 
-        yield Ok(to_sse(&WireEvent::Done { total_turns: 0 }, None));
+        yield Ok(to_sse(&WireEvent::Done { total_turns }, None));
     };
 
     Ok(Sse::new(stream).keep_alive(
@@ -228,11 +278,14 @@ pub async fn replay_run(
 /// returns the answer into the conversation, and the run streams on.
 pub async fn submit_answer(
     State(state): State<AppState>,
-    Tenant(_tenant): Tenant,
-    Path((_thread_id, _run_id, ask_id)): Path<(String, String, String)>,
+    Tenant(tenant): Tenant,
+    Path((thread_id, _run_id, ask_id)): Path<(String, String, String)>,
     Json(body): Json<AnswerRequest>,
 ) -> Result<StatusCode, ServeError> {
-    if state.human_hub.resolve(&ask_id, body.answer) {
+    if state
+        .human_hub
+        .resolve(&tenant, &thread_id, &ask_id, body.answer)
+    {
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ServeError::BadRequest(format!(

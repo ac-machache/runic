@@ -5,7 +5,7 @@
 //! conversational messages in `chat_messages` (for `search`).
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Row};
 
 use runic_state::SessionEvent;
@@ -61,6 +61,16 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
         });
     }
     Ok(out)
+}
+
+fn row_to_meta(row: sqlx::postgres::PgRow) -> Result<SessionMeta> {
+    Ok(SessionMeta {
+        session_id: row.try_get("session_id").map_err(db)?,
+        label: row.try_get("label").map_err(db)?,
+        event_count: row.try_get::<i64, _>("event_count").map_err(db)? as u64,
+        created_at: row.try_get("created_at").map_err(db)?,
+        last_activity: row.try_get("last_activity").map_err(db)?,
+    })
 }
 
 /// Write one event inside an open transaction: bump the session seq, insert the
@@ -215,6 +225,58 @@ impl SessionStore for PostgresSessionStore {
         rows_to_events(rows)
     }
 
+    async fn read_after_limited(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let rows = sqlx::query(
+            "SELECT seq, event FROM session_events
+             WHERE tenant = $1 AND session_id = $2 AND seq > $3 ORDER BY seq LIMIT $4",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(after_seq as i64)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows_to_events(rows)
+    }
+
+    async fn list_sessions_page(
+        &self,
+        tenant: &str,
+        after: Option<(DateTime<Utc>, String)>,
+        limit: usize,
+    ) -> Result<Vec<SessionMeta>> {
+        let rows = match after {
+            Some((at, id)) => sqlx::query(
+                "SELECT session_id, label, event_count, created_at, last_activity
+                 FROM sessions
+                 WHERE tenant = $1 AND (last_activity, session_id) < ($2, $3)
+                 ORDER BY last_activity DESC, session_id DESC LIMIT $4",
+            )
+            .bind(tenant)
+            .bind(at)
+            .bind(id)
+            .bind(limit as i64),
+            None => sqlx::query(
+                "SELECT session_id, label, event_count, created_at, last_activity
+                 FROM sessions WHERE tenant = $1
+                 ORDER BY last_activity DESC, session_id DESC LIMIT $2",
+            )
+            .bind(tenant)
+            .bind(limit as i64),
+        }
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows.into_iter().map(row_to_meta).collect()
+    }
+
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>> {
         let rows = sqlx::query(
             "SELECT session_id, label, event_count, created_at, last_activity
@@ -227,15 +289,39 @@ impl SessionStore for PostgresSessionStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            out.push(SessionMeta {
-                session_id: row.try_get("session_id").map_err(db)?,
-                label: row.try_get("label").map_err(db)?,
-                event_count: row.try_get::<i64, _>("event_count").map_err(db)? as u64,
-                created_at: row.try_get("created_at").map_err(db)?,
-                last_activity: row.try_get("last_activity").map_err(db)?,
-            });
+            out.push(row_to_meta(row)?);
         }
         Ok(out)
+    }
+
+    async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>> {
+        let row = sqlx::query(
+            "SELECT session_id, label, event_count, created_at, last_activity
+             FROM sessions WHERE tenant = $1 AND session_id = $2",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+
+        row.map(row_to_meta).transpose()
+    }
+
+    async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sessions (tenant, session_id, label)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (tenant, session_id) DO UPDATE
+               SET label = EXCLUDED.label",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(label)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
     }
 
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()> {

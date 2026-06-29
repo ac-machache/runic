@@ -27,12 +27,21 @@ use crate::wire::WireEvent;
 /// How long `ask_user` waits for an answer before giving up.
 const ASK_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// A parked ask: who it belongs to (so an answer can't cross threads) plus the
+/// one-shot to fire. Run-id scoping follows once run ids are allocated before
+/// the run starts.
+struct PendingAsk {
+    tenant: String,
+    thread_id: String,
+    tx: oneshot::Sender<String>,
+}
+
 /// Shared registry bridging parked HITL asks to the HTTP layer. Lives in
 /// `AppState` so the answer endpoint can reach it.
 #[derive(Default)]
 pub struct HumanHub {
     /// Parked asks awaiting an answer, keyed by `ask_id`.
-    pending: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    pending: Mutex<HashMap<String, PendingAsk>>,
 }
 
 impl HumanHub {
@@ -40,20 +49,36 @@ impl HumanHub {
         Self::default()
     }
 
-    /// Register a parked ask, returning its id and the receiver to await.
-    fn register(&self) -> (String, oneshot::Receiver<String>) {
+    /// Register a parked ask for `(tenant, thread_id)`, returning its id and the
+    /// receiver to await.
+    fn register(&self, tenant: &str, thread_id: &str) -> (String, oneshot::Receiver<String>) {
         let ask_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(ask_id.clone(), tx);
+        self.pending.lock().unwrap().insert(
+            ask_id.clone(),
+            PendingAsk {
+                tenant: tenant.to_string(),
+                thread_id: thread_id.to_string(),
+                tx,
+            },
+        );
         (ask_id, rx)
     }
 
-    /// Deliver an answer to a parked ask. Returns false if nothing is pending
-    /// under `ask_id` (already answered, timed out, or never existed).
-    pub fn resolve(&self, ask_id: &str, answer: String) -> bool {
-        let tx = self.pending.lock().unwrap().remove(ask_id);
-        match tx {
-            Some(tx) => tx.send(answer).is_ok(),
+    /// Deliver an answer to a parked ask — only when `tenant` + `thread_id`
+    /// match the ask's scope. Returns false otherwise, or if nothing is pending
+    /// under `ask_id` (already answered, timed out, never existed).
+    pub fn resolve(&self, tenant: &str, thread_id: &str, ask_id: &str, answer: String) -> bool {
+        let mut pending = self.pending.lock().unwrap();
+        let scoped = matches!(
+            pending.get(ask_id),
+            Some(p) if p.tenant == tenant && p.thread_id == thread_id
+        );
+        if !scoped {
+            return false;
+        }
+        match pending.remove(ask_id) {
+            Some(p) => p.tx.send(answer).is_ok(),
             None => false,
         }
     }
@@ -70,18 +95,30 @@ pub struct HumanChannel {
     hub: Arc<HumanHub>,
     /// Sender into this run's SSE stream (merged alongside agent events).
     wire: mpsc::UnboundedSender<WireEvent>,
+    tenant: String,
+    thread_id: String,
 }
 
 impl HumanChannel {
-    pub fn new(hub: Arc<HumanHub>, wire: mpsc::UnboundedSender<WireEvent>) -> Self {
-        Self { hub, wire }
+    pub fn new(
+        hub: Arc<HumanHub>,
+        wire: mpsc::UnboundedSender<WireEvent>,
+        tenant: impl Into<String>,
+        thread_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            hub,
+            wire,
+            tenant: tenant.into(),
+            thread_id: thread_id.into(),
+        }
     }
 }
 
 #[async_trait]
 impl HumanInterface for HumanChannel {
     async fn ask(&self, question: &str, context: Option<&str>) -> anyhow::Result<String> {
-        let (ask_id, rx) = self.hub.register();
+        let (ask_id, rx) = self.hub.register(&self.tenant, &self.thread_id);
         let _ = self.wire.send(WireEvent::AskRequired {
             ask_id: ask_id.clone(),
             question: question.to_string(),
@@ -113,7 +150,7 @@ mod tests {
     async fn ask_parks_until_resolved_and_emits_event() {
         let hub = Arc::new(HumanHub::new());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let channel = HumanChannel::new(hub.clone(), tx);
+        let channel = HumanChannel::new(hub.clone(), tx, "t", "s");
 
         // Drive the ask concurrently; capture the ask_id from the emitted event.
         let h = hub.clone();
@@ -130,23 +167,42 @@ mod tests {
         };
         assert_eq!(question, "proceed?");
         assert_eq!(context.as_deref(), Some("ctx"));
-        assert!(h.resolve(&ask_id, "yes".into()));
+        assert!(h.resolve("t", "s", &ask_id, "yes".into()));
 
         let answer = task.await.unwrap().unwrap();
         assert_eq!(answer, "yes");
     }
 
+    #[tokio::test]
+    async fn resolve_rejects_wrong_scope() {
+        let hub = Arc::new(HumanHub::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let channel = HumanChannel::new(hub.clone(), tx, "t", "s");
+        let h = hub.clone();
+        let task = tokio::spawn(async move { channel.ask("q?", None).await });
+
+        let WireEvent::AskRequired { ask_id, .. } = rx.recv().await.unwrap() else {
+            panic!();
+        };
+        // Wrong tenant / thread must not deliver.
+        assert!(!h.resolve("other", "s", &ask_id, "x".into()));
+        assert!(!h.resolve("t", "other", &ask_id, "x".into()));
+        // Correct scope delivers.
+        assert!(h.resolve("t", "s", &ask_id, "yes".into()));
+        assert_eq!(task.await.unwrap().unwrap(), "yes");
+    }
+
     #[test]
     fn resolve_unknown_ask_is_false() {
         let hub = HumanHub::new();
-        assert!(!hub.resolve("ghost", "x".into()));
+        assert!(!hub.resolve("t", "s", "ghost", "x".into()));
     }
 
     #[tokio::test]
     async fn escalate_emits_and_returns() {
         let hub = Arc::new(HumanHub::new());
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let channel = HumanChannel::new(hub, tx);
+        let channel = HumanChannel::new(hub, tx, "t", "s");
         channel.escalate("blocked", None).await.unwrap();
         assert!(matches!(
             rx.recv().await.unwrap(),

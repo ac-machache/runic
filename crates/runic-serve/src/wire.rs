@@ -94,9 +94,21 @@ pub enum WireEvent {
     /// Non-fatal server-side warning (e.g. a run task that failed to join).
     Warning { message: String },
 
+    /// The run failed server-side (provider error, max turns, …). Terminal — a
+    /// `Done` follows so EventSource clients close cleanly.
+    RunError {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        message: String,
+    },
+
     /// Sent once after a stream finishes (live or replay). Clients use this to
-    /// close their EventSource cleanly.
-    Done { total_turns: u32 },
+    /// close their EventSource cleanly. `total_turns` is present only when the
+    /// run actually completed (a real `RunEnd`); never invented.
+    Done {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total_turns: Option<u32>,
+    },
 }
 
 impl WireEvent {
@@ -116,6 +128,7 @@ impl WireEvent {
             Self::AskRequired { .. } => "ask_required",
             Self::Escalated { .. } => "escalated",
             Self::Warning { .. } => "warning",
+            Self::RunError { .. } => "run_error",
             Self::Done { .. } => "done",
         }
     }
@@ -154,7 +167,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
                 output_tokens: outcome.usage.output_tokens,
             },
             WireEvent::Done {
-                total_turns: outcome.total_turns,
+                total_turns: Some(outcome.total_turns),
             },
         ],
     }
@@ -237,7 +250,12 @@ mod tests {
                 output_tokens: 20
             }
         ));
-        assert!(matches!(wires[1], WireEvent::Done { total_turns: 3 }));
+        assert!(matches!(
+            wires[1],
+            WireEvent::Done {
+                total_turns: Some(3)
+            }
+        ));
     }
 
     #[test]

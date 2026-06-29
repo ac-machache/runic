@@ -79,6 +79,9 @@ impl ThreadPool {
         // thread_id == session_id, so persisted events land under
         // sessions/<tenant>/<thread_id>.
         let mut agent = self.factory.build(tenant, thread_id).await;
+        if let Ok(Some(meta)) = self.session_store.session_meta(tenant, thread_id).await {
+            agent.state_mut().label = meta.label;
+        }
 
         // Install both sinks BEFORE the first run so the opening RunStart is
         // captured: a (lossy) broadcast for live UI subscribers and a lossless
@@ -107,6 +110,21 @@ impl ThreadPool {
             thread_id: thread_id.to_string(),
         };
         self.agents.write().await.remove(&key).is_some()
+    }
+
+    /// Mirror a persisted label into the warm agent, if this thread is loaded.
+    pub async fn set_warm_label(&self, tenant: &str, thread_id: &str, label: Option<String>) {
+        let key = ThreadKey {
+            tenant: tenant.to_string(),
+            thread_id: thread_id.to_string(),
+        };
+        let existing = {
+            let map = self.agents.read().await;
+            map.get(&key).cloned()
+        };
+        if let Some(agent) = existing {
+            agent.lock().await.state_mut().label = label;
+        }
     }
 
     /// How many (tenant, thread) agents are currently warm.

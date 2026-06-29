@@ -100,8 +100,49 @@ pub trait SessionStore: Send + Sync {
             .collect())
     }
 
+    /// Read up to `limit` events with `seq > after_seq`, in seq order. Default
+    /// truncates `read_after`; override to push the LIMIT into the store.
+    async fn read_after_limited(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        after_seq: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut events = self.read_after(tenant, session_id, after_seq).await?;
+        events.truncate(limit);
+        Ok(events)
+    }
+
     /// List a tenant's sessions with metadata, most-recently-active first.
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>>;
+
+    /// A page of `list_sessions` after the `(last_activity, session_id)` keyset
+    /// cursor. Default filters `list_sessions`; override to push the keyset +
+    /// LIMIT into the store.
+    async fn list_sessions_page(
+        &self,
+        tenant: &str,
+        after: Option<(DateTime<Utc>, String)>,
+        limit: usize,
+    ) -> Result<Vec<SessionMeta>> {
+        let all = self.list_sessions(tenant).await?;
+        Ok(all
+            .into_iter()
+            .filter(|m| match &after {
+                Some((at, id)) => (m.last_activity, m.session_id.as_str()) < (*at, id.as_str()),
+                None => true,
+            })
+            .take(limit)
+            .collect())
+    }
+
+    /// Read one session's metadata without scanning the event log.
+    async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>>;
+
+    /// Set the durable session label. Implementations should upsert session
+    /// metadata so titled empty sessions are materialized.
+    async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()>;
 
     /// Delete a session and all its events.
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()>;

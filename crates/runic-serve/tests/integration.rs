@@ -219,20 +219,49 @@ async fn list_threads_starts_empty() {
 }
 
 #[tokio::test]
-async fn get_thread_returns_empty_event_count_for_new_thread() {
+async fn get_unknown_thread_returns_404() {
     let app = make_router();
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/threads/some-thread")
+                .uri("/threads/never-created")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["thread_id"], "some-thread");
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn create_then_get_thread_is_materialized() {
+    let app = make_router();
+    let created = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/threads")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"thread_id":"t1"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let got = app
+        .oneshot(
+            Request::builder()
+                .uri("/threads/t1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got.status(), StatusCode::OK);
+    let body = body_to_json(got).await;
+    assert_eq!(body["thread_id"], "t1");
     assert_eq!(body["event_count"], 0);
 }
 

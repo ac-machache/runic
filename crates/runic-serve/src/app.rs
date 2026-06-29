@@ -51,7 +51,9 @@ pub fn router(config: ServeConfig) -> Router {
         )
         .route(
             "/threads/{thread_id}",
-            get(threads::get_thread).delete(threads::delete_thread),
+            get(threads::get_thread)
+                .patch(threads::update_thread)
+                .delete(threads::delete_thread),
         )
         .route("/threads/{thread_id}/events", get(threads::thread_events))
         .route("/threads/{thread_id}/state", get(threads::thread_state))

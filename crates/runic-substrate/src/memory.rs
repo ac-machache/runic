@@ -99,6 +99,7 @@ impl ArtifactStore for MemoryArtifactStore {
 
 struct SessionRec {
     events: Vec<StoredEvent>,
+    label: Option<String>,
     created_at: DateTime<Utc>,
     last_activity: DateTime<Utc>,
 }
@@ -134,6 +135,7 @@ impl SessionStore for MemorySessionStore {
             .entry((tenant.to_string(), session_id.to_string()))
             .or_insert_with(|| SessionRec {
                 events: Vec::new(),
+                label: None,
                 created_at: event_at(event),
                 last_activity: event_at(event),
             });
@@ -184,7 +186,7 @@ impl SessionStore for MemorySessionStore {
             .filter(|((t, _), _)| t == tenant)
             .map(|((_, sid), rec)| SessionMeta {
                 session_id: sid.clone(),
-                label: None,
+                label: rec.label.clone(),
                 event_count: rec.events.len() as u64,
                 created_at: rec.created_at,
                 last_activity: rec.last_activity,
@@ -192,6 +194,36 @@ impl SessionStore for MemorySessionStore {
             .collect();
         out.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
         Ok(out)
+    }
+
+    async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>> {
+        Ok(self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&(tenant.to_string(), session_id.to_string()))
+            .map(|rec| SessionMeta {
+                session_id: session_id.to_string(),
+                label: rec.label.clone(),
+                event_count: rec.events.len() as u64,
+                created_at: rec.created_at,
+                last_activity: rec.last_activity,
+            }))
+    }
+
+    async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()> {
+        let now = Utc::now();
+        let mut sessions = self.sessions.lock().unwrap();
+        let rec = sessions
+            .entry((tenant.to_string(), session_id.to_string()))
+            .or_insert_with(|| SessionRec {
+                events: Vec::new(),
+                label: None,
+                created_at: now,
+                last_activity: now,
+            });
+        rec.label = label.map(str::to_string);
+        Ok(())
     }
 
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()> {

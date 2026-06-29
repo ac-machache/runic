@@ -24,17 +24,19 @@ impl LocalArtifactStore {
         Self { root: root.into() }
     }
 
-    fn blob_path(&self, id: &str) -> PathBuf {
-        self.root.join("blobs").join(id)
+    fn blob_path(&self, id: &str) -> Result<PathBuf> {
+        safe_artifact_id(id)?;
+        Ok(self.root.join("blobs").join(id))
     }
-    fn meta_path(&self, id: &str) -> PathBuf {
-        self.root.join("blobs").join(format!("{id}.json"))
+    fn meta_path(&self, id: &str) -> Result<PathBuf> {
+        safe_artifact_id(id)?;
+        Ok(self.root.join("blobs").join(format!("{id}.json")))
     }
     fn index_path(&self, tenant: &str, session_id: &str) -> PathBuf {
         self.root
             .join("index")
-            .join(sanitize(tenant))
-            .join(format!("{}.jsonl", sanitize(session_id)))
+            .join(encode_segment(tenant))
+            .join(format!("{}.jsonl", encode_segment(session_id)))
     }
 }
 
@@ -63,11 +65,11 @@ impl ArtifactStore for LocalArtifactStore {
             created_at: Utc::now(),
         };
 
-        let blob = self.blob_path(&artifact.id);
+        let blob = self.blob_path(&artifact.id)?;
         ensure_parent(&blob).await?;
         tokio::fs::write(&blob, bytes).await.map_err(io)?;
         tokio::fs::write(
-            self.meta_path(&artifact.id),
+            self.meta_path(&artifact.id)?,
             serde_json::to_vec(&artifact).map_err(serde)?,
         )
         .await
@@ -89,7 +91,7 @@ impl ArtifactStore for LocalArtifactStore {
     }
 
     async fn get(&self, id: &str) -> Result<Vec<u8>> {
-        match tokio::fs::read(self.blob_path(id)).await {
+        match tokio::fs::read(self.blob_path(id)?).await {
             Ok(b) => Ok(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::NotFound(id.into())),
             Err(e) => Err(io(e)),
@@ -97,7 +99,7 @@ impl ArtifactStore for LocalArtifactStore {
     }
 
     async fn head(&self, id: &str) -> Result<Artifact> {
-        match tokio::fs::read(self.meta_path(id)).await {
+        match tokio::fs::read(self.meta_path(id)?).await {
             Ok(b) => serde_json::from_slice(&b).map_err(serde),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Error::NotFound(id.into())),
             Err(e) => Err(io(e)),
@@ -118,8 +120,14 @@ impl ArtifactStore for LocalArtifactStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        let _ = tokio::fs::remove_file(self.blob_path(id)).await;
-        let _ = tokio::fs::remove_file(self.meta_path(id)).await;
+        let Ok(blob) = self.blob_path(id) else {
+            return Ok(());
+        };
+        let Ok(meta) = self.meta_path(id) else {
+            return Ok(());
+        };
+        let _ = tokio::fs::remove_file(blob).await;
+        let _ = tokio::fs::remove_file(meta).await;
         Ok(())
     }
 }
@@ -131,16 +139,41 @@ async fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+fn safe_artifact_id(id: &str) -> Result<&str> {
+    if !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        Ok(id)
+    } else {
+        Err(Error::NotFound(id.to_string()))
+    }
+}
+
+fn encode_segment(s: &str) -> String {
+    if s.is_empty() {
+        return "%EMPTY".to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(hex_digit(b >> 4));
+            out.push(hex_digit(b & 0x0f));
+        }
+    }
+    out
+}
+
+fn hex_digit(n: u8) -> char {
+    match n {
+        0..=9 => char::from(b'0' + n),
+        10..=15 => char::from(b'A' + (n - 10)),
+        _ => unreachable!("hex digit nibble"),
+    }
 }
 
 #[cfg(test)]
@@ -169,5 +202,85 @@ mod tests {
         assert_eq!(reopened.list("org1", "sess").await.unwrap().len(), 1);
         s.delete(&a.id).await.unwrap();
         assert!(matches!(s.get(&a.id).await, Err(Error::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn local_artifact_index_paths_do_not_collapse_similar_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = LocalArtifactStore::new(tmp.path());
+        let slash_tenant = s
+            .put(
+                "tenant/a",
+                "session",
+                "text/plain",
+                ArtifactSource::UserUpload,
+                b"slash tenant",
+            )
+            .await
+            .unwrap();
+        let underscore_tenant = s
+            .put(
+                "tenant_a",
+                "session",
+                "text/plain",
+                ArtifactSource::UserUpload,
+                b"underscore tenant",
+            )
+            .await
+            .unwrap();
+        let slash_session = s
+            .put(
+                "tenant",
+                "session/1",
+                "text/plain",
+                ArtifactSource::UserUpload,
+                b"slash session",
+            )
+            .await
+            .unwrap();
+        let underscore_session = s
+            .put(
+                "tenant",
+                "session_1",
+                "text/plain",
+                ArtifactSource::UserUpload,
+                b"underscore session",
+            )
+            .await
+            .unwrap();
+
+        let tenant_slash = s.list("tenant/a", "session").await.unwrap();
+        assert_eq!(tenant_slash.len(), 1);
+        assert_eq!(tenant_slash[0].id, slash_tenant.id);
+
+        let tenant_underscore = s.list("tenant_a", "session").await.unwrap();
+        assert_eq!(tenant_underscore.len(), 1);
+        assert_eq!(tenant_underscore[0].id, underscore_tenant.id);
+
+        let session_slash = s.list("tenant", "session/1").await.unwrap();
+        assert_eq!(session_slash.len(), 1);
+        assert_eq!(session_slash[0].id, slash_session.id);
+
+        let session_underscore = s.list("tenant", "session_1").await.unwrap();
+        assert_eq!(session_underscore.len(), 1);
+        assert_eq!(session_underscore[0].id, underscore_session.id);
+    }
+
+    #[tokio::test]
+    async fn local_artifact_ids_cannot_escape_blob_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        tokio::fs::write(&outside, b"do not touch").await.unwrap();
+        let s = LocalArtifactStore::new(tmp.path().join("store"));
+
+        assert!(matches!(s.get("../outside").await, Err(Error::NotFound(_))));
+        assert!(matches!(
+            s.head("../outside").await,
+            Err(Error::NotFound(_))
+        ));
+        s.delete("../outside").await.unwrap();
+
+        let still_there = tokio::fs::read(&outside).await.unwrap();
+        assert_eq!(still_there, b"do not touch");
     }
 }

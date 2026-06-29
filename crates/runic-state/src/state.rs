@@ -15,7 +15,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use runic_types::Message;
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::event::SessionEvent;
 
@@ -100,6 +100,14 @@ pub struct AgentState {
     /// addition to appending. `None` on a deserialized (replay) state.
     #[serde(skip, default)]
     events_tx: Option<broadcast::Sender<SessionEvent>>,
+
+    // Lossless sink for the durable persister, fanned alongside `events_tx`.
+    #[serde(skip, default)]
+    persist_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+
+    // Folded from `events` in `push_event` so the turn build skips re-scanning.
+    #[serde(skip, default)]
+    messages: Vec<Message>,
 }
 
 impl AgentState {
@@ -119,6 +127,8 @@ impl AgentState {
             runtime: RunTimeContext::default(),
             config: serde_json::Map::new(),
             events_tx: None,
+            persist_tx: None,
+            messages: Vec::new(),
         }
     }
 
@@ -132,6 +142,12 @@ impl AgentState {
         self.events_tx = Some(tx);
     }
 
+    /// Install the lossless persister sink — `push_event` fans every event here
+    /// in addition to the (lossy) broadcast.
+    pub fn set_persist_tx(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.persist_tx = Some(tx);
+    }
+
     /// Subscribe to future events (None if no channel is installed).
     pub fn subscribe_events(&self) -> Option<broadcast::Receiver<SessionEvent>> {
         self.events_tx.as_ref().map(|tx| tx.subscribe())
@@ -143,22 +159,22 @@ impl AgentState {
         if let Some(tx) = &self.events_tx {
             let _ = tx.send(ev.clone());
         }
+        if let Some(tx) = &self.persist_tx {
+            let _ = tx.send(ev.clone());
+        }
+        match &ev {
+            SessionEvent::Message { msg, .. } => self.messages.push(msg.clone()),
+            SessionEvent::StateSnapshot { messages, .. } => self.messages = messages.clone(),
+            _ => {}
+        }
         self.events.push(ev);
     }
 
-    /// Fold the event log into the message list the provider sees.
-    /// `StateSnapshot` replaces accumulated history (compaction); `Message`
-    /// events append.
+    /// The provider-facing message list — `Message` events appended,
+    /// `StateSnapshot` replacing history (compaction). Maintained in
+    /// `push_event`, so this is a clone, not a re-fold.
     pub fn messages_for_provider(&self) -> Vec<Message> {
-        let mut msgs: Vec<Message> = Vec::new();
-        for ev in &self.events {
-            match ev {
-                SessionEvent::Message { msg, .. } => msgs.push(msg.clone()),
-                SessionEvent::StateSnapshot { messages, .. } => msgs = messages.clone(),
-                _ => {}
-            }
-        }
-        msgs
+        self.messages.clone()
     }
 
     /// Grouped view of runs, derived from the log. Cheap, on demand.
@@ -222,4 +238,87 @@ pub struct RunView<'a> {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub events: Vec<&'a SessionEvent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(text: &str, user: bool) -> SessionEvent {
+        let msg = if user {
+            Message::user(text)
+        } else {
+            Message::assistant(text)
+        };
+        SessionEvent::Message {
+            run_id: "r".into(),
+            msg,
+            at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn push_event_folds_messages_and_skips_non_messages() {
+        let mut state = AgentState::new("u", "s", "sys");
+        state.push_event(SessionEvent::RunStart {
+            run_id: "r".into(),
+            at: Utc::now(),
+        });
+        state.push_event(message("hello", true));
+        state.push_event(message("hi there", false));
+
+        let msgs = state.messages_for_provider();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(state.events.len(), 3);
+    }
+
+    #[test]
+    fn state_snapshot_replaces_the_message_view() {
+        let mut state = AgentState::new("u", "s", "sys");
+        state.push_event(message("old one", true));
+        state.push_event(message("old two", false));
+        state.push_event(SessionEvent::StateSnapshot {
+            run_id: "r".into(),
+            messages: vec![Message::user("compacted")],
+            system_prompt: "sys".into(),
+            reason: "compaction".into(),
+            at: Utc::now(),
+        });
+        state.push_event(message("after", false));
+
+        let msgs = state.messages_for_provider();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].content.text_content(), "compacted");
+        assert_eq!(msgs[1].content.text_content(), "after");
+    }
+
+    #[test]
+    fn view_matches_a_full_fold_after_replay_style_pushes() {
+        let mut state = AgentState::new("u", "s", "sys");
+        for ev in [
+            SessionEvent::RunStart {
+                run_id: "r".into(),
+                at: Utc::now(),
+            },
+            message("a", true),
+            message("b", false),
+            message("c", true),
+        ] {
+            state.push_event(ev);
+        }
+        let folded: Vec<_> = state
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Message { msg, .. } => Some(msg.content.text_content()),
+                _ => None,
+            })
+            .collect();
+        let view: Vec<_> = state
+            .messages_for_provider()
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect();
+        assert_eq!(view, folded);
+    }
 }

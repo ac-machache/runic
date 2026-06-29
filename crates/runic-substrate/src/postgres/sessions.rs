@@ -63,77 +63,103 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
     Ok(out)
 }
 
+/// Write one event inside an open transaction: bump the session seq, insert the
+/// event, and project message text into the search index. Returns the seq.
+async fn write_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant: &str,
+    session_id: &str,
+    event: &SessionEvent,
+) -> Result<i64> {
+    let at = event_at(event);
+    let kind = event_kind(event);
+    let run_id = event.run_id().to_string();
+    let json = serde_json::to_value(event).map_err(serde)?;
+
+    let seq: i64 = sqlx::query_scalar(
+        "INSERT INTO sessions (tenant, session_id, last_seq, event_count, last_activity)
+         VALUES ($1, $2, 1, 1, $3)
+         ON CONFLICT (tenant, session_id) DO UPDATE
+           SET last_seq = sessions.last_seq + 1,
+               event_count = sessions.event_count + 1,
+               last_activity = EXCLUDED.last_activity
+         RETURNING last_seq",
+    )
+    .bind(tenant)
+    .bind(session_id)
+    .bind(at)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db)?;
+
+    sqlx::query(
+        "INSERT INTO session_events (tenant, session_id, seq, kind, run_id, at, event)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(tenant)
+    .bind(session_id)
+    .bind(seq)
+    .bind(kind)
+    .bind(&run_id)
+    .bind(at)
+    .bind(&json)
+    .execute(&mut **tx)
+    .await
+    .map_err(db)?;
+
+    if let SessionEvent::Message { msg, .. } = event {
+        let role = match msg.role {
+            Role::User => Some("user"),
+            Role::Assistant => Some("assistant"),
+            Role::System => None,
+        };
+        if let Some(role) = role {
+            let text = msg.content.text_content();
+            if !text.trim().is_empty() {
+                sqlx::query(
+                    "INSERT INTO chat_messages (tenant, session_id, seq, role, text, at)
+                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
+                )
+                .bind(tenant)
+                .bind(session_id)
+                .bind(seq)
+                .bind(role)
+                .bind(&text)
+                .bind(at)
+                .execute(&mut **tx)
+                .await
+                .map_err(db)?;
+            }
+        }
+    }
+
+    Ok(seq)
+}
+
 #[async_trait]
 impl SessionStore for PostgresSessionStore {
     async fn append(&self, tenant: &str, session_id: &str, event: &SessionEvent) -> Result<u64> {
-        let at = event_at(event);
-        let kind = event_kind(event);
-        let run_id = event.run_id().to_string();
-        let json = serde_json::to_value(event).map_err(serde)?;
-
         let mut tx = self.pool.begin().await.map_err(db)?;
-
-        // Atomic seq + metadata: the upsert returns the next seq.
-        let seq: i64 = sqlx::query_scalar(
-            "INSERT INTO sessions (tenant, session_id, last_seq, event_count, last_activity)
-             VALUES ($1, $2, 1, 1, $3)
-             ON CONFLICT (tenant, session_id) DO UPDATE
-               SET last_seq = sessions.last_seq + 1,
-                   event_count = sessions.event_count + 1,
-                   last_activity = EXCLUDED.last_activity
-             RETURNING last_seq",
-        )
-        .bind(tenant)
-        .bind(session_id)
-        .bind(at)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(db)?;
-
-        sqlx::query(
-            "INSERT INTO session_events (tenant, session_id, seq, kind, run_id, at, event)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(tenant)
-        .bind(session_id)
-        .bind(seq)
-        .bind(kind)
-        .bind(&run_id)
-        .bind(at)
-        .bind(&json)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-
-        // Project conversational text into the search index.
-        if let SessionEvent::Message { msg, .. } = event {
-            let role = match msg.role {
-                Role::User => Some("user"),
-                Role::Assistant => Some("assistant"),
-                Role::System => None,
-            };
-            if let Some(role) = role {
-                let text = msg.content.text_content();
-                if !text.trim().is_empty() {
-                    sqlx::query(
-                        "INSERT INTO chat_messages (tenant, session_id, seq, role, text, at)
-                         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
-                    )
-                    .bind(tenant)
-                    .bind(session_id)
-                    .bind(seq)
-                    .bind(role)
-                    .bind(&text)
-                    .bind(at)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db)?;
-                }
-            }
-        }
-
+        let seq = write_event(&mut tx, tenant, session_id, event).await?;
         tx.commit().await.map_err(db)?;
         Ok(seq as u64)
+    }
+
+    async fn append_batch(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        for event in events {
+            write_event(&mut tx, tenant, session_id, event).await?;
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(())
     }
 
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {

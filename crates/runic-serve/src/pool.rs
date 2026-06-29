@@ -16,15 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use runic_agent::Agent;
-use runic_state::SessionEvent;
+use runic_state::{EVENT_BROADCAST_CAPACITY, SessionEvent};
 use runic_substrate::SessionStore;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use crate::factory::BoxedAgentFactory;
-
-/// Capacity of the per-agent `SessionEvent` broadcast (persister + any live
-/// replay subscribers). A subscriber that falls this far behind sees `Lagged`.
-const EVENT_CHANNEL_CAP: usize = 256;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ThreadKey {
@@ -84,12 +80,15 @@ impl ThreadPool {
         // sessions/<tenant>/<thread_id>.
         let mut agent = self.factory.build(tenant, thread_id).await;
 
-        // Install the event broadcast + persister BEFORE the first run so the
-        // opening RunStart is captured. One persister per agent.
-        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+        // Install both sinks BEFORE the first run so the opening RunStart is
+        // captured: a (lossy) broadcast for live UI subscribers and a lossless
+        // mpsc for the durable persister.
+        let (tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         agent.state_mut().set_events_tx(tx);
+        let (persist_tx, persist_rx) = mpsc::unbounded_channel();
+        agent.state_mut().set_persist_tx(persist_tx);
         spawn_persister(
-            rx,
+            persist_rx,
             self.session_store.clone(),
             tenant.to_string(),
             thread_id.to_string(),
@@ -125,23 +124,22 @@ impl ThreadPool {
 /// agent. `Lagged` is skipped (the store has the durable copy of older events
 /// via earlier appends); `Closed` ends the task when the agent is dropped.
 fn spawn_persister(
-    mut rx: broadcast::Receiver<SessionEvent>,
+    mut rx: mpsc::UnboundedReceiver<SessionEvent>,
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
 ) {
     tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if let Err(e) = store.append(&tenant, &session_id, &event).await {
-                        tracing::warn!(%tenant, %session_id, error = %e, "persist session event failed");
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(%tenant, %session_id, skipped = n, "persister lagged");
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+        // Block for one event, then drain everything else already buffered so a
+        // burst persists in a single batched transaction. The channel is
+        // unbounded, so nothing is ever dropped.
+        while let Some(first) = rx.recv().await {
+            let mut batch = vec![first];
+            while let Ok(event) = rx.try_recv() {
+                batch.push(event);
+            }
+            if let Err(e) = store.append_batch(&tenant, &session_id, &batch).await {
+                tracing::warn!(%tenant, %session_id, error = %e, "persist session events failed");
             }
         }
     });

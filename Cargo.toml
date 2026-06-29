@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "runic",
     "crates/runic-types",
     "crates/runic-state",
     "crates/runic-provider",

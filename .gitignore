@@ -10,6 +10,9 @@ Cargo.lock.bak
 # local runic serve data (sessions, spillover, blobs)
 /runic-data
 
+# local app wiring; the shared harness lives under crates/
+/runic/src/
+
 # trunk build output
 /crates/runic-web/dist
 

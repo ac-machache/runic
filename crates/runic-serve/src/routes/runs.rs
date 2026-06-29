@@ -166,13 +166,12 @@ pub async fn replay_run(
 
     let stored = state
         .session_store
-        .read_after(&tenant, &thread_id, after_seq)
+        .read_run_after(&tenant, &thread_id, &run_id, after_seq)
         .await?;
 
-    // Events for THIS run, internal-only kinds dropped.
+    // Internal-only kinds dropped; the run filter is in the store query.
     let filtered: Vec<(u64, WireEvent)> = stored
         .into_iter()
-        .filter(|s| s.event.run_id() == run_id)
         .filter_map(|s| from_session_event(s.event).map(|w| (s.seq, w)))
         .collect();
 

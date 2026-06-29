@@ -9,7 +9,7 @@
 //! - keyed by **`(user_id, session_id)`**.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -179,39 +179,60 @@ impl AgentState {
 
     /// Grouped view of runs, derived from the log. Cheap, on demand.
     pub fn runs(&self) -> Vec<RunView<'_>> {
-        let mut order: Vec<String> = Vec::new();
+        let mut views: Vec<RunView<'_>> = Vec::new();
+        let mut index: HashMap<&str, usize> = HashMap::new();
         for ev in &self.events {
             let id = ev.run_id();
-            if !order.iter().any(|s| s == id) {
-                order.push(id.to_string());
+            let i = *index.entry(id).or_insert_with(|| {
+                views.push(RunView {
+                    id: id.to_string(),
+                    started_at: None,
+                    ended_at: None,
+                    events: Vec::new(),
+                });
+                views.len() - 1
+            });
+            views[i].events.push(ev);
+            match ev {
+                SessionEvent::RunStart { at, .. } => views[i].started_at = Some(*at),
+                SessionEvent::RunEnd { at, .. } => views[i].ended_at = Some(*at),
+                _ => {}
             }
         }
-        order
-            .into_iter()
-            .map(|id| {
-                let events: Vec<&SessionEvent> =
-                    self.events.iter().filter(|e| e.run_id() == id).collect();
-                let started_at = events.iter().find_map(|e| match e {
-                    SessionEvent::RunStart { at, .. } => Some(*at),
-                    _ => None,
-                });
-                let ended_at = events.iter().find_map(|e| match e {
-                    SessionEvent::RunEnd { at, .. } => Some(*at),
-                    _ => None,
-                });
-                RunView {
-                    id,
-                    started_at,
-                    ended_at,
-                    events,
-                }
-            })
-            .collect()
+        views
     }
 
-    /// The most recent run with no `RunEnd` yet (in flight).
+    /// The most recent run with a `RunStart` but no `RunEnd` — found by scanning
+    /// from the end, without materializing every run.
     pub fn current_run(&self) -> Option<RunView<'_>> {
-        self.runs().into_iter().find(|r| r.ended_at.is_none())
+        let mut ended: HashSet<&str> = HashSet::new();
+        let mut current: Option<&str> = None;
+        for ev in self.events.iter().rev() {
+            match ev {
+                SessionEvent::RunEnd { run_id, .. } => {
+                    ended.insert(run_id);
+                }
+                SessionEvent::RunStart { run_id, .. } => {
+                    if !ended.contains(run_id.as_str()) {
+                        current = Some(run_id);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let id = current?;
+        let events: Vec<&SessionEvent> = self.events.iter().filter(|e| e.run_id() == id).collect();
+        let started_at = events.iter().find_map(|e| match e {
+            SessionEvent::RunStart { at, .. } => Some(*at),
+            _ => None,
+        });
+        Some(RunView {
+            id: id.to_string(),
+            started_at,
+            ended_at: None,
+            events,
+        })
     }
 
     /// Most recent assistant text in the log (e.g. the final answer).
@@ -320,5 +341,35 @@ mod tests {
             .map(|m| m.content.text_content())
             .collect();
         assert_eq!(view, folded);
+    }
+
+    #[test]
+    fn runs_group_in_order_and_current_run_is_in_flight() {
+        let mut state = AgentState::new("u", "s", "sys");
+        state.push_event(SessionEvent::RunStart {
+            run_id: "r1".into(),
+            at: Utc::now(),
+        });
+        state.push_event(SessionEvent::RunEnd {
+            run_id: "r1".into(),
+            outcome: crate::event::RunOutcome::default(),
+            at: Utc::now(),
+        });
+        state.push_event(SessionEvent::RunStart {
+            run_id: "r2".into(),
+            at: Utc::now(),
+        });
+
+        let runs = state.runs();
+        assert_eq!(
+            runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["r1", "r2"]
+        );
+        assert!(runs[0].ended_at.is_some());
+        assert!(runs[1].ended_at.is_none());
+
+        let current = state.current_run().unwrap();
+        assert_eq!(current.id, "r2");
+        assert!(current.ended_at.is_none());
     }
 }

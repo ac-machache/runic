@@ -194,6 +194,27 @@ impl SessionStore for PostgresSessionStore {
         rows_to_events(rows)
     }
 
+    async fn read_run_after(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        after_seq: u64,
+    ) -> Result<Vec<StoredEvent>> {
+        let rows = sqlx::query(
+            "SELECT seq, event FROM session_events
+             WHERE tenant = $1 AND session_id = $2 AND run_id = $3 AND seq > $4 ORDER BY seq",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(run_id)
+        .bind(after_seq as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows_to_events(rows)
+    }
+
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>> {
         let rows = sqlx::query(
             "SELECT session_id, label, event_count, created_at, last_activity

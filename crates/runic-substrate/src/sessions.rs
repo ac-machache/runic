@@ -84,6 +84,22 @@ pub trait SessionStore: Send + Sync {
         after_seq: u64,
     ) -> Result<Vec<StoredEvent>>;
 
+    /// Read one run's events with `seq > after_seq`. Default filters
+    /// `read_after` in memory; override to push the filter into the store.
+    async fn read_run_after(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        after_seq: u64,
+    ) -> Result<Vec<StoredEvent>> {
+        let all = self.read_after(tenant, session_id, after_seq).await?;
+        Ok(all
+            .into_iter()
+            .filter(|s| s.event.run_id() == run_id)
+            .collect())
+    }
+
     /// List a tenant's sessions with metadata, most-recently-active first.
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>>;
 

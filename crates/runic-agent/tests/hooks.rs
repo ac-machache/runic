@@ -214,3 +214,124 @@ async fn read_hook_stop_at_before_model_halts_the_run() {
     assert!(matches!(err, AgentError::HookStop));
     assert_eq!(provider.call_count(), 0);
 }
+
+#[tokio::test]
+async fn write_hook_stop_at_after_model_halts_before_a_second_turn() {
+    // The first turn requests a tool; an after_model Stop halts the run before
+    // any dispatch or second model call.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("never"),
+    ]));
+    let rec = Arc::new(RecordingTool::new("rec", "REAL"));
+    let calls = rec.log();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook = RecordWriteHook::new("stopper", log).act("after_model", Act::Stop);
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .write_hook(Arc::new(hook))
+        .build();
+
+    let err = agent.run("go").await.unwrap_err();
+    assert!(matches!(err, AgentError::HookStop));
+    assert_eq!(provider.call_count(), 1, "no second model call");
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "no tool dispatched after stop"
+    );
+    assert!(agent.state().current_run().is_none());
+}
+
+#[tokio::test]
+async fn write_hook_cancel_at_after_model_halts_the_run() {
+    // `Cancel` at a non-tool lifecycle point maps to a hard stop.
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("only")]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook = RecordWriteHook::new("c", log).act("after_model", Act::Cancel("stop now".into()));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .write_hook(Arc::new(hook))
+        .build();
+
+    let err = agent.run("go").await.unwrap_err();
+    assert!(matches!(err, AgentError::HookStop));
+}
+
+#[tokio::test]
+async fn write_hook_stop_at_after_tool_halts_after_the_result_is_recorded() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("never"),
+    ]));
+    let rec = Arc::new(RecordingTool::new("rec", "ran"));
+    let calls = rec.log();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook = RecordWriteHook::new("stopper", log).act("after_tool", Act::Stop);
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .write_hook(Arc::new(hook))
+        .build();
+
+    let err = agent.run("go").await.unwrap_err();
+    assert!(matches!(err, AgentError::HookStop));
+    // The tool *did* run (the stop is after it), but there's no second turn.
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "halted before the next model call"
+    );
+}
+
+#[tokio::test]
+async fn write_hook_cancel_at_after_tool_halts_the_run() {
+    // The tool already ran, so `Cancel` here can't be in-band like at
+    // `before_tool`; it halts the run, matching every other non-`before_tool`
+    // seam. (No outcome is silently dropped.)
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("should-not-run"),
+    ]));
+    let rec = Arc::new(RecordingTool::new("rec", "ran"));
+    let calls = rec.log();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook =
+        RecordWriteHook::new("c", log).act("after_tool", Act::Cancel("stop after tool".into()));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .write_hook(Arc::new(hook))
+        .build();
+
+    let err = agent.run("go").await.unwrap_err();
+    assert!(matches!(err, AgentError::HookStop));
+    // The tool did run (the cancel is after it), but there's no second turn.
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "halted before the next model call"
+    );
+}
+
+#[tokio::test]
+async fn read_hook_stop_at_after_tool_halts_the_run() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("never"),
+    ]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "ran")))
+        .read_hook(Arc::new(
+            RecordReadHook::new("r", log).stop_at("after_tool"),
+        ))
+        .build();
+
+    let err = agent.run("go").await.unwrap_err();
+    assert!(matches!(err, AgentError::HookStop));
+    assert_eq!(provider.call_count(), 1, "no second model call after stop");
+}

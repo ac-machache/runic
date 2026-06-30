@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use harness::*;
 use proptest::prelude::*;
-use runic_agent::Agent;
+use runic_agent::{Agent, CancelToken, RunContext};
 use runic_state::SessionEvent;
 
 const FULL: &str = "FULL_SECRET_BYTES";
@@ -113,6 +113,102 @@ proptest! {
             ids.sort_unstable();
             ids.dedup();
             prop_assert_eq!(ids.len(), n, "run ids are distinct");
+            Ok(())
+        })?;
+    }
+}
+
+/// Map a kind code to a tool name: 0 ⇒ ok, 1 ⇒ Err, 2 ⇒ panic.
+fn kind_tool(kind: u8) -> &'static str {
+    match kind % 3 {
+        0 => "rec",
+        1 => "err_tool",
+        _ => "panic_tool",
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// A run made of arbitrarily-failing tool turns (success / Err / panic) still
+    /// satisfies every structural invariant — failures are all in-band, so the
+    /// loop never aborts mid-run.
+    #[test]
+    fn tool_failures_preserve_loop_invariants(kinds in prop::collection::vec(0u8..3, 0..7)) {
+        rt().block_on(async move {
+            let mut responses = Vec::new();
+            for (i, k) in kinds.iter().enumerate() {
+                responses.push(tool_use_response(&format!("c{i}"), kind_tool(*k), serde_json::json!({ "i": i })));
+            }
+            responses.push(text_response("final"));
+
+            let provider = Arc::new(ScriptedProvider::new(responses));
+            let mut agent = Agent::builder(provider.clone(), "u", "s")
+                .model("test")
+                .tool(Arc::new(RecordingTool::new("rec", "ran")))
+                .tool(Arc::new(ErrTool))
+                .tool(Arc::new(PanicTool))
+                .build();
+            let mut events = capture_session_events(&mut agent);
+
+            let outcome = agent.run("go").await.unwrap();
+
+            let expected_turns = (kinds.len() + 1) as u32;
+            prop_assert_eq!(outcome.total_turns, expected_turns);
+            prop_assert_eq!(provider.call_count(), kinds.len() + 1);
+
+            let evs = drain(&mut events);
+            prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count(), 1);
+            prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count(), 1);
+            prop_assert!(
+                matches!(evs.last(), Some(SessionEvent::RunEnd { .. })),
+                "last event is RunEnd"
+            );
+            prop_assert!(agent.state().current_run().is_none());
+            Ok(())
+        })?;
+    }
+
+    /// Cancellation requested at any turn boundary always yields a terminal,
+    /// `cancelled` run; otherwise the run completes normally. Either way nothing
+    /// is left in flight.
+    #[test]
+    fn random_cancellation_is_always_terminal(
+        n in 1usize..6,
+        cancel in any::<bool>(),
+        cancel_idx in 0usize..6,
+    ) {
+        rt().block_on(async move {
+            let cancel_idx = cancel_idx % n;
+            let token = CancelToken::new();
+
+            let mut responses = Vec::new();
+            for i in 0..n {
+                let name = if cancel && i == cancel_idx { "cancel_tool" } else { "rec" };
+                responses.push(tool_use_response(&format!("c{i}"), name, serde_json::json!({ "i": i })));
+            }
+            responses.push(text_response("final"));
+
+            let provider = Arc::new(ScriptedProvider::new(responses));
+            let mut agent = Agent::builder(provider.clone(), "u", "s")
+                .model("test")
+                .tool(Arc::new(RecordingTool::new("rec", "ran")))
+                .tool(Arc::new(CancelTool { token: token.clone() }))
+                .build();
+
+            let outcome = agent
+                .run_with("go", RunContext::new().with_cancel(token))
+                .await
+                .unwrap();
+
+            if cancel {
+                prop_assert_eq!(outcome.stop_reason.as_deref(), Some("cancelled"));
+                prop_assert_eq!(outcome.total_turns, (cancel_idx + 1) as u32);
+            } else {
+                prop_assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
+                prop_assert_eq!(outcome.total_turns, (n + 1) as u32);
+            }
+            prop_assert!(agent.state().current_run().is_none());
             Ok(())
         })?;
     }

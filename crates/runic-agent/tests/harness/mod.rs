@@ -146,6 +146,124 @@ impl Provider for AlwaysModelNotFound {
     }
 }
 
+/// A provider whose Nth `complete` call blocks until a gate is opened, so a
+/// test can make cancellation arrive *while a model call is in flight*. Other
+/// calls return immediately. `entered()` fires once the gated call is pending.
+pub struct GatedProvider {
+    results: Mutex<VecDeque<Result<CompletionResponse, ProviderError>>>,
+    requests: Mutex<Vec<CompletionRequest>>,
+    calls: Mutex<usize>,
+    gate_on_call: usize,
+    entered: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+impl GatedProvider {
+    /// `gate_on_call` is 1-based: the call index that blocks on the gate.
+    pub fn new(
+        results: Vec<Result<CompletionResponse, ProviderError>>,
+        gate_on_call: usize,
+    ) -> Self {
+        Self {
+            results: Mutex::new(results.into()),
+            requests: Mutex::new(Vec::new()),
+            calls: Mutex::new(0),
+            gate_on_call,
+            entered: Arc::new(tokio::sync::Notify::new()),
+            gate: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+    /// Resolves once the gated call is parked.
+    pub fn entered(&self) -> Arc<tokio::sync::Notify> {
+        self.entered.clone()
+    }
+    /// Release the parked call.
+    pub fn open_gate(&self) {
+        self.gate.notify_one();
+    }
+    pub fn call_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl Provider for GatedProvider {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        let this_call = {
+            let mut c = self.calls.lock().unwrap();
+            *c += 1;
+            *c
+        };
+        if this_call == self.gate_on_call {
+            self.entered.notify_one();
+            self.gate.notified().await;
+        }
+        self.results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(ProviderError::Parse("gated provider exhausted".into())))
+    }
+}
+
+/// A provider with fully scripted streaming behavior: it emits a fixed list of
+/// [`StreamEvent`]s on `stream`, then returns a configured stream result;
+/// `complete` returns a separate configured result (used by the agent's
+/// fallback-to-non-streaming path).
+pub struct StreamProvider {
+    events: Mutex<Vec<runic_provider::StreamEvent>>,
+    stream_result: Mutex<Option<Result<CompletionResponse, ProviderError>>>,
+    complete_result: Mutex<Option<Result<CompletionResponse, ProviderError>>>,
+}
+
+impl StreamProvider {
+    pub fn new(
+        events: Vec<runic_provider::StreamEvent>,
+        stream_result: Result<CompletionResponse, ProviderError>,
+        complete_result: Result<CompletionResponse, ProviderError>,
+    ) -> Self {
+        Self {
+            events: Mutex::new(events),
+            stream_result: Mutex::new(Some(stream_result)),
+            complete_result: Mutex::new(Some(complete_result)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for StreamProvider {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.complete_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("complete_result consumed twice")
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+        tx: tokio::sync::mpsc::Sender<runic_provider::StreamEvent>,
+    ) -> Result<CompletionResponse, ProviderError> {
+        let events = std::mem::take(&mut *self.events.lock().unwrap());
+        for ev in events {
+            let _ = tx.send(ev).await;
+        }
+        self.stream_result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("stream_result consumed twice")
+    }
+}
+
 // ─── Tools ───────────────────────────────────────────────────────────────────
 
 /// Records every `(name, input)` it's executed with and returns a fixed output.
@@ -336,6 +454,80 @@ impl Tool for CancelTool {
     }
 }
 
+/// A parallelizable tool that forces a *deterministic* completion order via
+/// gates (no timing). Each call carries `args["tag"]`; the tool releases tags in
+/// the configured `completion_order`, so completion order is fixed regardless of
+/// issue order — and crucially, a serial (issue-order) executor would deadlock,
+/// so a pass genuinely proves the calls ran concurrently. It records each tag as
+/// it completes.
+pub struct OrderedGateTool {
+    name: String,
+    completion_order: Vec<String>,
+    gates: Vec<Arc<tokio::sync::Notify>>,
+    pub completions: Arc<Mutex<Vec<String>>>,
+}
+
+impl OrderedGateTool {
+    /// `completion_order` lists tags in the order they must finish.
+    pub fn new(name: &str, completion_order: Vec<&str>) -> Self {
+        let gates = completion_order
+            .iter()
+            .map(|_| Arc::new(tokio::sync::Notify::new()))
+            .collect();
+        Self {
+            name: name.into(),
+            completion_order: completion_order.into_iter().map(String::from).collect(),
+            gates,
+            completions: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+    pub fn completions(&self) -> Arc<Mutex<Vec<String>>> {
+        self.completions.clone()
+    }
+}
+
+#[async_trait]
+impl Tool for OrderedGateTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "completes in a fixed, gated order"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "additionalProperties": true })
+    }
+    fn parallelizable(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        let tag = args
+            .get("tag")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let pos = self
+            .completion_order
+            .iter()
+            .position(|t| *t == tag)
+            .expect("tag is in the completion order");
+        // Wait my turn (the first in the order proceeds immediately).
+        if pos > 0 {
+            self.gates[pos].notified().await;
+        }
+        self.completions.lock().unwrap().push(tag.clone());
+        // Release the next in line.
+        if let Some(next) = self.gates.get(pos + 1) {
+            next.notify_one();
+        }
+        Ok(ToolResult::ok(format!("done: {tag}")))
+    }
+}
+
 // ─── Hooks ───────────────────────────────────────────────────────────────────
 
 /// What a recording hook does at a given lifecycle point.
@@ -449,7 +641,11 @@ impl WriteHook for RecordWriteHook {
             .lock()
             .unwrap()
             .push(format!("{}:after_tool", self.name));
-        HookOutcome::Continue
+        match self.actions.get("after_tool") {
+            Some(Act::Stop) => HookOutcome::Stop,
+            Some(Act::Cancel(r)) => HookOutcome::Cancel(r.clone()),
+            _ => HookOutcome::Continue,
+        }
     }
     async fn after_agent(&self, state: &mut AgentState) -> HookOutcome {
         self.run("after_agent", state).await
@@ -541,6 +737,60 @@ pub fn drain<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> Vec<T> {
         out.push(v);
     }
     out
+}
+
+/// The `(tool_use_id, content, is_error)` of every `tool_result` block across a
+/// message list, in order.
+pub fn tool_results(messages: &[runic_types::Message]) -> Vec<(String, String, bool)> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(b) => Some(b),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => Some((tool_use_id.clone(), content.clone(), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A short label per [`SessionEvent`] for exact-ordering assertions.
+pub fn session_kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
+    evs.iter()
+        .map(|e| match e {
+            SessionEvent::RunStart { .. } => "RunStart",
+            SessionEvent::RunEnd { .. } => "RunEnd",
+            SessionEvent::Message { .. } => "Message",
+            SessionEvent::TurnBoundary { .. } => "TurnBoundary",
+            SessionEvent::HookRan { .. } => "HookRan",
+            SessionEvent::StateSnapshot { .. } => "StateSnapshot",
+        })
+        .collect()
+}
+
+/// A raw response whose `content` blocks and `tool_calls` can be set
+/// independently — to exercise provider responses where the two disagree.
+pub fn mismatched_response(
+    content: Vec<ContentBlock>,
+    tool_calls: Vec<ToolCall>,
+    stop_reason: StopReason,
+) -> CompletionResponse {
+    CompletionResponse {
+        content,
+        stop_reason,
+        tool_calls,
+        usage: TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+        },
+    }
 }
 
 /// Collect every `tool_result` content string across a message list (provider

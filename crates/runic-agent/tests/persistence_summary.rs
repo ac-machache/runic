@@ -47,6 +47,46 @@ async fn full_output_reaches_model_only_summary_persists() {
 }
 
 #[tokio::test]
+async fn full_output_is_visible_to_exactly_one_model_request_then_gone() {
+    // turn1 runs summary_tool; turn2 runs another tool (forcing a 3rd request);
+    // turn3 ends. The full bytes must appear in the request right after turn1
+    // and never again.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("c1", "summary_tool", serde_json::json!({})),
+        tool_use_response("c2", "rec", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider.clone(), "u", "s")
+        .model("test")
+        .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
+        .tool(Arc::new(RecordingTool::new("rec", "ran")))
+        .build();
+
+    agent.run("go").await.unwrap();
+
+    let reqs = provider.requests();
+    assert_eq!(reqs.len(), 3, "three model calls");
+
+    // Request 2 (immediately after turn 1's tool) carries the FULL output.
+    let req2 = tool_result_contents(&reqs[1].messages);
+    assert!(
+        req2.iter().any(|c| c == FULL),
+        "the very next request gets the full output: {req2:?}"
+    );
+
+    // Request 3 must show only the summary for c1 — the overlay was consumed.
+    let req3 = tool_result_contents(&reqs[2].messages);
+    assert!(
+        req3.iter().any(|c| c.contains("omitted from log")),
+        "a later request sees only the summary: {req3:?}"
+    );
+    assert!(
+        !req3.iter().any(|c| c.contains("SECRET")),
+        "the full bytes must not reappear on a later request: {req3:?}"
+    );
+}
+
+#[tokio::test]
 async fn persisted_session_events_never_carry_the_full_bytes() {
     // The lossless persistence sink is what a substrate would store; assert the
     // full bytes never flow through it.

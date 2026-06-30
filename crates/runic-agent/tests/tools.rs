@@ -152,6 +152,111 @@ async fn panicking_tool_is_caught_and_does_not_abort_the_run() {
     assert!(error_result_matching(&agent, |c| c.contains("panicked")));
 }
 
+#[tokio::test]
+async fn mixed_multi_tool_one_ok_one_err_one_panic() {
+    // A single turn issues three calls with three different fates; all three
+    // must produce a result, in issue order, with the right error flags.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        multi_tool_response(vec![
+            ("ok", "rec", serde_json::json!({})),
+            ("err", "err_tool", serde_json::json!({})),
+            ("panic", "panic_tool", serde_json::json!({})),
+        ]),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "ran")))
+        .tool(Arc::new(ErrTool))
+        .tool(Arc::new(PanicTool))
+        .build();
+
+    let outcome = agent.run("go").await.unwrap();
+    assert_eq!(outcome.total_turns, 2);
+
+    let results = tool_results(&provider.requests()[1].messages);
+    let ids: Vec<&str> = results.iter().map(|(id, ..)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["ok", "err", "panic"],
+        "order preserved: {results:?}"
+    );
+
+    let by_id = |id: &str| results.iter().find(|(i, ..)| i == id).unwrap().clone();
+    let (_, ok_c, ok_err) = by_id("ok");
+    assert!(!ok_err && ok_c.contains("ran"));
+    let (_, err_c, err_err) = by_id("err");
+    assert!(err_err && err_c.contains("boom from inside the tool"));
+    let (_, pan_c, pan_err) = by_id("panic");
+    assert!(pan_err && pan_c.contains("panicked"));
+}
+
+#[tokio::test]
+async fn duplicate_tool_call_ids_in_one_turn_do_not_crash() {
+    // Two calls share an id (a malformed-but-possible provider response). Both
+    // must execute and both results land, without a panic.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        multi_tool_response(vec![
+            ("dup", "rec", serde_json::json!({ "n": 1 })),
+            ("dup", "rec", serde_json::json!({ "n": 2 })),
+        ]),
+        text_response("done"),
+    ]));
+    let rec = Arc::new(RecordingTool::new("rec", "ran"));
+    let calls = rec.log();
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .build();
+
+    agent.run("go").await.unwrap();
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        2,
+        "both duplicate-id calls ran"
+    );
+
+    let results = tool_results(&provider.requests()[1].messages);
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|(id, ..)| id == "dup"));
+}
+
+#[tokio::test]
+async fn parallel_tools_finish_out_of_order_but_results_stay_ordered() {
+    // Issue a→b→c, but the gated tool forces completion order c→b→a. This is
+    // deterministic (no timing): a serial issue-order executor would deadlock
+    // waiting on `a` first, so a pass proves the calls truly ran concurrently.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        multi_tool_response(vec![
+            ("a", "gate", serde_json::json!({ "tag": "a" })),
+            ("b", "gate", serde_json::json!({ "tag": "b" })),
+            ("c", "gate", serde_json::json!({ "tag": "c" })),
+        ]),
+        text_response("done"),
+    ]));
+    let gate = Arc::new(OrderedGateTool::new("gate", vec!["c", "b", "a"]));
+    let completions = gate.completions();
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(gate)
+        .build();
+
+    agent.run("go").await.unwrap();
+
+    // Completion order is the forced c,b,a — concurrency proven, no timing.
+    assert_eq!(
+        completions.lock().unwrap().clone(),
+        vec!["c", "b", "a"],
+        "tools completed in the gated order, proving concurrency"
+    );
+    // But the results fed back to the model preserve issue order.
+    let ids: Vec<String> = tool_results(&provider.requests()[1].messages)
+        .into_iter()
+        .map(|(id, ..)| id)
+        .collect();
+    assert_eq!(ids, vec!["a", "b", "c"]);
+}
+
 /// Whether any persisted `tool_result` block is an error whose content matches.
 fn error_result_matching(agent: &Agent, pred: impl Fn(&str) -> bool) -> bool {
     agent

@@ -213,9 +213,15 @@ impl Agent {
                 is_error: !result.success,
             });
 
+            // The tool already ran, so there's no call to make in-band: both
+            // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
+            // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
             for h in self.write_hooks.clone() {
-                if let HookOutcome::Stop = h.after_tool(&mut self.state, call, &result).await {
-                    return Err(AgentError::HookStop);
+                match h.after_tool(&mut self.state, call, &result).await {
+                    HookOutcome::Stop | HookOutcome::Cancel(_) => {
+                        return Err(AgentError::HookStop);
+                    }
+                    HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
                 }
             }
             self.fire_read_after_tool(call, &result).await?;

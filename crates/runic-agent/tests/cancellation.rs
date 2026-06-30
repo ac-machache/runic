@@ -67,6 +67,43 @@ async fn cancel_during_a_tool_ends_before_the_next_model_call() {
 }
 
 #[tokio::test]
+async fn cancel_while_a_model_call_is_in_flight_finishes_that_turn_then_stops() {
+    // The cancel arrives while turn 1's model call is parked. The contract is
+    // graceful-at-boundary: the in-flight call is *not* aborted — it completes,
+    // its tool dispatches, then the run stops before turn 2's model call.
+    let provider = Arc::new(GatedProvider::new(
+        vec![
+            Ok(tool_use_response("t1", "rec", serde_json::json!({}))),
+            Ok(text_response("should-not-run")),
+        ],
+        1, // the first model call parks on the gate
+    ));
+    let cancel = CancelToken::new();
+    let rec = Arc::new(RecordingTool::new("rec", "ran"));
+    let calls = rec.log();
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .build();
+
+    let entered = provider.entered();
+    let run = agent.run_with("go", RunContext::new().with_cancel(cancel.clone()));
+    let control = async {
+        entered.notified().await; // turn 1's call is now parked
+        cancel.cancel(); // cancel mid-flight
+        provider.open_gate(); // let the parked call return
+    };
+    let (outcome, ()) = tokio::join!(run, control);
+    let outcome = outcome.unwrap();
+
+    assert_eq!(provider.call_count(), 1, "only the in-flight call ran");
+    assert_eq!(outcome.total_turns, 1, "that turn completed");
+    assert_eq!(outcome.stop_reason.as_deref(), Some("cancelled"));
+    assert_eq!(calls.lock().unwrap().len(), 1, "its tool still dispatched");
+    assert!(agent.state().current_run().is_none());
+}
+
+#[tokio::test]
 async fn cancelled_run_is_recorded_as_a_clean_terminal_run_end() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
     let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();

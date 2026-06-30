@@ -25,3 +25,4 @@ runic-hook = { path = "../runic-hook" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+proptest = { workspace = true }

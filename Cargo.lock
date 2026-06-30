@@ -2306,6 +2306,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "proptest",
  "runic-hook",
  "runic-provider",
  "runic-state",

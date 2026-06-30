@@ -112,11 +112,20 @@ impl ArtifactStore for LocalArtifactStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(io(e)),
         };
-        Ok(text
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str::<Artifact>(l).ok())
-            .collect())
+        // `delete` removes the blob but not its append-only index line, so skip
+        // entries whose bytes are gone (also drops corrupt/orphaned lines).
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(artifact) = serde_json::from_str::<Artifact>(line) else {
+                continue;
+            };
+            if let Ok(blob) = self.blob_path(&artifact.id)
+                && tokio::fs::try_exists(&blob).await.unwrap_or(false)
+            {
+                out.push(artifact);
+            }
+        }
+        Ok(out)
     }
 
     async fn delete(&self, id: &str) -> Result<()> {

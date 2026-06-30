@@ -337,6 +337,9 @@ pub async fn delete_thread(
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
     state.pool.evict(&tenant, &thread_id).await;
+    for artifact in state.artifact_store.list(&tenant, &thread_id).await? {
+        state.artifact_store.delete(&artifact.id).await?;
+    }
     state
         .session_store
         .delete_session(&tenant, &thread_id)

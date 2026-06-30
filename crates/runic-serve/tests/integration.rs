@@ -14,7 +14,9 @@ use tower::ServiceExt;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
-use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_substrate::{
+    ArtifactStore, LocalArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
+};
 use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
 use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use serde_json::Value;
@@ -498,6 +500,56 @@ async fn delete_thread_returns_204() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn delete_thread_removes_local_artifact_blobs() {
+    let root = tempfile::tempdir().unwrap();
+    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root.path()));
+    let app = router(ServeConfig {
+        session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: artifact_store.clone(),
+        transcriber: None,
+        agent_factory: Arc::new(PanicFactory),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+    create_thread(&app, "with-artifact").await;
+
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "with-artifact",
+            "text/plain",
+            "note.txt",
+            b"delete me",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
+    assert!(root.path().join("blobs").join(&id).exists());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/threads/with-artifact")
+                .header("x-runic-tenant", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(!root.path().join("blobs").join(&id).exists());
+    assert!(
+        artifact_store
+            .list("alice", "with-artifact")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

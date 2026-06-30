@@ -21,20 +21,26 @@ pub fn sessions_memory() -> Sessions {
     }
 }
 
-/// Connect a Postgres session store (runs migrations). Falls back to in-memory
-/// (ephemeral, no persistence) if the connection fails — logged as an error.
+/// Connect a Postgres session store (runs migrations). Fails closed: returns the
+/// connect/migration error rather than silently degrading to a different backend.
 #[cfg(feature = "postgres")]
-pub async fn sessions_postgres(database_url: &str) -> Sessions {
-    match crate::PostgresSessionStore::connect(database_url).await {
-        Ok(store) => {
-            tracing::info!("connected to postgres session store");
-            Sessions {
-                store: Arc::new(store),
-                search_tool: true,
-            }
-        }
+pub async fn sessions_postgres(database_url: &str) -> crate::Result<Sessions> {
+    let store = crate::PostgresSessionStore::connect(database_url).await?;
+    tracing::info!("connected to postgres session store");
+    Ok(Sessions {
+        store: Arc::new(store),
+        search_tool: true,
+    })
+}
+
+/// Dev/demo only: Postgres if it connects, else an ephemeral in-memory store.
+/// Do NOT use in production — on a connect failure data silently stops persisting.
+#[cfg(feature = "postgres")]
+pub async fn sessions_postgres_or_memory(database_url: &str) -> Sessions {
+    match sessions_postgres(database_url).await {
+        Ok(sessions) => sessions,
         Err(e) => {
-            tracing::error!(error = %e, "postgres session store failed — falling back to in-memory (no persistence)");
+            tracing::error!(error = %e, "postgres session store failed — falling back to in-memory (DEV ONLY, no persistence)");
             sessions_memory()
         }
     }
@@ -86,21 +92,31 @@ pub fn blobs_local(root: impl Into<PathBuf>) -> Blobs {
 }
 
 /// Postgres metadata index + bytes on the local filesystem under `bytes_root`.
-/// Falls back to local-only if the Postgres connection fails — logged as error.
+/// Fails closed: returns the connect/migration error rather than degrading.
 #[cfg(feature = "postgres")]
-pub async fn blobs_postgres(database_url: &str, bytes_root: impl Into<PathBuf>) -> Blobs {
+pub async fn blobs_postgres(
+    database_url: &str,
+    bytes_root: impl Into<PathBuf>,
+) -> crate::Result<Blobs> {
     let bytes_root = bytes_root.into();
     let bytes: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(bytes_root.clone()));
-    match crate::PostgresArtifactStore::connect(database_url, bytes.clone(), "local").await {
-        Ok(store) => {
-            tracing::info!(bytes_root = %bytes_root.display(), "connected to postgres artifact store (bytes on local fs)");
-            Blobs {
-                store: Arc::new(store),
-            }
-        }
+    let store = crate::PostgresArtifactStore::connect(database_url, bytes, "local").await?;
+    tracing::info!(bytes_root = %bytes_root.display(), "connected to postgres artifact store (bytes on local fs)");
+    Ok(Blobs {
+        store: Arc::new(store),
+    })
+}
+
+/// Dev/demo only: Postgres-indexed if it connects, else local-only bytes. Do NOT
+/// use in production — on a connect failure artifacts silently lose their index.
+#[cfg(feature = "postgres")]
+pub async fn blobs_postgres_or_local(database_url: &str, bytes_root: impl Into<PathBuf>) -> Blobs {
+    let bytes_root = bytes_root.into();
+    match blobs_postgres(database_url, bytes_root.clone()).await {
+        Ok(blobs) => blobs,
         Err(e) => {
-            tracing::error!(error = %e, "postgres artifact store failed — falling back to local-only");
-            Blobs { store: bytes }
+            tracing::error!(error = %e, "postgres artifact store failed — falling back to local-only (DEV ONLY)");
+            blobs_local(bytes_root)
         }
     }
 }

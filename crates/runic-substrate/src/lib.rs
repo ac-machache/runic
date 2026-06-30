@@ -39,7 +39,9 @@ pub use sessions::{ChatHit, SessionMeta, SessionStore, StoredEvent};
 pub use tool::SearchChatsTool;
 
 #[cfg(feature = "postgres")]
-pub use builders::{blobs_postgres, sessions_postgres};
+pub use builders::{
+    blobs_postgres, blobs_postgres_or_local, sessions_postgres, sessions_postgres_or_memory,
+};
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresArtifactStore, PostgresSessionStore};
 

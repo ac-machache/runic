@@ -18,6 +18,7 @@ members = [
     "crates/runic-serve",
     "crates/runic-web",
     "crates/runic-foundry",
+    "crates/runic-transcriber",
 ]
 
 [workspace.package]

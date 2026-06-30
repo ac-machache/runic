@@ -6,6 +6,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+use wasm_bindgen_futures::JsFuture;
 
 use crate::api::ApiClient;
 use crate::events::{
@@ -279,25 +281,129 @@ pub fn App() -> impl IntoView {
             }
             let c = client();
             let thread_id = thread_id.clone();
-            // Upload to the artifact store now; the message will carry the id.
             uploading.update(|n| *n += 1);
-            spawn_local(async move {
-                let gfile = gloo_file::File::from(file);
-                match gloo_file::futures::read_as_bytes(&gfile).await {
-                    Ok(bytes) => match c
-                        .upload_artifact(&thread_id, bytes, &media_type, &name)
-                        .await
-                    {
-                        Ok(att) => attachments.update(|a| a.push(att)),
-                        Err(e) => leptos::logging::warn!("upload failed: {e}"),
-                    },
-                    Err(e) => leptos::logging::warn!("read file failed: {e:?}"),
-                }
-                uploading.update(|n| *n = n.saturating_sub(1));
-            });
+            if media_type.starts_with("audio/") {
+                // Audio is preprocessed to text and sent — never stored or attached.
+                spawn_local(async move {
+                    let gfile = gloo_file::File::from(file);
+                    let result = match gloo_file::futures::read_as_bytes(&gfile).await {
+                        Ok(bytes) => c.transcribe(bytes, &media_type, &name).await,
+                        Err(e) => Err(format!("read file failed: {e:?}")),
+                    };
+                    uploading.update(|n| *n = n.saturating_sub(1));
+                    match result {
+                        Ok(text) => {
+                            input.set(text);
+                            send();
+                        }
+                        Err(e) => leptos::logging::warn!("transcribe failed: {e}"),
+                    }
+                });
+            } else {
+                // Everything else uploads to the artifact store; the message carries the id.
+                spawn_local(async move {
+                    let gfile = gloo_file::File::from(file);
+                    match gloo_file::futures::read_as_bytes(&gfile).await {
+                        Ok(bytes) => match c
+                            .upload_artifact(&thread_id, bytes, &media_type, &name)
+                            .await
+                        {
+                            Ok(att) => attachments.update(|a| a.push(att)),
+                            Err(e) => leptos::logging::warn!("upload failed: {e}"),
+                        },
+                        Err(e) => leptos::logging::warn!("read file failed: {e:?}"),
+                    }
+                    uploading.update(|n| *n = n.saturating_sub(1));
+                });
+            }
         }
         // Reset so re-selecting the same file fires `change` again.
         el.set_value("");
+    };
+
+    // ── voice recording ────────────────────────────────────────────────
+    let recording = RwSignal::new(false);
+    let recorder = RwSignal::new(None::<(web_sys::MediaRecorder, web_sys::MediaStream)>);
+    let toggle_record = move || {
+        if recording.get_untracked() {
+            // Stop: triggers `ondataavailable` (which transcribes + sends), and
+            // release the mic.
+            if let Some((rec, stream)) = recorder.get_untracked() {
+                let _ = rec.stop();
+                let tracks = stream.get_tracks();
+                for i in 0..tracks.length() {
+                    if let Ok(track) = tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>() {
+                        track.stop();
+                    }
+                }
+            }
+            recorder.set(None);
+            recording.set(false);
+            return;
+        }
+        if current.get_untracked().is_none() {
+            leptos::logging::warn!("pick or create a thread before recording");
+            return;
+        }
+        let c = client();
+        spawn_local(async move {
+            let Some(md) = web_sys::window().and_then(|w| w.navigator().media_devices().ok())
+            else {
+                leptos::logging::warn!("no media devices");
+                return;
+            };
+            let constraints = web_sys::MediaStreamConstraints::new();
+            constraints.set_audio(&JsValue::TRUE);
+            let stream = match md.get_user_media_with_constraints(&constraints) {
+                Ok(p) => match JsFuture::from(p).await {
+                    Ok(s) => s.unchecked_into::<web_sys::MediaStream>(),
+                    Err(_) => {
+                        leptos::logging::warn!("microphone permission denied");
+                        return;
+                    }
+                },
+                Err(_) => return,
+            };
+            let Ok(rec) = web_sys::MediaRecorder::new_with_media_stream(&stream) else {
+                leptos::logging::warn!("MediaRecorder unavailable");
+                return;
+            };
+            // One blob on stop → transcribe → auto-send (same path as a file).
+            let on_data =
+                Closure::<dyn FnMut(web_sys::BlobEvent)>::new(move |e: web_sys::BlobEvent| {
+                    let Some(blob) = e.data() else { return };
+                    let c = c.clone();
+                    uploading.update(|n| *n += 1);
+                    spawn_local(async move {
+                        // The mic records webm; the chat-audio model needs wav, so
+                        // decode + re-encode in the browser before sending.
+                        let gblob = gloo_file::Blob::from(blob);
+                        let result = match gloo_file::futures::read_as_bytes(&gblob).await {
+                            Ok(webm) => match webm_to_wav(webm).await {
+                                Ok(wav) => c.transcribe(wav, "audio/wav", "recording.wav").await,
+                                Err(e) => Err(e),
+                            },
+                            Err(e) => Err(format!("read recording failed: {e:?}")),
+                        };
+                        uploading.update(|n| *n = n.saturating_sub(1));
+                        match result {
+                            Ok(text) => {
+                                input.set(text);
+                                send();
+                            }
+                            Err(e) => leptos::logging::error!("recording transcribe failed: {e}"),
+                        }
+                    });
+                });
+            rec.set_ondataavailable(Some(on_data.as_ref().unchecked_ref()));
+            on_data.forget();
+            if rec.start().is_err() {
+                leptos::logging::warn!("could not start recording");
+                return;
+            }
+            recorder.set(Some((rec, stream)));
+            recording.set(true);
+        });
     };
 
     let fetch_state = move || {
@@ -570,6 +676,12 @@ pub fn App() -> impl IntoView {
                                     prop:disabled=move || current.get().is_none() || streaming.get()>"📎"</button>
                                 <input type="file" multiple node_ref=file_input_ref style="display:none"
                                     on:change=move |_| pick_files() />
+                                <button class="gear-btn" class:recording=move || recording.get()
+                                    title=move || if recording.get() { "Stop recording" } else { "Record voice" }
+                                    on:click=move |_| toggle_record()
+                                    prop:disabled=move || current.get().is_none() || streaming.get()>
+                                    {move || if recording.get() { "⏹" } else { "🎤" }}
+                                </button>
                                 <button class="gear-btn" title="Configurable" on:click=move |_| config_open.update(|c| *c = !*c)>
                                     "⚙"
                                     {move || (!context_json.get().trim().is_empty()).then(|| view! { <span class="gear-dot"></span> })}
@@ -644,4 +756,70 @@ pub fn App() -> impl IntoView {
             </div>
         </div>
     }
+}
+
+/// Decode a recorded audio blob (webm/opus etc.) via Web Audio and re-encode it
+/// as 16-bit PCM WAV — the format the Mistral chat-audio endpoint accepts.
+async fn webm_to_wav(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    let ctx = web_sys::AudioContext::new().map_err(|e| format!("AudioContext init: {e:?}"))?;
+    let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
+    let promise = ctx
+        .decode_audio_data(&buffer)
+        .map_err(|e| format!("decode_audio_data: {e:?}"))?;
+    let decoded = JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("could not decode recording (unsupported audio?): {e:?}"))?;
+    let _ = ctx.close();
+
+    let audio: web_sys::AudioBuffer = decoded
+        .dyn_into()
+        .map_err(|_| "decoded value is not an AudioBuffer".to_string())?;
+    let channels = audio.number_of_channels() as usize;
+    let frames = audio.length() as usize;
+    let sample_rate = audio.sample_rate() as u32;
+    if channels == 0 || frames == 0 {
+        return Err("empty recording".into());
+    }
+
+    let mut chans = Vec::with_capacity(channels);
+    for c in 0..channels {
+        chans.push(
+            audio
+                .get_channel_data(c as u32)
+                .map_err(|e| format!("get_channel_data({c}): {e:?}"))?,
+        );
+    }
+    let mut pcm: Vec<i16> = Vec::with_capacity(frames * channels);
+    for f in 0..frames {
+        for ch in &chans {
+            let s = ch.get(f).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+            pcm.push((s * 32767.0) as i16);
+        }
+    }
+    Ok(wav_bytes(channels as u16, sample_rate, &pcm))
+}
+
+/// Wrap interleaved 16-bit PCM in a canonical 44-byte WAV header.
+fn wav_bytes(channels: u16, sample_rate: u32, pcm: &[i16]) -> Vec<u8> {
+    let block_align = channels * 2;
+    let byte_rate = sample_rate * block_align as u32;
+    let data_len = (pcm.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits/sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
 }

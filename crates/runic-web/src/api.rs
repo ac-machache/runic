@@ -99,6 +99,40 @@ impl ApiClient {
         })
     }
 
+    /// Transcribe audio to text (preprocessing step — no thread, nothing stored).
+    pub async fn transcribe(
+        &self,
+        bytes: Vec<u8>,
+        media_type: &str,
+        filename: &str,
+    ) -> Result<String, String> {
+        let url = format!("{}/transcribe", self.base);
+        let arr = js_sys::Uint8Array::from(bytes.as_slice());
+        let resp = Request::post(&url)
+            .header("x-runic-tenant", &self.tenant)
+            .header("content-type", media_type)
+            .header("x-runic-filename", filename)
+            .body(arr)
+            .map_err(e2s)?
+            .send()
+            .await
+            .map_err(e2s)?;
+        let status = resp.status();
+        let v: Value = resp.json().await.map_err(e2s)?;
+        if !(200..300).contains(&status) {
+            let message = v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .or_else(|| v.get("error").and_then(|m| m.as_str()))
+                .unwrap_or("transcribe failed");
+            return Err(format!("{message} ({status})"));
+        }
+        v.get("text")
+            .and_then(|t| t.as_str())
+            .map(String::from)
+            .ok_or_else(|| "transcribe response missing text".to_string())
+    }
+
     pub async fn create_thread(&self, id: Option<&str>) -> Result<String, String> {
         let url = format!("{}/threads", self.base);
         let body = match id {

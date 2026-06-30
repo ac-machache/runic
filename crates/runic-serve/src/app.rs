@@ -6,12 +6,13 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use runic_substrate::{ArtifactStore, SessionStore};
+use runic_transcriber::SpeechToText;
 use tower_http::cors::CorsLayer;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
 use crate::pool::ThreadPool;
-use crate::routes::{artifacts, health, runs, threads};
+use crate::routes::{artifacts, health, runs, threads, transcribe};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
 /// `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
@@ -19,6 +20,8 @@ use crate::routes::{artifacts, health, runs, threads};
 pub struct AppState {
     pub session_store: Arc<dyn SessionStore>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    /// Optional speech-to-text backend powering `POST /transcribe`.
+    pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub pool: Arc<ThreadPool>,
     /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
     pub human_hub: Arc<HumanHub>,
@@ -29,6 +32,8 @@ pub struct AppState {
 pub struct ServeConfig {
     pub session_store: Arc<dyn SessionStore>,
     pub artifact_store: Arc<dyn ArtifactStore>,
+    /// Optional speech-to-text backend; `None` disables `POST /transcribe`.
+    pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agent_factory: BoxedAgentFactory,
     /// Shared HITL hub; the serve crate builds a per-run `HumanChannel` over it
     /// and installs it on each run's context, so an `ask_user` raised mid-run
@@ -43,6 +48,7 @@ pub fn router(config: ServeConfig) -> Router {
     let state = AppState {
         session_store: config.session_store.clone(),
         artifact_store: config.artifact_store,
+        transcriber: config.transcriber,
         pool: Arc::new(ThreadPool::new(config.agent_factory, config.session_store)),
         human_hub: config.human_hub,
     };
@@ -66,6 +72,10 @@ pub fn router(config: ServeConfig) -> Router {
             post(artifacts::upload_artifact)
                 .get(artifacts::list_artifacts)
                 .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BYTES)),
+        )
+        .route(
+            "/transcribe",
+            post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
         .route(
             "/threads/{thread_id}/runs/stream",

@@ -24,6 +24,12 @@ pub enum ServeError {
 
     #[error("internal: {0}")]
     Internal(String),
+
+    #[error("upstream error: {0}")]
+    Upstream(String),
+
+    #[error("not configured: {0}")]
+    NotConfigured(String),
 }
 
 impl From<runic_substrate::Error> for ServeError {
@@ -42,6 +48,8 @@ impl IntoResponse for ServeError {
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
             Self::Agent(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            Self::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream"),
+            Self::NotConfigured(_) => (StatusCode::NOT_IMPLEMENTED, "not_configured"),
         };
         let body = Json(serde_json::json!({
             "error": kind,

@@ -230,6 +230,8 @@ button { font-family: inherit; }
 .composer-input { flex: 1; min-width: 0; resize: none; border: none; background: none; color: var(--ink); font: 14px/1.5 var(--sans); padding: 6px 4px; max-height: 150px; }
 .gear-btn { position: relative; appearance: none; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--ink-2); width: 36px; height: 36px; border-radius: 9px; cursor: pointer; flex: none; font-size: 15px; }
 .gear-btn:hover { color: var(--ink); }
+.gear-btn.recording { color: var(--on-accent); background: var(--brick); border-color: var(--brick); animation: rec-pulse 1.2s ease-in-out infinite; }
+@keyframes rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 .gear-dot { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); border: 2px solid var(--surface); }
 .attach-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .attach-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 7px; padding: 4px 6px 4px 9px; font-size: 12px; color: var(--ink-2); max-width: 220px; }

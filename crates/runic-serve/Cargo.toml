@@ -19,6 +19,7 @@ runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }
 runic-types = { path = "../runic-types" }
 runic-substrate = { workspace = true }
+runic-transcriber = { path = "../runic-transcriber" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

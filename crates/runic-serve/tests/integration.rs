@@ -15,6 +15,7 @@ use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
 use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
 use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use serde_json::Value;
 
@@ -33,6 +34,7 @@ fn make_router() -> axum::Router {
     router(ServeConfig {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
         agent_factory: Arc::new(PanicFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
@@ -83,7 +85,51 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
     router(ServeConfig {
         session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
         agent_factory: Arc::new(ScriptedFactory),
+        human_hub: Arc::new(HumanHub::new()),
+    })
+}
+
+struct FakeTranscriber {
+    expected_filename: &'static str,
+}
+
+#[async_trait]
+impl SpeechToText for FakeTranscriber {
+    async fn transcribe(
+        &self,
+        audio: &[u8],
+        filename: &str,
+    ) -> Result<Transcript, TranscribeError> {
+        assert_eq!(audio, b"audio-bytes");
+        assert_eq!(filename, self.expected_filename);
+        Ok(Transcript {
+            text: "bonjour".into(),
+            language: Some("fr".into()),
+        })
+    }
+}
+
+struct FailingTranscriber;
+
+#[async_trait]
+impl SpeechToText for FailingTranscriber {
+    async fn transcribe(
+        &self,
+        _audio: &[u8],
+        _filename: &str,
+    ) -> Result<Transcript, TranscribeError> {
+        Err(TranscribeError::Http("provider unavailable".into()))
+    }
+}
+
+fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> axum::Router {
+    router(ServeConfig {
+        session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber,
+        agent_factory: Arc::new(PanicFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -140,6 +186,131 @@ async fn wait_for_stored_events(
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("stored event count did not reach {min_events}");
+}
+
+#[tokio::test]
+async fn transcribe_requires_configured_backend() {
+    let app = transcribe_router(None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/transcribe")
+                .header("content-type", "audio/wav")
+                .header("x-runic-tenant", "alice")
+                .body(Body::from("audio-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["error"], "not_configured");
+}
+
+#[tokio::test]
+async fn transcribe_rejects_empty_body() {
+    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
+        expected_filename: "audio",
+    })));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/transcribe")
+                .header("content-type", "audio/wav")
+                .header("x-runic-tenant", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["error"], "bad_request");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("empty audio body")
+    );
+}
+
+#[tokio::test]
+async fn transcribe_rejects_non_audio_content_type() {
+    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
+        expected_filename: "audio",
+    })));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/transcribe")
+                .header("content-type", "text/plain")
+                .header("x-runic-tenant", "alice")
+                .body(Body::from("audio-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["error"], "bad_request");
+}
+
+#[tokio::test]
+async fn transcribe_returns_text_and_cleans_filename() {
+    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
+        expected_filename: "voice.wav",
+    })));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/transcribe")
+                .header("content-type", "audio/wav; charset=binary")
+                .header("x-runic-tenant", "alice")
+                .header("x-runic-filename", "../clips\\voice.wav")
+                .body(Body::from("audio-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["text"], "bonjour");
+    assert_eq!(body["language"], "fr");
+}
+
+#[tokio::test]
+async fn transcribe_upstream_errors_are_bad_gateway() {
+    let app = transcribe_router(Some(Arc::new(FailingTranscriber)));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/transcribe")
+                .header("content-type", "audio/wav")
+                .header("x-runic-tenant", "alice")
+                .body(Body::from("audio-bytes"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let body = body_to_json(resp).await;
+    assert_eq!(body["error"], "upstream");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("provider unavailable")
+    );
 }
 
 #[tokio::test]
@@ -334,6 +505,7 @@ async fn tenant_header_isolates_thread_listings() {
     let app = router(ServeConfig {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
         agent_factory: Arc::new(PanicFactory),
         human_hub: Arc::new(HumanHub::new()),
     });
@@ -896,6 +1068,7 @@ fn resolving_setup() -> (
     let app = router(ServeConfig {
         session_store: session.clone(),
         artifact_store: artifacts.clone(),
+        transcriber: None,
         agent_factory: Arc::new(ResolvingFactory {
             store: artifacts.clone(),
             last: last.clone(),

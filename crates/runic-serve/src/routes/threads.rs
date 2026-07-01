@@ -84,8 +84,15 @@ pub struct CreateThreadRequest {
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateThreadRequest {
     /// Omit to leave unchanged, string to set, null to clear.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     pub label: Option<Option<String>>,
+}
+
+fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::deserialize(de)?))
 }
 
 fn normalize_label(label: Option<String>) -> Option<String> {

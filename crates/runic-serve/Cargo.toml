@@ -30,6 +30,9 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+postgres = ["runic-substrate/postgres"]
+
 [dev-dependencies]
 runic-provider = { path = "../runic-provider" }
 runic-foundry = { path = "../runic-foundry" }

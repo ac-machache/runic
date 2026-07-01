@@ -458,6 +458,14 @@ fn assemble_assistant_message(
 
 #[async_trait]
 impl Provider for OpenAIDriver {
+    fn name(&self) -> &str {
+        if self.azure_mode {
+            "azure_openai"
+        } else {
+            "openai"
+        }
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,

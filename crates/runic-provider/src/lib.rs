@@ -148,6 +148,12 @@ pub enum StreamEvent {
 /// The LLM provider contract. Concrete providers (Layer 3) implement this.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Stable identifier for this provider (e.g. `"anthropic"`, `"gemini"`,
+    /// `"openai"`) — for logging/labeling, not parsed by callers.
+    fn name(&self) -> &str {
+        "unknown"
+    }
+
     /// Send a completion request and get the assembled response.
     async fn complete(
         &self,

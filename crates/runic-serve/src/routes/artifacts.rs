@@ -125,6 +125,15 @@ pub async fn upload_artifact(
         )
         .await?;
 
+    tracing::info!(
+        %tenant,
+        %thread_id,
+        artifact_id = %art.id,
+        mime_type = %art.mime_type,
+        bytes = art.size,
+        "artifact uploaded"
+    );
+
     Ok((
         StatusCode::CREATED,
         Json(UploadedArtifact {

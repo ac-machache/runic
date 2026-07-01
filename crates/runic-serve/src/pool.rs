@@ -65,6 +65,7 @@ impl ThreadPool {
         {
             let map = self.agents.read().await;
             if let Some(existing) = map.get(&key) {
+                tracing::debug!(%tenant, %thread_id, "thread pool warm hit");
                 return existing.clone();
             }
         }
@@ -73,8 +74,10 @@ impl ThreadPool {
         // two requests for the same thread both miss the read.
         let mut map = self.agents.write().await;
         if let Some(existing) = map.get(&key) {
+            tracing::debug!(%tenant, %thread_id, "thread pool warm hit");
             return existing.clone();
         }
+        tracing::debug!(%tenant, %thread_id, "thread pool warm miss");
 
         // thread_id == session_id, so persisted events land under
         // sessions/<tenant>/<thread_id>.
@@ -99,6 +102,7 @@ impl ThreadPool {
 
         let arc = Arc::new(Mutex::new(agent));
         map.insert(key, arc.clone());
+        tracing::info!(%tenant, %thread_id, "agent built");
         arc
     }
 
@@ -109,7 +113,9 @@ impl ThreadPool {
             tenant: tenant.to_string(),
             thread_id: thread_id.to_string(),
         };
-        self.agents.write().await.remove(&key).is_some()
+        let evicted = self.agents.write().await.remove(&key).is_some();
+        tracing::info!(%tenant, %thread_id, evicted, "thread pool evict");
+        evicted
     }
 
     /// Mirror a persisted label into the warm agent, if this thread is loaded.
@@ -156,8 +162,18 @@ fn spawn_persister(
             while let Ok(event) = rx.try_recv() {
                 batch.push(event);
             }
-            if let Err(e) = store.append_batch(&tenant, &session_id, &batch).await {
-                tracing::warn!(%tenant, %session_id, error = %e, "persist session events failed");
+            let batch_size = batch.len();
+            match store.append_batch(&tenant, &session_id, &batch).await {
+                Ok(()) => {
+                    tracing::debug!(%tenant, %session_id, batch_size, "persister batch append")
+                }
+                Err(e) => tracing::warn!(
+                    %tenant,
+                    %session_id,
+                    batch_size,
+                    error = %e,
+                    "persist session events failed"
+                ),
             }
         }
     });

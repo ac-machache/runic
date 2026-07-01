@@ -242,6 +242,10 @@ enum ContentBlockAccum {
 
 #[async_trait]
 impl Provider for AnthropicDriver {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,

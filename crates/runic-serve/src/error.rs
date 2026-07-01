@@ -64,6 +64,17 @@ impl IntoResponse for ServeError {
             Self::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream"),
             Self::NotConfigured(_) => (StatusCode::NOT_IMPLEMENTED, "not_configured"),
         };
+
+        match &self {
+            Self::Store(_) | Self::Agent(_) | Self::Internal(_) => {
+                tracing::error!(kind, error = %self, "request failed")
+            }
+            Self::Upstream(_) | Self::NotConfigured(_) => {
+                tracing::warn!(kind, error = %self, "request failed")
+            }
+            Self::ThreadNotFound { .. } | Self::RunNotFound { .. } | Self::BadRequest(_) => {}
+        }
+
         let body = Json(ErrorBody {
             error: kind.to_string(),
             message: self.to_string(),

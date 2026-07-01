@@ -245,11 +245,13 @@ pub async fn create_and_stream_run(
             thread_id.clone(),
         )));
 
+    tracing::info!(%tenant, %thread_id, "run stream accepted");
+
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
         if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
-            // Surface the failure, then a terminal Done so the client closes.
+            tracing::error!(%tenant, %thread_id, error = %e, "run task failed");
             // The failed run already recorded its RunEnd, so it's the last run,
             // not the "current" (in-flight) one.
             let run_id = agent.state().runs().last().map(|r| r.id.clone());
@@ -257,7 +259,6 @@ pub async fn create_and_stream_run(
                 run_id,
                 message: e.to_string(),
             });
-            let _ = err_tx.send(WireEvent::Done { total_turns: None });
         }
         // Guard drops → the next queued run on this thread proceeds. The agent
         // clears its event sender + human channel here, closing both rx ends.
@@ -266,21 +267,33 @@ pub async fn create_and_stream_run(
     let stream = stream! {
         let mut evt_open = true;
         let mut ask_open = true;
+        let mut done_sent = false;
+        let mut pending_error: Option<WireEvent> = None;
         while evt_open || ask_open {
             tokio::select! {
                 evt = evt_rx.recv(), if evt_open => match evt {
                     Some(e) => {
                         for w in from_agent_event(e) {
+                            if matches!(w, WireEvent::Done { .. }) {
+                                done_sent = true;
+                            }
                             yield Ok(to_sse(&w, None));
                         }
                     }
                     None => evt_open = false,
                 },
                 ask = ask_rx.recv(), if ask_open => match ask {
+                    Some(w @ WireEvent::RunError { .. }) => pending_error = Some(w),
                     Some(w) => yield Ok(to_sse(&w, None)),
                     None => ask_open = false,
                 },
             }
+        }
+        if let Some(err) = pending_error {
+            yield Ok(to_sse(&err, None));
+        }
+        if !done_sent {
+            yield Ok(to_sse(&WireEvent::Done { total_turns: None }, None));
         }
     };
 
@@ -357,6 +370,8 @@ pub async fn replay_run(
             thread: thread_id,
         });
     }
+
+    tracing::info!(%tenant, %thread_id, %run_id, after_seq, live = is_live, "replay attached");
 
     let completed_turns = all.iter().rev().find_map(|s| match &s.event {
         SessionEvent::RunEnd { outcome, .. } => Some(outcome.total_turns),

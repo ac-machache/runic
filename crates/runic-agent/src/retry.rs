@@ -35,6 +35,7 @@ pub async fn call_with_retry(
                     return Err(err);
                 }
                 tracing::warn!(
+                    provider = provider.name(),
                     attempt,
                     delay_ms = delay.as_millis() as u64,
                     "provider call transient failure; retrying"

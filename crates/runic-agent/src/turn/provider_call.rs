@@ -66,7 +66,11 @@ impl Agent {
         match stream_result {
             Ok(response) => Ok(response),
             Err(e) if is_fallback_worthy(&e) => {
-                tracing::warn!(error = %e, "streaming call failed; retrying non-streamed");
+                tracing::warn!(
+                    provider = provider.name(),
+                    error = %e,
+                    "streaming call failed; retrying non-streamed"
+                );
                 self.call_model_complete(request).await
             }
             Err(e) => Err(e.into()),
@@ -94,6 +98,7 @@ impl Agent {
             match retry::call_with_retry(fb.provider.as_ref(), req).await {
                 Ok(response) => {
                     tracing::warn!(
+                        fallback_provider = fb.provider.name(),
                         fallback_model = %fb.model,
                         primary_error = %primary_err,
                         "primary model call failed; served from fallback"
@@ -101,7 +106,12 @@ impl Agent {
                     return Ok(response);
                 }
                 Err(e) => {
-                    tracing::warn!(fallback_model = %fb.model, error = %e, "fallback failed");
+                    tracing::warn!(
+                        fallback_provider = fb.provider.name(),
+                        fallback_model = %fb.model,
+                        error = %e,
+                        "fallback failed"
+                    );
                 }
             }
         }

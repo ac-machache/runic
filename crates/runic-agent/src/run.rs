@@ -103,6 +103,7 @@ impl Agent {
         self.emit(crate::AgentEvent::RunStarted {
             run_id: run_id.clone(),
         });
+        tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
 
         self.fire_write(Point::BeforeAgent).await?;
         self.fire_read(Point::BeforeAgent).await?;
@@ -115,6 +116,7 @@ impl Agent {
         let result: Result<String, AgentError> = loop {
             // Cancellation — graceful, at the turn boundary.
             if cancel.is_some_and(|c| c.is_cancelled()) {
+                tracing::info!(%run_id, "run cancelled");
                 break Ok("cancelled".to_string());
             }
 
@@ -131,6 +133,12 @@ impl Agent {
 
             // Turn backstop.
             if total_turns >= self.config.max_turns {
+                tracing::warn!(
+                    %run_id,
+                    max_turns = self.config.max_turns,
+                    graceful = self.config.graceful_max_turns,
+                    "max turns reached"
+                );
                 if self.config.graceful_max_turns {
                     match self.finish_summary(&run_id).await {
                         Ok(usage) => {
@@ -143,6 +151,7 @@ impl Agent {
                 break Err(AgentError::MaxTurnsExceeded(self.config.max_turns));
             }
 
+            tracing::debug!(%run_id, turn = total_turns + 1, "turn started");
             let turn = match self.run_one_turn(&run_id).await {
                 Ok(t) => t,
                 Err(e) => break Err(e),
@@ -150,6 +159,12 @@ impl Agent {
 
             total_turns += 1;
             add_usage(&mut total_usage, &turn.usage);
+            tracing::debug!(
+                %run_id,
+                turn = total_turns,
+                stop_reason = stop_reason_str(turn.stop_reason),
+                "turn completed"
+            );
 
             self.state.push_event(SessionEvent::TurnBoundary {
                 run_id: run_id.clone(),
@@ -198,6 +213,14 @@ impl Agent {
                     usage: total_usage,
                     structured,
                 };
+                tracing::info!(
+                    %run_id,
+                    total_turns,
+                    stop_reason = outcome.stop_reason.as_deref().unwrap_or("-"),
+                    input_tokens = outcome.usage.input_tokens,
+                    output_tokens = outcome.usage.output_tokens,
+                    "run completed"
+                );
                 self.state.push_event(SessionEvent::RunEnd {
                     run_id,
                     outcome: outcome.clone(),
@@ -207,6 +230,7 @@ impl Agent {
                 Ok(outcome)
             }
             Err(e) => {
+                tracing::error!(%run_id, total_turns, error = %e, "run failed");
                 self.state.push_event(SessionEvent::RunEnd {
                     run_id,
                     outcome: RunOutcome {

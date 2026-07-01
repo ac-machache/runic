@@ -85,6 +85,18 @@ pub trait ArtifactStore: Send + Sync {
     async fn url(&self, _id: &str) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// Drop every artifact belonging to one session; returns how many were
+    /// deleted. Default: `list` then `delete` one at a time. Backends that can
+    /// batch the metadata cleanup (e.g. a single indexed `DELETE`) should
+    /// override this.
+    async fn delete_session_artifacts(&self, tenant: &str, session_id: &str) -> Result<usize> {
+        let artifacts = self.list(tenant, session_id).await?;
+        for artifact in &artifacts {
+            self.delete(&artifact.id).await?;
+        }
+        Ok(artifacts.len())
+    }
 }
 
 /// Generate a fresh artifact id.

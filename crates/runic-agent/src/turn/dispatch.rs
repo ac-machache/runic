@@ -17,6 +17,7 @@ use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, ToolCall};
 
 use crate::loop_guard::Verdict;
+use crate::turn::hooks::outcome_kind;
 use crate::{Agent, AgentError};
 
 /// What the loop decided to do with one requested tool call.
@@ -48,6 +49,7 @@ impl Agent {
         calls: Vec<ToolCall>,
         run_id: &str,
     ) -> Result<(), AgentError> {
+        tracing::debug!(run_id, batch_size = calls.len(), "tool batch started");
         // ── Phase 1: plan ──────────────────────────────────────────────────
         let mut plans: Vec<CallPlan> = Vec::with_capacity(calls.len());
         for mut call in calls {
@@ -55,28 +57,46 @@ impl Agent {
                 Verdict::Allow => None,
                 Verdict::Warn(msg) => Some(msg),
                 Verdict::Block(msg) => {
+                    tracing::warn!(run_id, tool = %call.name, reason = %msg, "loop guard blocked tool call");
                     plans.push(CallPlan::Substituted {
                         result: ToolResult::error(msg),
                         call,
                     });
                     continue;
                 }
-                Verdict::CircuitBreak(msg) => return Err(AgentError::CircuitBreak(msg)),
+                Verdict::CircuitBreak(msg) => {
+                    tracing::warn!(run_id, tool = %call.name, reason = %msg, "loop guard circuit break");
+                    return Err(AgentError::CircuitBreak(msg));
+                }
             };
 
             let mut substituted: Option<ToolResult> = None;
             for h in self.write_hooks.clone() {
-                match h.before_tool(&mut self.state, &mut call).await {
+                let outcome = h.before_tool(&mut self.state, &mut call).await;
+                tracing::debug!(
+                    hook_name = h.name(),
+                    hook_kind = "write",
+                    point = "before_tool",
+                    priority = h.priority(),
+                    outcome = outcome_kind(&outcome),
+                    "hook fired"
+                );
+                match outcome {
                     HookOutcome::Continue => {}
                     HookOutcome::SubstituteToolResult(r) => {
+                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook substituted tool result");
                         substituted = Some(r);
                         break;
                     }
                     HookOutcome::Cancel(reason) => {
+                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), reason = %reason, "hook cancelled tool call");
                         substituted = Some(ToolResult::error(reason));
                         break;
                     }
-                    HookOutcome::Stop => return Err(AgentError::HookStop),
+                    HookOutcome::Stop => {
+                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run");
+                        return Err(AgentError::HookStop);
+                    }
                 }
             }
 
@@ -217,8 +237,18 @@ impl Agent {
             // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
             // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
             for h in self.write_hooks.clone() {
-                match h.after_tool(&mut self.state, call, &result).await {
+                let outcome = h.after_tool(&mut self.state, call, &result).await;
+                tracing::debug!(
+                    hook_name = h.name(),
+                    hook_kind = "write",
+                    point = "after_tool",
+                    priority = h.priority(),
+                    outcome = outcome_kind(&outcome),
+                    "hook fired"
+                );
+                match outcome {
                     HookOutcome::Stop | HookOutcome::Cancel(_) => {
+                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");
                         return Err(AgentError::HookStop);
                     }
                     HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
@@ -227,6 +257,16 @@ impl Agent {
             self.fire_read_after_tool(call, &result).await?;
         }
 
+        let errors = blocks
+            .iter()
+            .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
+            .count();
+        tracing::debug!(
+            run_id,
+            batch_size = blocks.len(),
+            errors,
+            "tool batch completed"
+        );
         self.push_tool_results(Message::user_with_blocks(blocks), run_id);
         Ok(())
     }
@@ -262,6 +302,7 @@ async fn dispatch_one(
     timeout: Duration,
 ) -> ToolResult {
     let Some(tool) = tool else {
+        tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "unknown tool");
         return ToolResult::error(format!("unknown tool: {}", call.name));
     };
     // Catch panics so a buggy tool can NEVER abort the run task (which would
@@ -270,13 +311,32 @@ async fn dispatch_one(
     use futures::FutureExt as _;
     let exec = std::panic::AssertUnwindSafe(tool.execute(call.input.clone(), &ctx)).catch_unwind();
     match tokio::time::timeout(timeout, exec).await {
-        Ok(Ok(Ok(result))) => result,
-        Ok(Ok(Err(e))) => ToolResult::error(format!("tool '{}' failed: {e}", call.name)),
-        Ok(Err(_panic)) => ToolResult::error(format!("tool '{}' panicked", call.name)),
-        Err(_) => ToolResult::error(format!(
-            "tool '{}' timed out after {}s",
-            call.name,
-            timeout.as_secs()
-        )),
+        Ok(Ok(Ok(result))) => {
+            if !result.success {
+                tracing::warn!(
+                    run_id = %ctx.run_id,
+                    tool = %call.name,
+                    error = %result.error.as_deref().unwrap_or(&result.output),
+                    "tool returned error"
+                );
+            }
+            result
+        }
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(run_id = %ctx.run_id, tool = %call.name, error = %e, "tool returned error");
+            ToolResult::error(format!("tool '{}' failed: {e}", call.name))
+        }
+        Ok(Err(_panic)) => {
+            tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "tool panicked");
+            ToolResult::error(format!("tool '{}' panicked", call.name))
+        }
+        Err(_) => {
+            tracing::warn!(run_id = %ctx.run_id, tool = %call.name, timeout_s = timeout.as_secs(), "tool timed out");
+            ToolResult::error(format!(
+                "tool '{}' timed out after {}s",
+                call.name,
+                timeout.as_secs()
+            ))
+        }
     }
 }

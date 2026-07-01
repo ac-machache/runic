@@ -1,13 +1,22 @@
 //! `AppState` and the top-level `router()` factory.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::HeaderName;
 use axum::routing::{get, post};
 use runic_substrate::{ArtifactStore, SessionStore};
 use runic_transcriber::SpeechToText;
+use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
+use tower_http::request_id::{
+    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
+use tower_http::trace::TraceLayer;
+
+const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 #[cfg(feature = "docs-ui")]
 use utoipa::OpenApi;
@@ -97,9 +106,40 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}/asks/{ask_id}",
             post(runs::submit_answer),
         )
-        // Permissive CORS so a browser dev UI served from another origin can
-        // drive the server.
         .layer(CorsLayer::permissive())
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                            let request_id = request
+                                .extensions()
+                                .get::<RequestId>()
+                                .and_then(|id| id.header_value().to_str().ok())
+                                .unwrap_or("-")
+                                .to_string();
+                            tracing::info_span!(
+                                "http_request",
+                                method = %request.method(),
+                                path = %request.uri().path(),
+                                request_id = %request_id,
+                            )
+                        })
+                        .on_response(
+                            |response: &axum::response::Response,
+                             latency: Duration,
+                             _span: &tracing::Span| {
+                                tracing::info!(
+                                    status = %response.status().as_u16(),
+                                    latency_ms = %latency.as_millis(),
+                                    "request completed"
+                                );
+                            },
+                        ),
+                )
+                .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
+        )
         .with_state(state);
 
     // Swagger UI reads the spec from an internal path so it doesn't collide with

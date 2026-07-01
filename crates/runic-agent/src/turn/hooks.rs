@@ -18,6 +18,33 @@ pub(crate) enum Point {
     AfterModel,
 }
 
+impl Point {
+    fn as_str(self) -> &'static str {
+        match self {
+            Point::BeforeAgent => "before_agent",
+            Point::AfterAgent => "after_agent",
+            Point::BeforeModel => "before_model",
+            Point::AfterModel => "after_model",
+        }
+    }
+}
+
+pub(super) fn outcome_kind(outcome: &HookOutcome) -> &'static str {
+    match outcome {
+        HookOutcome::Continue => "continue",
+        HookOutcome::SubstituteToolResult(_) => "substitute",
+        HookOutcome::Cancel(_) => "cancel",
+        HookOutcome::Stop => "stop",
+    }
+}
+
+fn signal_kind(signal: &HookSignal) -> &'static str {
+    match signal {
+        HookSignal::Continue => "continue",
+        HookSignal::Stop => "stop",
+    }
+}
+
 impl Agent {
     /// Fire write hooks at a lifecycle point, sequentially. `Cancel`/`Stop`
     /// halt the run; `SubstituteToolResult` is meaningless here and ignored.
@@ -29,6 +56,14 @@ impl Agent {
                 Point::BeforeModel => h.before_model(&mut self.state).await,
                 Point::AfterModel => h.after_model(&mut self.state).await,
             };
+            tracing::debug!(
+                hook_name = h.name(),
+                hook_kind = "write",
+                point = point.as_str(),
+                priority = h.priority(),
+                outcome = outcome_kind(&outcome),
+                "hook fired"
+            );
             match outcome {
                 HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
                 HookOutcome::Cancel(_) | HookOutcome::Stop => return Err(AgentError::HookStop),
@@ -46,12 +81,21 @@ impl Agent {
             .map(|h| {
                 let h = h.clone();
                 async move {
-                    match point {
+                    let signal = match point {
                         Point::BeforeAgent => h.before_agent(state).await,
                         Point::AfterAgent => h.after_agent(state).await,
                         Point::BeforeModel => h.before_model(state).await,
                         Point::AfterModel => h.after_model(state).await,
-                    }
+                    };
+                    tracing::debug!(
+                        hook_name = h.name(),
+                        hook_kind = "read",
+                        point = point.as_str(),
+                        priority = h.priority(),
+                        outcome = signal_kind(&signal),
+                        "hook fired"
+                    );
+                    signal
                 }
             })
             .collect();
@@ -66,7 +110,18 @@ impl Agent {
             .iter()
             .map(|h| {
                 let h = h.clone();
-                async move { h.before_tool(state, call).await }
+                async move {
+                    let signal = h.before_tool(state, call).await;
+                    tracing::debug!(
+                        hook_name = h.name(),
+                        hook_kind = "read",
+                        point = "before_tool",
+                        priority = h.priority(),
+                        outcome = signal_kind(&signal),
+                        "hook fired"
+                    );
+                    signal
+                }
             })
             .collect();
         signals_ok(futures::future::join_all(futs).await)
@@ -84,7 +139,18 @@ impl Agent {
             .iter()
             .map(|h| {
                 let h = h.clone();
-                async move { h.after_tool(state, call, result).await }
+                async move {
+                    let signal = h.after_tool(state, call, result).await;
+                    tracing::debug!(
+                        hook_name = h.name(),
+                        hook_kind = "read",
+                        point = "after_tool",
+                        priority = h.priority(),
+                        outcome = signal_kind(&signal),
+                        "hook fired"
+                    );
+                    signal
+                }
             })
             .collect();
         signals_ok(futures::future::join_all(futs).await)

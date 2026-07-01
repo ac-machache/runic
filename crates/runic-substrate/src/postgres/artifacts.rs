@@ -51,21 +51,6 @@ impl PostgresArtifactStore {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-
-    /// Drop a session's artifacts entirely — bytes from the inner store **and**
-    /// the metadata rows. (The session cascade only removes the rows.)
-    pub async fn delete_session_artifacts(&self, tenant: &str, session_id: &str) -> Result<()> {
-        for artifact in self.list(tenant, session_id).await? {
-            self.bytes.delete(&artifact.id).await?;
-        }
-        sqlx::query("DELETE FROM artifacts WHERE tenant = $1 AND session_id = $2")
-            .bind(tenant)
-            .bind(session_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
-        Ok(())
-    }
 }
 
 fn row_to_artifact(row: &sqlx::postgres::PgRow) -> Result<Artifact> {
@@ -169,5 +154,34 @@ impl ArtifactStore for PostgresArtifactStore {
 
     async fn url(&self, id: &str) -> Result<Option<String>> {
         self.bytes.url(id).await
+    }
+
+    /// Bytes are dropped one at a time via the inner store; the metadata rows
+    /// are dropped in a single batched `DELETE` instead of one per artifact.
+    async fn delete_session_artifacts(&self, tenant: &str, session_id: &str) -> Result<usize> {
+        let artifacts = self.list(tenant, session_id).await?;
+        let total = artifacts.len();
+        for (deleted, artifact) in artifacts.iter().enumerate() {
+            if let Err(e) = self.bytes.delete(&artifact.id).await {
+                tracing::warn!(
+                    %tenant,
+                    %session_id,
+                    artifact_id = %artifact.id,
+                    deleted,
+                    total,
+                    error = %e,
+                    "artifact byte delete failed; session artifacts partially cleaned up"
+                );
+                return Err(e);
+            }
+        }
+        sqlx::query("DELETE FROM artifacts WHERE tenant = $1 AND session_id = $2")
+            .bind(tenant)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        tracing::info!(%tenant, %session_id, artifact_count = total, "session artifacts deleted");
+        Ok(total)
     }
 }

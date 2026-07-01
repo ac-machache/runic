@@ -666,6 +666,10 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, Provider
 
 #[async_trait]
 impl Provider for GeminiDriver {
+    fn name(&self) -> &str {
+        "gemini"
+    }
+
     async fn complete(
         &self,
         request: CompletionRequest,

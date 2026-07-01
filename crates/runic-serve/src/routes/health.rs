@@ -1,12 +1,27 @@
-//! `GET /healthz` — liveness probe. Returns 200 with a short JSON body
-//! so callers can confirm runic-serve is up.
+//! `GET /healthz` — liveness probe.
 
 use axum::Json;
-use serde_json::{Value, json};
+use serde::Serialize;
+use utoipa::ToSchema;
 
-pub async fn healthz() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "runic-serve",
-    }))
+/// Liveness response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HealthResponse {
+    #[schema(example = "ok")]
+    pub status: String,
+    #[schema(example = "runic-serve")]
+    pub service: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "health",
+    responses((status = 200, description = "Service is up", body = HealthResponse))
+)]
+pub async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse {
+        status: "ok".into(),
+        service: "runic-serve".into(),
+    })
 }

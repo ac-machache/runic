@@ -9,12 +9,14 @@ use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use runic_substrate::SessionMeta;
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::app::AppState;
-use crate::error::ServeError;
+use crate::error::{ErrorBody, ServeError};
 use crate::tenant::Tenant;
 
-#[derive(Debug, Serialize)]
+/// One thread's current shape.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Thread {
     pub thread_id: String,
     pub tenant: String,
@@ -22,11 +24,49 @@ pub struct Thread {
     pub event_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+/// A page of a tenant's threads, most-recently-active first.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ThreadList {
     pub threads: Vec<ThreadSummary>,
+    /// Present only when more threads remain; pass it back as `?cursor=`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+/// One `{seq, event}` entry of the stored log. `event` is a raw `SessionEvent`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StoredEventEnvelope {
+    pub seq: u64,
+    #[schema(value_type = Object)]
+    pub event: serde_json::Value,
+}
+
+/// `GET /threads/{id}/events` — a page of the stored event log.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ThreadEventsResponse {
+    pub thread_id: String,
+    pub tenant: String,
+    pub events: Vec<StoredEventEnvelope>,
+    /// Seq to pass as `?after_seq=` for the next page; null when empty.
+    pub next_after_seq: Option<u64>,
+    pub has_more: bool,
+}
+
+/// `GET /threads/{id}/state` — the agent's view of the thread. When a run is in
+/// flight the slot is locked, so `busy` is true and `system_prompt`/`run_count`
+/// are null (unreadable without the lock); `messages` is reconstructed from the
+/// store.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ThreadStateResponse {
+    pub thread_id: String,
+    pub tenant: String,
+    pub busy: bool,
+    pub label: Option<String>,
+    pub system_prompt: Option<String>,
+    #[schema(value_type = Vec<Object>)]
+    pub messages: Vec<runic_types::Message>,
+    pub event_count: u64,
+    pub run_count: Option<usize>,
 }
 
 fn default_threads_limit() -> usize {
@@ -37,18 +77,24 @@ fn default_events_limit() -> usize {
     200
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListThreadsQuery {
+    /// Page size, clamped to 1..=200.
     #[serde(default = "default_threads_limit")]
     pub limit: usize,
+    /// Opaque keyset cursor from a previous page's `next_cursor`.
     #[serde(default)]
     pub cursor: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct EventsQuery {
+    /// Return events with `seq` greater than this.
     #[serde(default)]
     pub after_seq: u64,
+    /// Page size, clamped to 1..=1000.
     #[serde(default = "default_events_limit")]
     pub limit: usize,
 }
@@ -63,14 +109,14 @@ fn decode_cursor(s: &str) -> Option<(DateTime<Utc>, String)> {
     Some((at, id.to_string()))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ThreadSummary {
     pub thread_id: String,
     pub label: Option<String>,
     pub event_count: u64,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, ToSchema)]
 pub struct CreateThreadRequest {
     /// If provided, the thread is created with this id; otherwise the server
     /// generates a UUID. Either way the id is returned so the client can stash
@@ -81,10 +127,11 @@ pub struct CreateThreadRequest {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, ToSchema)]
 pub struct UpdateThreadRequest {
     /// Omit to leave unchanged, string to set, null to clear.
     #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<String>)]
     pub label: Option<Option<String>>,
 }
 
@@ -114,6 +161,14 @@ fn thread_from_meta(tenant: String, meta: SessionMeta) -> Thread {
 ///
 /// A label materialises the metadata row immediately; otherwise the store lazily
 /// creates per-session state on first event append.
+#[utoipa::path(
+    post,
+    path = "/threads",
+    tag = "threads",
+    request_body = CreateThreadRequest,
+    params(("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")),
+    responses((status = 201, description = "Created (idempotent on an existing id)", body = Thread))
+)]
 pub async fn create_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -157,6 +212,16 @@ pub async fn create_thread(
 
 /// `GET /threads?limit=&cursor=` — a page of the tenant's threads,
 /// most-recently-active first. `next_cursor` is present when more remain.
+#[utoipa::path(
+    get,
+    path = "/threads",
+    tag = "threads",
+    params(ListThreadsQuery, ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")),
+    responses(
+        (status = 200, description = "A page of threads", body = ThreadList),
+        (status = 400, description = "Invalid cursor", body = ErrorBody)
+    )
+)]
 pub async fn list_threads(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -194,6 +259,19 @@ pub async fn list_threads(
 }
 
 /// `GET /threads/:id` — current shape of one thread (event count etc.).
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}",
+    tag = "threads",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "The thread", body = Thread),
+        (status = 404, description = "Unknown thread", body = ErrorBody)
+    )
+)]
 pub async fn get_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -209,6 +287,20 @@ pub async fn get_thread(
 
 /// `PATCH /threads/:id` — update thread metadata. The DB metadata row is the
 /// source of truth; a warm agent mirrors the label after the write succeeds.
+#[utoipa::path(
+    patch,
+    path = "/threads/{thread_id}",
+    tag = "threads",
+    request_body = UpdateThreadRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "Updated thread", body = Thread),
+        (status = 404, description = "Unknown thread", body = ErrorBody)
+    )
+)]
 pub async fn update_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -245,12 +337,26 @@ pub async fn update_thread(
 /// `GET /threads/:id/events` — the full stored event log as a JSON snapshot
 /// (not SSE). Each entry is `{seq, event}` with the raw `SessionEvent`. Powers
 /// a dev UI's history load.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/events",
+    tag = "threads",
+    params(
+        EventsQuery,
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "A page of the stored event log", body = ThreadEventsResponse),
+        (status = 404, description = "Unknown thread", body = ErrorBody)
+    )
+)]
 pub async fn thread_events(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
     Query(q): Query<EventsQuery>,
-) -> Result<Json<serde_json::Value>, ServeError> {
+) -> Result<Json<ThreadEventsResponse>, ServeError> {
     if state
         .session_store
         .session_meta(&tenant, &thread_id)
@@ -268,28 +374,44 @@ pub async fn thread_events(
     let has_more = stored.len() > limit;
     stored.truncate(limit);
     let next_after_seq = stored.last().map(|s| s.seq);
-    let events: Vec<serde_json::Value> = stored
+    let events = stored
         .into_iter()
-        .map(|s| serde_json::json!({ "seq": s.seq, "event": s.event }))
+        .map(|s| StoredEventEnvelope {
+            seq: s.seq,
+            event: serde_json::to_value(s.event).unwrap_or(serde_json::Value::Null),
+        })
         .collect();
-    Ok(Json(serde_json::json!({
-        "thread_id": thread_id,
-        "tenant": tenant,
-        "events": events,
-        "next_after_seq": next_after_seq,
-        "has_more": has_more,
-    })))
+    Ok(Json(ThreadEventsResponse {
+        thread_id,
+        tenant,
+        events,
+        next_after_seq,
+        has_more,
+    }))
 }
 
 /// `GET /threads/:id/state` — agent state for inspection: the system prompt,
 /// the message list as sent to the model, and run / event counts. Reads the
 /// warm agent when idle; if a run is in flight (slot locked) it reports `busy`
 /// and reconstructs the message list from the event store.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/state",
+    tag = "threads",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "Agent view of the thread (see `busy`)", body = ThreadStateResponse),
+        (status = 404, description = "Unknown thread", body = ErrorBody)
+    )
+)]
 pub async fn thread_state(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ServeError> {
+) -> Result<Json<ThreadStateResponse>, ServeError> {
     // Authoritative label + event_count from metadata; 404 if the thread was
     // never created (don't build a warm agent for a phantom thread).
     let Some(meta) = state
@@ -305,16 +427,16 @@ pub async fn thread_state(
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     if let Ok(agent) = agent_arc.try_lock() {
         let st = agent.state();
-        return Ok(Json(serde_json::json!({
-            "thread_id": thread_id,
-            "tenant": tenant,
-            "busy": false,
-            "label": label,
-            "system_prompt": st.system_prompt,
-            "messages": st.messages_for_provider(),
-            "event_count": event_count,
-            "run_count": st.runs().len(),
-        })));
+        return Ok(Json(ThreadStateResponse {
+            thread_id,
+            tenant,
+            busy: false,
+            label,
+            system_prompt: Some(st.system_prompt.clone()),
+            messages: st.messages_for_provider(),
+            event_count,
+            run_count: Some(st.runs().len()),
+        }));
     }
 
     // Busy (run in progress) — reconstruct messages from the store; the system
@@ -324,20 +446,30 @@ pub async fn thread_state(
         runic_substrate::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
             .await
             .unwrap_or_default();
-    Ok(Json(serde_json::json!({
-        "thread_id": thread_id,
-        "tenant": tenant,
-        "busy": true,
-        "label": label,
-        "system_prompt": serde_json::Value::Null,
-        "messages": messages,
-        "event_count": event_count,
-        "run_count": serde_json::Value::Null,
-    })))
+    Ok(Json(ThreadStateResponse {
+        thread_id,
+        tenant,
+        busy: true,
+        label,
+        system_prompt: None,
+        messages,
+        event_count,
+        run_count: None,
+    }))
 }
 
 /// `DELETE /threads/:id` — drop the thread's session AND its in-pool Agent so
 /// the next run starts fresh.
+#[utoipa::path(
+    delete,
+    path = "/threads/{thread_id}",
+    tag = "threads",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses((status = 204, description = "Thread, artifacts, and warm agent dropped"))
+)]
 pub async fn delete_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,

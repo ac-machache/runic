@@ -9,6 +9,9 @@ use runic_substrate::{ArtifactStore, SessionStore};
 use runic_transcriber::SpeechToText;
 use tower_http::cors::CorsLayer;
 
+#[cfg(feature = "docs-ui")]
+use utoipa::OpenApi;
+
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
 use crate::pool::ThreadPool;
@@ -53,8 +56,9 @@ pub fn router(config: ServeConfig) -> Router {
         human_hub: config.human_hub,
     };
 
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(health::healthz))
+        .route("/openapi.json", get(crate::openapi::openapi_json))
         .route(
             "/threads",
             post(threads::create_thread).get(threads::list_threads),
@@ -96,5 +100,15 @@ pub fn router(config: ServeConfig) -> Router {
         // Permissive CORS so a browser dev UI served from another origin can
         // drive the server.
         .layer(CorsLayer::permissive())
-        .with_state(state)
+        .with_state(state);
+
+    // Swagger UI reads the spec from an internal path so it doesn't collide with
+    // the public `GET /openapi.json` route mounted above.
+    #[cfg(feature = "docs-ui")]
+    let router = router.merge(
+        utoipa_swagger_ui::SwaggerUi::new("/docs")
+            .url("/docs/openapi.json", crate::openapi::ApiDoc::openapi()),
+    );
+
+    router
 }

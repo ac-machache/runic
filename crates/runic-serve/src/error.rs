@@ -4,6 +4,19 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+use utoipa::ToSchema;
+
+/// Unified error body returned by every endpoint on failure.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// Machine-readable kind: one of `not_found`, `bad_request`, `store`,
+    /// `agent`, `internal`, `upstream`, `not_configured`.
+    #[schema(example = "bad_request")]
+    pub error: String,
+    /// Human-readable detail.
+    pub message: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -51,10 +64,10 @@ impl IntoResponse for ServeError {
             Self::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream"),
             Self::NotConfigured(_) => (StatusCode::NOT_IMPLEMENTED, "not_configured"),
         };
-        let body = Json(serde_json::json!({
-            "error": kind,
-            "message": self.to_string(),
-        }));
+        let body = Json(ErrorBody {
+            error: kind.to_string(),
+            message: self.to_string(),
+        });
         (status, body).into_response()
     }
 }

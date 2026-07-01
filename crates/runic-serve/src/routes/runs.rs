@@ -30,7 +30,7 @@ use runic_substrate::ArtifactSource;
 use runic_types::{ContentBlock, Message, MessageContent};
 
 use crate::app::AppState;
-use crate::error::ServeError;
+use crate::error::{ErrorBody, ServeError};
 use crate::human::HumanChannel;
 use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 use crate::tenant::Tenant;
@@ -41,16 +41,21 @@ use crate::wire::{WireEvent, from_agent_event, from_session_event};
 ///   {"message": "plain text"}                          // text shorthand
 ///   {"content": [{"type":"text","text":"..."},         // full content blocks
 ///                {"type":"image","media_type":"image/png","data":"<base64>"}]}
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RunMessageRequest {
+    /// Plain-text shorthand for the user turn. Ignored when `content` is a
+    /// non-empty array.
     #[serde(default)]
     pub message: Option<String>,
+    /// Full content blocks (text / image / file / artifact_ref). Inline media is
+    /// stored and replaced with a reference before it reaches the event log.
     #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
     pub content: Option<Vec<ContentBlock>>,
     /// Open per-request context, passed verbatim to the factory's
-    /// `build_run_context`. The app decides what keys mean (user_id, provider,
-    /// allow_web_search, …); the serve crate is agnostic to its contents.
+    /// `build_run_context` (e.g. `user_id`, provider override).
     #[serde(default)]
+    #[schema(value_type = Option<Object>)]
     pub context: Option<serde_json::Value>,
 }
 
@@ -167,7 +172,7 @@ async fn normalize_message(
 }
 
 /// Body for `POST .../asks/:ask_id` — the operator's answer to an `ask_user`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AnswerRequest {
     pub answer: String,
 }
@@ -184,6 +189,25 @@ struct StreamErrorEvent {
 /// merges the agent's live `AgentEvent` stream with any HITL `ask_required`
 /// prompts onto one SSE response. If the client disconnects, the response
 /// stream is dropped; the run keeps going to completion in the task.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs/stream",
+    tag = "runs",
+    request_body = RunMessageRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200,
+         description = "SSE stream (`text/event-stream`). Event names: run_start, \
+            assistant_text_delta, assistant_thinking_delta, tool_start, tool_finish, \
+            turn_complete, usage, ask_required, escalated, warning, run_error, done. \
+            A provider failure emits `run_error` then `done`.",
+         content_type = "text/event-stream", body = WireEvent),
+        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody)
+    )
+)]
 pub async fn create_and_stream_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -272,6 +296,24 @@ pub async fn create_and_stream_run(
 /// Emit persisted events for the run with seq > the `Last-Event-ID` header,
 /// then attach to the agent's live broadcast if it's still warm — so a client
 /// that dropped mid-run can reconnect and pick up where it left off.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/runs/{run_id}/stream",
+    tag = "runs",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("run_id" = String, Path, description = "Run id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`"),
+        ("Last-Event-ID" = Option<u64>, Header, description = "Resume: replay only events with seq greater than this")
+    ),
+    responses(
+        (status = 200,
+         description = "SSE replay (`text/event-stream`) of persisted events after \
+            `Last-Event-ID`, then the live tail if still in flight, ending with `done`.",
+         content_type = "text/event-stream", body = WireEvent),
+        (status = 404, description = "Unknown thread or run", body = ErrorBody)
+    )
+)]
 pub async fn replay_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -379,6 +421,21 @@ pub async fn replay_run(
 ///
 /// Deliver an operator's answer to a parked `ask_user`. The parked tool wakes,
 /// returns the answer into the conversation, and the run streams on.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/asks/{ask_id}",
+    tag = "runs",
+    request_body = AnswerRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("ask_id" = String, Path, description = "Ask id from the `ask_required` event"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 202, description = "Answer delivered; the parked run resumes"),
+        (status = 400, description = "No pending ask for this (tenant, thread, ask_id)", body = ErrorBody)
+    )
+)]
 pub async fn submit_answer(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
@@ -389,6 +446,22 @@ pub async fn submit_answer(
 }
 
 /// Legacy alias for clients still posting through the old run-shaped path.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
+    tag = "runs",
+    request_body = AnswerRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("run_id" = String, Path, description = "Run id (ignored; kept for the legacy path shape)"),
+        ("ask_id" = String, Path, description = "Ask id from the `ask_required` event"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 202, description = "Answer delivered; the parked run resumes"),
+        (status = 400, description = "No pending ask for this (tenant, thread, ask_id)", body = ErrorBody)
+    )
+)]
 pub async fn submit_answer_legacy(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,

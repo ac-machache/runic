@@ -39,6 +39,7 @@ pub mod app;
 pub mod error;
 pub mod factory;
 pub mod human;
+pub mod openapi;
 pub mod pool;
 pub mod routes;
 pub mod tenant;

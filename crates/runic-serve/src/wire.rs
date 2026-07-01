@@ -14,8 +14,11 @@ use runic_agent::AgentEvent;
 use runic_state::SessionEvent;
 use runic_types::Message;
 use serde::Serialize;
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize)]
+/// One Server-Sent Event on a run stream. The `type` field is the discriminator
+/// and also the SSE `event:` name.
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
     /// A run is starting. `at` is present only on replay (the persisted
@@ -36,6 +39,7 @@ pub enum WireEvent {
     ToolStart {
         id: String,
         name: String,
+        #[schema(value_type = Object)]
         input: serde_json::Value,
     },
 
@@ -56,6 +60,7 @@ pub enum WireEvent {
     /// surface the same content as deltas + the persisted log).
     Message {
         run_id: String,
+        #[schema(value_type = Object)]
         msg: Message,
         at: DateTime<Utc>,
     },

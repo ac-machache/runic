@@ -7,21 +7,41 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, header};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::app::AppState;
-use crate::error::ServeError;
+use crate::error::{ErrorBody, ServeError};
 use crate::tenant::Tenant;
 
 /// Upload ceiling for audio (also enforced as a `DefaultBodyLimit`).
 pub const MAX_AUDIO_BYTES: usize = 100 * 1024 * 1024;
 
-#[derive(Debug, Serialize)]
+/// Transcribed audio.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TranscriptResponse {
     pub text: String,
+    /// BCP-47-ish language tag, when the backend detects one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/transcribe",
+    tag = "transcription",
+    request_body(content = String, description = "Raw audio bytes (max 100 MiB)", content_type = "audio/*"),
+    params(
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`"),
+        ("Content-Type" = String, Header, description = "Must be `audio/*`"),
+        ("X-Runic-Filename" = Option<String>, Header, description = "Optional source filename")
+    ),
+    responses(
+        (status = 200, description = "Transcript", body = TranscriptResponse),
+        (status = 400, description = "Empty body or non-audio content type", body = ErrorBody),
+        (status = 502, description = "Transcription backend failed", body = ErrorBody),
+        (status = 501, description = "Transcription not configured", body = ErrorBody)
+    )
+)]
 pub async fn transcribe(
     State(state): State<AppState>,
     Tenant(_tenant): Tenant,

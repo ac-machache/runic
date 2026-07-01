@@ -30,6 +30,7 @@ use crate::wire::WireEvent;
         artifacts::list_artifacts,
         transcribe::transcribe,
         runs::create_and_stream_run,
+        runs::cancel_run,
         runs::replay_run,
         runs::submit_answer,
         runs::submit_answer_legacy,

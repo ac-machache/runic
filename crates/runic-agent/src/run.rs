@@ -105,8 +105,8 @@ impl Agent {
         });
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
 
-        self.fire_write(Point::BeforeAgent).await?;
-        self.fire_read(Point::BeforeAgent).await?;
+        self.fire_write(&run_id, Point::BeforeAgent).await?;
+        self.fire_read(&run_id, Point::BeforeAgent).await?;
 
         let mut total_turns: u32 = 0;
         let mut total_usage = TokenUsage::default();
@@ -205,8 +205,8 @@ impl Agent {
 
         match result {
             Ok(stop_reason) => {
-                self.fire_write(Point::AfterAgent).await?;
-                self.fire_read(Point::AfterAgent).await?;
+                self.fire_write(&run_id, Point::AfterAgent).await?;
+                self.fire_read(&run_id, Point::AfterAgent).await?;
                 let outcome = RunOutcome {
                     total_turns,
                     stop_reason: Some(stop_reason),

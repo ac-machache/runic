@@ -399,6 +399,8 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
             run_id: "r1".into(),
             hook: "guard".into(),
             lifecycle: HookLifecycle::BeforeTool,
+            hook_kind: "write".into(),
+            outcome: "cancel".into(),
             note: Some("ok".into()),
             at: ts(6),
         },

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runic_hook::HookOutcome;
+use runic_state::HookLifecycle;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, ToolCall};
 
@@ -81,6 +82,9 @@ impl Agent {
                     outcome = outcome_kind(&outcome),
                     "hook fired"
                 );
+                if !matches!(outcome, HookOutcome::Continue) {
+                    self.record_write_hook(run_id, h.name(), HookLifecycle::BeforeTool, &outcome);
+                }
                 match outcome {
                     HookOutcome::Continue => {}
                     HookOutcome::SubstituteToolResult(r) => {
@@ -100,7 +104,7 @@ impl Agent {
                 }
             }
 
-            self.fire_read_before_tool(&call).await?;
+            self.fire_read_before_tool(run_id, &call).await?;
 
             let plan = match substituted {
                 Some(result) => CallPlan::Substituted { call, result },
@@ -246,6 +250,9 @@ impl Agent {
                     outcome = outcome_kind(&outcome),
                     "hook fired"
                 );
+                if !matches!(outcome, HookOutcome::Continue) {
+                    self.record_write_hook(run_id, h.name(), HookLifecycle::AfterTool, &outcome);
+                }
                 match outcome {
                     HookOutcome::Stop | HookOutcome::Cancel(_) => {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");
@@ -254,7 +261,7 @@ impl Agent {
                     HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
                 }
             }
-            self.fire_read_after_tool(call, &result).await?;
+            self.fire_read_after_tool(run_id, call, &result).await?;
         }
 
         let errors = blocks

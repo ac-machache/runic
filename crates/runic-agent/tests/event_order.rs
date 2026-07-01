@@ -12,9 +12,7 @@ use runic_agent::{Agent, CancelToken, RunContext};
 use runic_provider::ProviderError;
 
 #[tokio::test]
-async fn substitution_path_has_the_same_event_shape_as_a_real_tool() {
-    // A hook substitutes the tool result; the event log shape is unchanged —
-    // only the tool-result content differs.
+async fn substitution_path_leaves_a_hookran_audit_entry() {
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
@@ -38,6 +36,7 @@ async fn substitution_path_has_the_same_event_shape_as_a_real_tool() {
             "Message",      // user
             "Message",      // assistant (tool_use)
             "TurnBoundary", // turn 1
+            "HookRan",      // the substitution itself
             "Message",      // substituted tool result
             "Message",      // assistant (final text)
             "TurnBoundary", // turn 2

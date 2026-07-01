@@ -26,6 +26,9 @@ pub enum ServeError {
     #[error("run {id:?} not found on thread {thread:?}")]
     RunNotFound { id: String, thread: String },
 
+    #[error("no run in flight on thread {thread_id:?}")]
+    NoRunInFlight { thread_id: String },
+
     #[error("session store error: {0}")]
     Store(String),
 
@@ -57,6 +60,7 @@ impl IntoResponse for ServeError {
             Self::ThreadNotFound { .. } | Self::RunNotFound { .. } => {
                 (StatusCode::NOT_FOUND, "not_found")
             }
+            Self::NoRunInFlight { .. } => (StatusCode::CONFLICT, "conflict"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
             Self::Agent(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
@@ -72,7 +76,10 @@ impl IntoResponse for ServeError {
             Self::Upstream(_) | Self::NotConfigured(_) => {
                 tracing::warn!(kind, error = %self, "request failed")
             }
-            Self::ThreadNotFound { .. } | Self::RunNotFound { .. } | Self::BadRequest(_) => {}
+            Self::ThreadNotFound { .. }
+            | Self::RunNotFound { .. }
+            | Self::NoRunInFlight { .. }
+            | Self::BadRequest(_) => {}
         }
 
         let body = Json(ErrorBody {

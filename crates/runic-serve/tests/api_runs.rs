@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 use tower::ServiceExt;
 
 use runic_agent::Agent;
@@ -129,6 +130,69 @@ impl Provider for AskingProvider {
     }
 }
 
+struct GatedProvider {
+    entered: Arc<Notify>,
+    gate: Arc<Notify>,
+}
+
+#[async_trait]
+impl Provider for GatedProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.entered.notify_one();
+        self.gate.notified().await;
+        Ok(CompletionResponse {
+            content: vec![],
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "noop".into(),
+                input: json!({}),
+            }],
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+struct NoopTool;
+
+#[async_trait]
+impl Tool for NoopTool {
+    fn name(&self) -> &str {
+        "noop"
+    }
+    fn description(&self) -> &str {
+        "does nothing"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({ "type": "object" })
+    }
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("ok"))
+    }
+}
+
+struct GatedFactory {
+    entered: Arc<Notify>,
+    gate: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentFactory for GatedFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(
+            Arc::new(GatedProvider {
+                entered: self.entered.clone(),
+                gate: self.gate.clone(),
+            }),
+            tenant,
+            session_id,
+        )
+        .system_prompt("test")
+        .tool(Arc::new(NoopTool))
+        .build()
+    }
+}
+
 struct AskingFactory;
 
 #[async_trait]
@@ -191,6 +255,22 @@ fn asking_router() -> Router {
         agent_factory: Arc::new(AskingFactory),
         human_hub: Arc::new(HumanHub::new()),
     })
+}
+
+fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let app = router(ServeConfig {
+        session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agent_factory: Arc::new(GatedFactory {
+            entered: entered.clone(),
+            gate: gate.clone(),
+        }),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+    (app, entered, gate)
 }
 
 fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
@@ -440,6 +520,71 @@ async fn provider_failure_emits_run_error_then_done() {
     let kinds = sse_kinds(&body);
     assert!(kinds.contains(&"run_error".to_string()), "{kinds:?}");
     assert_eq!(kinds.last().unwrap(), "done");
+}
+
+#[tokio::test]
+async fn cancel_with_no_run_in_flight_is_409() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn cancel_stops_the_run_gracefully_and_reports_it_over_sse() {
+    let (app, entered, gate) = gated_router();
+    let thread = "t1";
+
+    let run_app = app.clone();
+    let run_task = tokio::spawn(async move {
+        let resp = run_app
+            .oneshot(run_request(thread, TENANT, "go"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+
+    entered.notified().await;
+
+    let cancel_resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/threads/{thread}/runs/cancel"),
+            TENANT,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel_resp.status(), StatusCode::ACCEPTED);
+
+    gate.notify_one();
+
+    let body = run_task.await.unwrap();
+    let done = sse_data(&body)
+        .into_iter()
+        .find(|e| e["type"] == "done")
+        .expect("a done event");
+    assert_eq!(done["stop_reason"], "cancelled");
+
+    for _ in 0..50 {
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/threads/{thread}/runs/cancel"),
+                TENANT,
+                String::new(),
+            ))
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::CONFLICT {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("cancel token was never cleared after the run finished");
 }
 
 #[tokio::test]

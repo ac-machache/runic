@@ -202,8 +202,8 @@ struct StreamErrorEvent {
         (status = 200,
          description = "SSE stream (`text/event-stream`). Event names: run_start, \
             assistant_text_delta, assistant_thinking_delta, tool_start, tool_finish, \
-            turn_complete, usage, ask_required, escalated, warning, run_error, done. \
-            A provider failure emits `run_error` then `done`.",
+            turn_complete, usage, ask_required, escalated, warning, run_error, hook_fired, \
+            done. A provider failure emits `run_error` then `done`.",
          content_type = "text/event-stream", body = WireEvent),
         (status = 400, description = "Invalid body or artifact reference", body = ErrorBody)
     )
@@ -236,8 +236,10 @@ pub async fn create_and_stream_run(
     // Clone the wire sender so the run task can report a failure on the same
     // channel the HITL asks use (no third channel needed).
     let err_tx = ask_tx.clone();
+    let cancel = state.pool.begin_run(&tenant, &thread_id).await;
     run_ctx = run_ctx
         .with_events(evt_tx)
+        .with_cancel(cancel.clone())
         .with_human(Arc::new(HumanChannel::new(
             state.human_hub.clone(),
             ask_tx,
@@ -247,6 +249,7 @@ pub async fn create_and_stream_run(
 
     tracing::info!(%tenant, %thread_id, "run stream accepted");
 
+    let pool = state.pool.clone();
     let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
     tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
@@ -260,6 +263,7 @@ pub async fn create_and_stream_run(
                 message: e.to_string(),
             });
         }
+        pool.end_run(&tenant, &thread_id, &cancel).await;
         // Guard drops → the next queued run on this thread proceeds. The agent
         // clears its event sender + human channel here, closing both rx ends.
     });
@@ -293,7 +297,13 @@ pub async fn create_and_stream_run(
             yield Ok(to_sse(&err, None));
         }
         if !done_sent {
-            yield Ok(to_sse(&WireEvent::Done { total_turns: None }, None));
+            yield Ok(to_sse(
+                &WireEvent::Done {
+                    total_turns: None,
+                    stop_reason: None,
+                },
+                None,
+            ));
         }
     };
 
@@ -302,6 +312,36 @@ pub async fn create_and_stream_run(
             .interval(Duration::from_secs(15))
             .text(":keepalive"),
     ))
+}
+
+/// `POST /threads/:id/runs/cancel`
+///
+/// Requests cancellation of the thread's in-flight run, if any. The run
+/// finishes its current turn gracefully rather than stopping immediately —
+/// see [`runic_agent::CancelToken`].
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs/cancel",
+    tag = "runs",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 202, description = "Cancellation requested"),
+        (status = 409, description = "No run in flight on this thread", body = ErrorBody)
+    )
+)]
+pub async fn cancel_run(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+) -> Result<StatusCode, ServeError> {
+    if state.pool.cancel_run(&tenant, &thread_id).await {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ServeError::NoRunInFlight { thread_id })
+    }
 }
 
 /// `GET /threads/:id/runs/:run_id/stream`
@@ -373,8 +413,10 @@ pub async fn replay_run(
 
     tracing::info!(%tenant, %thread_id, %run_id, after_seq, live = is_live, "replay attached");
 
-    let completed_turns = all.iter().rev().find_map(|s| match &s.event {
-        SessionEvent::RunEnd { outcome, .. } => Some(outcome.total_turns),
+    let completed = all.iter().rev().find_map(|s| match &s.event {
+        SessionEvent::RunEnd { outcome, .. } => {
+            Some((outcome.total_turns, outcome.stop_reason.clone()))
+        }
         _ => None,
     });
 
@@ -400,7 +442,10 @@ pub async fn replay_run(
                 None
             }
         };
-        let mut total_turns = completed_turns;
+        let (mut total_turns, mut stop_reason) = match completed {
+            Some((t, s)) => (Some(t), s),
+            None => (None, None),
+        };
         if let Some(rx) = rx {
             let mut live = BroadcastStream::new(rx);
             while let Some(received) = live.next().await {
@@ -408,21 +453,30 @@ pub async fn replay_run(
                 if event.run_id() != run_id {
                     continue;
                 }
-                let end_turns = match &event {
-                    SessionEvent::RunEnd { outcome, .. } => Some(outcome.total_turns),
+                let end = match &event {
+                    SessionEvent::RunEnd { outcome, .. } => {
+                        Some((outcome.total_turns, outcome.stop_reason.clone()))
+                    }
                     _ => None,
                 };
                 if let Some(wire) = from_session_event(event) {
                     yield Ok(to_sse(&wire, None));
                 }
-                if let Some(t) = end_turns {
+                if let Some((t, s)) = end {
                     total_turns = Some(t);
+                    stop_reason = s;
                     break;
                 }
             }
         }
 
-        yield Ok(to_sse(&WireEvent::Done { total_turns }, None));
+        yield Ok(to_sse(
+            &WireEvent::Done {
+                total_turns,
+                stop_reason,
+            },
+            None,
+        ));
     };
 
     Ok(Sse::new(stream).keep_alive(

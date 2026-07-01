@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use runic_hook::{ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
-use runic_state::AgentState;
+use runic_state::{AgentState, HookLifecycle};
 use runic_tool::{ActivatedToolSet, HumanInterface, Tool};
 use tokio::sync::mpsc;
 
@@ -78,6 +78,14 @@ pub enum AgentEvent {
     TurnCompleted { turn: u32, stop_reason: String },
     /// The run finished.
     RunCompleted(RunOutcome),
+    /// A hook did something other than `Continue`.
+    HookFired {
+        hook_name: String,
+        hook_kind: &'static str,
+        lifecycle: HookLifecycle,
+        outcome: &'static str,
+        note: Option<String>,
+    },
 }
 
 /// A cheap, cloneable cancellation flag. The loop checks it at each turn
@@ -98,6 +106,9 @@ impl CancelToken {
     /// Whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+    pub fn is_same(&self, other: &CancelToken) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 

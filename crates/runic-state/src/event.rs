@@ -60,6 +60,10 @@ pub enum SessionEvent {
         run_id: String,
         hook: String,
         lifecycle: HookLifecycle,
+        #[serde(default)]
+        hook_kind: String,
+        #[serde(default)]
+        outcome: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
         at: DateTime<Utc>,

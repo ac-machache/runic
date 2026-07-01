@@ -57,11 +57,18 @@ pub struct ServeConfig {
 /// network layer (`axum::serve` / TLS / shutdown); this crate just produces the
 /// route surface.
 pub fn router(config: ServeConfig) -> Router {
+    let pool = Arc::new(ThreadPool::new(
+        config.agent_factory,
+        config.session_store.clone(),
+    ));
+    if tokio::runtime::Handle::try_current().is_ok() {
+        pool.spawn_eviction_sweep();
+    }
     let state = AppState {
-        session_store: config.session_store.clone(),
+        session_store: config.session_store,
         artifact_store: config.artifact_store,
         transcriber: config.transcriber,
-        pool: Arc::new(ThreadPool::new(config.agent_factory, config.session_store)),
+        pool,
         human_hub: config.human_hub,
     };
 
@@ -94,6 +101,7 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),
         )
+        .route("/threads/{thread_id}/runs/cancel", post(runs::cancel_run))
         .route(
             "/threads/{thread_id}/runs/{run_id}/stream",
             get(runs::replay_run),

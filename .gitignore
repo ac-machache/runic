@@ -27,3 +27,6 @@ Cargo.lock.bak
 /.codegraph
 crates/runic-agent/target/rust-analyzer/flycheck0/
 .claude/
+
+# personal working notes, never committed
+/NOTES.md

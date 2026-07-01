@@ -578,6 +578,7 @@ async fn streaming_emits_lifecycle_and_token_events() {
             AgentEvent::TurnCompleted { .. } => turns += 1,
             AgentEvent::RunCompleted(_) => completed = true,
             AgentEvent::ThinkingDelta(_) => {}
+            AgentEvent::HookFired { .. } => {}
         }
     }
 

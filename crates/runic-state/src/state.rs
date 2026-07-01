@@ -264,6 +264,7 @@ pub struct RunView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::HookLifecycle;
 
     fn message(text: &str, user: bool) -> SessionEvent {
         let msg = if user {
@@ -291,6 +292,25 @@ mod tests {
         let msgs = state.messages_for_provider();
         assert_eq!(msgs.len(), 2);
         assert_eq!(state.events.len(), 3);
+    }
+
+    #[test]
+    fn push_event_records_hook_ran_without_touching_messages() {
+        let mut state = AgentState::new("u", "s", "sys");
+        state.push_event(message("hello", true));
+        state.push_event(SessionEvent::HookRan {
+            run_id: "r".into(),
+            hook: "guard".into(),
+            lifecycle: HookLifecycle::BeforeTool,
+            hook_kind: "write".into(),
+            outcome: "cancel".into(),
+            note: Some("blocked".into()),
+            at: Utc::now(),
+        });
+
+        assert_eq!(state.messages_for_provider().len(), 1);
+        assert_eq!(state.events.len(), 2);
+        assert!(matches!(state.events[1], SessionEvent::HookRan { .. }));
     }
 
     #[test]

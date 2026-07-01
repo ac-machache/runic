@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use runic_agent::AgentEvent;
-use runic_state::SessionEvent;
+use runic_state::{HookLifecycle, SessionEvent};
 use runic_types::Message;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -113,6 +113,18 @@ pub enum WireEvent {
     Done {
         #[serde(skip_serializing_if = "Option::is_none")]
         total_turns: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+    },
+
+    /// A hook did something other than `continue` — live and replay.
+    HookFired {
+        hook_name: String,
+        hook_kind: String,
+        lifecycle: String,
+        outcome: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -135,7 +147,19 @@ impl WireEvent {
             Self::Warning { .. } => "warning",
             Self::RunError { .. } => "run_error",
             Self::Done { .. } => "done",
+            Self::HookFired { .. } => "hook_fired",
         }
+    }
+}
+
+fn lifecycle_str(lifecycle: HookLifecycle) -> &'static str {
+    match lifecycle {
+        HookLifecycle::BeforeAgent => "before_agent",
+        HookLifecycle::AfterAgent => "after_agent",
+        HookLifecycle::BeforeModel => "before_model",
+        HookLifecycle::AfterModel => "after_model",
+        HookLifecycle::BeforeTool => "before_tool",
+        HookLifecycle::AfterTool => "after_tool",
     }
 }
 
@@ -173,14 +197,28 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             },
             WireEvent::Done {
                 total_turns: Some(outcome.total_turns),
+                stop_reason: outcome.stop_reason,
             },
         ],
+        AgentEvent::HookFired {
+            hook_name,
+            hook_kind,
+            lifecycle,
+            outcome,
+            note,
+        } => vec![WireEvent::HookFired {
+            hook_name,
+            hook_kind: hook_kind.to_string(),
+            lifecycle: lifecycle_str(lifecycle).to_string(),
+            outcome: outcome.to_string(),
+            note,
+        }],
     }
 }
 
 /// Convert a persisted [`SessionEvent`] (whole-message granularity, from
 /// `SessionStore::read`) into a wire event for replay. Returns `None` for
-/// internal bookkeeping events (`TurnBoundary`, `HookRan`, `StateSnapshot`).
+/// internal bookkeeping events (`TurnBoundary`, `StateSnapshot`).
 pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
     match event {
         SessionEvent::RunStart { run_id, at } => Some(WireEvent::RunStart {
@@ -198,9 +236,21 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             at,
         }),
         SessionEvent::Message { run_id, msg, at } => Some(WireEvent::Message { run_id, msg, at }),
-        SessionEvent::TurnBoundary { .. }
-        | SessionEvent::HookRan { .. }
-        | SessionEvent::StateSnapshot { .. } => None,
+        SessionEvent::HookRan {
+            hook,
+            lifecycle,
+            hook_kind,
+            outcome,
+            note,
+            ..
+        } => Some(WireEvent::HookFired {
+            hook_name: hook,
+            hook_kind,
+            lifecycle: lifecycle_str(lifecycle).to_string(),
+            outcome,
+            note,
+        }),
+        SessionEvent::TurnBoundary { .. } | SessionEvent::StateSnapshot { .. } => None,
     }
 }
 
@@ -255,12 +305,15 @@ mod tests {
                 output_tokens: 20
             }
         ));
-        assert!(matches!(
-            wires[1],
-            WireEvent::Done {
-                total_turns: Some(3)
-            }
-        ));
+        let WireEvent::Done {
+            total_turns,
+            stop_reason,
+        } = &wires[1]
+        else {
+            panic!()
+        };
+        assert_eq!(*total_turns, Some(3));
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
     }
 
     #[test]
@@ -283,5 +336,57 @@ mod tests {
             at: Utc::now(),
         };
         assert!(from_session_event(evt).is_none());
+    }
+
+    #[test]
+    fn hook_fired_maps_one_to_one_live() {
+        let wires = from_agent_event(AgentEvent::HookFired {
+            hook_name: "guard".into(),
+            hook_kind: "write",
+            lifecycle: HookLifecycle::BeforeTool,
+            outcome: "cancel",
+            note: Some("blocked".into()),
+        });
+        assert_eq!(wires.len(), 1);
+        let WireEvent::HookFired {
+            hook_name,
+            hook_kind,
+            lifecycle,
+            outcome,
+            note,
+        } = &wires[0]
+        else {
+            panic!()
+        };
+        assert_eq!(hook_name, "guard");
+        assert_eq!(hook_kind, "write");
+        assert_eq!(lifecycle, "before_tool");
+        assert_eq!(outcome, "cancel");
+        assert_eq!(note.as_deref(), Some("blocked"));
+    }
+
+    #[test]
+    fn hook_ran_is_visible_on_replay() {
+        let evt = SessionEvent::HookRan {
+            run_id: "r1".into(),
+            hook: "guard".into(),
+            lifecycle: HookLifecycle::AfterTool,
+            hook_kind: "write".into(),
+            outcome: "substitute".into(),
+            note: None,
+            at: Utc::now(),
+        };
+        let Some(WireEvent::HookFired {
+            hook_name,
+            lifecycle,
+            outcome,
+            ..
+        }) = from_session_event(evt)
+        else {
+            panic!()
+        };
+        assert_eq!(hook_name, "guard");
+        assert_eq!(lifecycle, "after_tool");
+        assert_eq!(outcome, "substitute");
     }
 }

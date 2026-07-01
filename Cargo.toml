@@ -16,7 +16,6 @@ members = [
     "crates/runic-substrate",
     "crates/runic-memory",
     "crates/runic-serve",
-    "crates/runic-web",
     "crates/runic-foundry",
     "crates/runic-transcriber",
 ]

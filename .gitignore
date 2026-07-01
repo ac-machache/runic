@@ -26,3 +26,4 @@ Cargo.lock.bak
 # codegraph local index
 /.codegraph
 crates/runic-agent/target/rust-analyzer/flycheck0/
+.claude/

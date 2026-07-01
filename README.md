@@ -14,7 +14,7 @@ and the whole thing is sync-free where it counts and `cargo test`-fast.
 
 The `runic` binary is one reference surface: a Mistral-backed agent with
 Postgres-persisted threads, file-backed memory, and the full toolbox, served
-over SSE and driven by the `runic-web` Leptos dev console.
+over SSE and driven by the separate `runic-dev-ui` Leptos dev console.
 
 ## A minimal agent
 
@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 | **Skills / commands / plugins** | `SKILL.md` (progressive disclosure), `COMMAND.md` templates, folder-bundle plugins |
 | **MCP** | client over stdio + Streamable HTTP, with reconnect, deferred activation, and `tool_search` |
 | **Persistence** | `runic-substrate`: Postgres / in-memory session stores, artifacts, event-sourced, full-text `search_chats` |
-| **HTTP + UI** | `runic-serve` (axum: threads, SSE runs, pooling, resume/replay, HITL) + `runic-web` (Leptos dev console) |
+| **HTTP** | `runic-serve` (axum: threads, SSE runs, pooling, resume/replay, HITL); optional dev UI lives outside this repo in `../runic-dev-ui` |
 
 ## Run the reference server
 
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 cargo run -p runic                         # serves http://127.0.0.1:8920
 
 # the dev console (separate terminal):
-cd crates/runic-web && trunk serve --open  # http://127.0.0.1:8080
+cd ../runic-dev-ui && trunk serve --open   # http://127.0.0.1:8080
 ```
 
 The console is a 3-pane view — threads, streaming chat with tool-call cards, and
@@ -103,7 +103,6 @@ runic-plugins     folder-bundle plugin discovery
 runic-substrate   sessions + artifacts persistence (Postgres / memory) + search_chats
 runic-memory      bounded MEMORY.md / USER.md stores + memory tool + providers
 runic-serve       axum HTTP server (threads, SSE runs, pooling, resume, HITL)
-runic-web         Leptos dev console (WASM)
 runic             binary: the reference Mistral + Postgres server
 ```
 
@@ -124,6 +123,6 @@ scaffold for the text parsers.
 
 A personal project, built by synthesizing ideas from a few reference harnesses
 into its own Rust-idiomatic design. The core (loop, tools, providers, hooks,
-memory, subagents, MCP, persistence, server, dev UI) is in place. Next up: an
+memory, subagents, MCP, persistence, server) is in place. Next up: an
 opinionated `runic-foundry` assembly layer to collapse the binary's wiring, plus
 deferred items (multimodal, background memory review, observability).

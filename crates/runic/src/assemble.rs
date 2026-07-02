@@ -48,7 +48,10 @@ pub struct Assembly {
 /// and the memory-review hook.
 pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     // ── system prompt ──────────────────────────────────────────────────────
-    let store = a.memory.as_ref().map(|m| m.store(tenant));
+    let store = match a.memory.as_ref() {
+        Some(m) => Some(m.store(tenant).await),
+        None => None,
+    };
 
     let mut ctx = Context::new();
     ctx.instructions(&a.instructions);

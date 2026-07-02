@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic_foundry::{Assembly, assemble};
+use runic::{Assembly, assemble};
 use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -69,23 +69,25 @@ fn base_assembly(provider: Arc<dyn Provider>) -> Assembly {
     }
 }
 
-fn write_skill(root: &std::path::Path, dir: &str, name: &str, description: &str) {
+async fn write_skill(root: &std::path::Path, dir: &str, name: &str, description: &str) {
     let dir = root.join(dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(
         dir.join("SKILL.md"),
         format!("---\nname: {name}\ndescription: {description}\n---\nUse the workflow."),
     )
+    .await
     .unwrap();
 }
 
-fn write_agent(root: &std::path::Path, dir: &str, name: &str, description: &str) {
+async fn write_agent(root: &std::path::Path, dir: &str, name: &str, description: &str) {
     let dir = root.join(dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(
         dir.join("AGENT.md"),
         format!("---\nname: {name}\ndescription: {description}\n---\nAct carefully."),
     )
+    .await
     .unwrap();
 }
 
@@ -97,7 +99,7 @@ async fn assemble_composes_prompt_sections_in_order() {
     let agent_dir = tempfile::tempdir().unwrap();
 
     let memory_cfg = memory(memory_dir.path()).init().scope_per_tenant();
-    let store = memory_cfg.store("alice");
+    let store = memory_cfg.store("alice").await;
     store
         .add(Target::Memory, "project uses focused tests")
         .await
@@ -107,8 +109,8 @@ async fn assemble_composes_prompt_sections_in_order() {
         .await
         .unwrap();
 
-    write_skill(skill_dir.path(), "review", "review", "reviews code");
-    write_agent(agent_dir.path(), "researcher", "researcher", "researches");
+    write_skill(skill_dir.path(), "review", "review", "reviews code").await;
+    write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let mut assembly = base_assembly(provider);
     assembly.memory = Some(memory_cfg);
@@ -137,8 +139,8 @@ async fn assemble_registers_enabled_tool_surfaces() {
     let agent_dir = tempfile::tempdir().unwrap();
     let memory_dir = tempfile::tempdir().unwrap();
 
-    write_skill(skill_dir.path(), "review", "review", "reviews code");
-    write_agent(agent_dir.path(), "researcher", "researcher", "researches");
+    write_skill(skill_dir.path(), "review", "review", "reviews code").await;
+    write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let mut assembly = base_assembly(provider.clone());
     assembly.tools = Some(tools().web().weather().hitl());

@@ -1,5 +1,5 @@
 [package]
-name = "runic-foundry"
+name = "runic"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -19,6 +19,9 @@ runic-agent = { path = "../runic-agent" }
 runic-subagent = { path = "../runic-subagent" }
 runic-tools = { path = "../runic-tools" }
 runic-mcp = { path = "../runic-mcp" }
+runic-transcriber = { path = "../runic-transcriber" }
+runic-commands = { workspace = true }
+runic-plugins = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -29,3 +32,8 @@ tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+anthropic = ["runic-provider/anthropic"]
+openai = ["runic-provider/openai"]
+gemini = ["runic-provider/gemini"]

@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
+use runic::ArtifactResolver;
 use runic_agent::MediaResolver;
-use runic_foundry::ArtifactResolver;
 use runic_provider::CompletionRequest;
 use runic_substrate::{ArtifactSource, ArtifactStore, MemoryArtifactStore};
 use runic_types::{ContentBlock, Message, MessageContent};

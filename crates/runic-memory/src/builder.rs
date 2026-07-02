@@ -55,7 +55,7 @@ impl Memory {
         self.review
     }
 
-    pub fn store(&self, tenant: &str) -> Arc<BoundedMemoryStore> {
+    pub async fn store(&self, tenant: &str) -> Arc<BoundedMemoryStore> {
         tracing::info!(
             root = %self.path.display(),
             scoped = self.scoped,
@@ -79,7 +79,7 @@ impl Memory {
         }
 
         if self.create
-            && let Err(e) = std::fs::create_dir_all(&dir)
+            && let Err(e) = tokio::fs::create_dir_all(&dir).await
         {
             tracing::error!(dir = %dir.display(), error = %e, "failed to create memory dir");
         }

@@ -43,10 +43,11 @@ async fn corrupt_metadata_file_is_error_not_panic() {
     let root = fresh_root();
     let store = LocalArtifactStore::new(&root);
     let id = put_text(&store, "t", "s", b"x").await;
-    std::fs::write(
+    tokio::fs::write(
         root.join("blobs").join(format!("{id}.json")),
         b"{not valid json",
     )
+    .await
     .unwrap();
     // head must surface a typed error, never panic
     assert!(matches!(store.head(&id).await, Err(Error::Serde(_))));
@@ -59,7 +60,9 @@ async fn missing_blob_with_existing_metadata() {
     let root = fresh_root();
     let store = LocalArtifactStore::new(&root);
     let id = put_text(&store, "t", "s", b"x").await;
-    std::fs::remove_file(root.join("blobs").join(&id)).unwrap();
+    tokio::fs::remove_file(root.join("blobs").join(&id))
+        .await
+        .unwrap();
     assert!(matches!(store.get(&id).await, Err(Error::NotFound(_))));
     assert!(store.head(&id).await.is_ok(), "metadata still present");
 }
@@ -69,7 +72,9 @@ async fn existing_blob_with_missing_metadata() {
     let root = fresh_root();
     let store = LocalArtifactStore::new(&root);
     let id = put_text(&store, "t", "s", b"x").await;
-    std::fs::remove_file(root.join("blobs").join(format!("{id}.json"))).unwrap();
+    tokio::fs::remove_file(root.join("blobs").join(format!("{id}.json")))
+        .await
+        .unwrap();
     assert!(matches!(store.head(&id).await, Err(Error::NotFound(_))));
     assert_eq!(store.get(&id).await.unwrap(), b"x", "bytes still present");
 }
@@ -81,9 +86,9 @@ async fn corrupt_jsonl_index_line_is_skipped() {
     put_text(&store, "t", "s", b"good").await;
     // Append a junk line directly to the index — list must skip it, not fail.
     let index = root.join("index").join("t").join("s.jsonl");
-    let mut content = std::fs::read_to_string(&index).unwrap();
+    let mut content = tokio::fs::read_to_string(&index).await.unwrap();
     content.push_str("this is not json\n");
-    std::fs::write(&index, content).unwrap();
+    tokio::fs::write(&index, content).await.unwrap();
     assert_eq!(
         store.list("t", "s").await.unwrap().len(),
         1,
@@ -99,13 +104,17 @@ async fn permission_denied_maps_to_io_error() {
     use std::os::unix::fs::PermissionsExt;
     let root = fresh_root();
     let blobs = root.join("blobs");
-    std::fs::create_dir_all(&blobs).unwrap();
-    std::fs::set_permissions(&blobs, std::fs::Permissions::from_mode(0o555)).unwrap();
+    tokio::fs::create_dir_all(&blobs).await.unwrap();
+    tokio::fs::set_permissions(&blobs, std::fs::Permissions::from_mode(0o555))
+        .await
+        .unwrap();
 
     let r = LocalArtifactStore::new(&root)
         .put("t", "s", "text/plain", ArtifactSource::UserUpload, b"x")
         .await;
-    std::fs::set_permissions(&blobs, std::fs::Permissions::from_mode(0o755)).unwrap();
+    tokio::fs::set_permissions(&blobs, std::fs::Permissions::from_mode(0o755))
+        .await
+        .unwrap();
 
     unsafe extern "C" {
         fn geteuid() -> u32;
@@ -129,8 +138,10 @@ async fn artifact_id_whitelist_rejects_path_tricks() {
     let root = fresh_root();
     // a file the attacker would love to reach, just outside the store root
     let outside = root.parent().unwrap().join(uid("secret"));
-    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
-    std::fs::write(&outside, b"do not touch").unwrap();
+    tokio::fs::create_dir_all(root.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(&outside, b"do not touch").await.unwrap();
     let store = LocalArtifactStore::new(&root);
 
     for evil in [
@@ -154,7 +165,7 @@ async fn artifact_id_whitelist_rejects_path_tricks() {
         store.delete(evil).await.unwrap();
     }
     assert_eq!(
-        std::fs::read(&outside).unwrap(),
+        tokio::fs::read(&outside).await.unwrap(),
         b"do not touch",
         "store wrote/deleted outside its root"
     );
@@ -172,7 +183,9 @@ async fn list_skips_entries_with_missing_blob() {
     let kept = put_text(&store, "t", "s", b"keep").await;
 
     store.delete(&deleted).await.unwrap();
-    std::fs::remove_file(root.join("blobs").join(&orphaned)).unwrap();
+    tokio::fs::remove_file(root.join("blobs").join(&orphaned))
+        .await
+        .unwrap();
 
     let ids: Vec<String> = store
         .list("t", "s")
@@ -192,10 +205,12 @@ async fn list_skips_entries_with_missing_blob() {
 async fn symlink_inside_root_is_followed_trusted_root() {
     let root = fresh_root();
     let blobs = root.join("blobs");
-    std::fs::create_dir_all(&blobs).unwrap();
+    tokio::fs::create_dir_all(&blobs).await.unwrap();
     let outside = root.join("outside.txt");
-    std::fs::write(&outside, b"external").unwrap();
-    std::os::unix::fs::symlink(&outside, blobs.join("linkid")).unwrap();
+    tokio::fs::write(&outside, b"external").await.unwrap();
+    tokio::fs::symlink(&outside, blobs.join("linkid"))
+        .await
+        .unwrap();
 
     let store = LocalArtifactStore::new(&root);
     // `linkid` passes the id whitelist and resolves through the symlink.

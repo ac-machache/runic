@@ -124,5 +124,5 @@ scaffold for the text parsers.
 A personal project, built by synthesizing ideas from a few reference harnesses
 into its own Rust-idiomatic design. The core (loop, tools, providers, hooks,
 memory, subagents, MCP, persistence, server) is in place. Next up: an
-opinionated `runic-foundry` assembly layer to collapse the binary's wiring, plus
+opinionated `runic` assembly layer to collapse the binary's wiring, plus
 deferred items (multimodal, background memory review, observability).

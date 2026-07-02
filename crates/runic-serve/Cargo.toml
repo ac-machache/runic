@@ -38,7 +38,7 @@ docs-ui = ["dep:utoipa-swagger-ui", "utoipa-swagger-ui/vendored"]
 
 [dev-dependencies]
 runic-provider = { path = "../runic-provider" }
-runic-foundry = { path = "../runic-foundry" }
+runic = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 proptest = { workspace = true }

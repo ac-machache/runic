@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::FoundrySubagentBuilder;
 use runic_agent::AgentError;
-use runic_foundry::FoundrySubagentBuilder;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};

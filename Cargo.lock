@@ -1661,6 +1661,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "runic"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "runic-agent",
+ "runic-commands",
+ "runic-hook",
+ "runic-mcp",
+ "runic-memory",
+ "runic-plugins",
+ "runic-provider",
+ "runic-skills",
+ "runic-state",
+ "runic-subagent",
+ "runic-substrate",
+ "runic-tool",
+ "runic-tools",
+ "runic-transcriber",
+ "runic-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "runic-agent"
 version = "0.2.0"
 dependencies = [
@@ -1688,31 +1716,6 @@ dependencies = [
  "serde",
  "serde_yml",
  "tempfile",
- "tracing",
-]
-
-[[package]]
-name = "runic-foundry"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "runic-agent",
- "runic-hook",
- "runic-mcp",
- "runic-memory",
- "runic-provider",
- "runic-skills",
- "runic-state",
- "runic-subagent",
- "runic-substrate",
- "runic-tool",
- "runic-tools",
- "runic-types",
- "serde_json",
- "tempfile",
- "tokio",
  "tracing",
 ]
 
@@ -1809,8 +1812,8 @@ dependencies = [
  "chrono",
  "futures",
  "proptest",
+ "runic",
  "runic-agent",
- "runic-foundry",
  "runic-provider",
  "runic-state",
  "runic-substrate",

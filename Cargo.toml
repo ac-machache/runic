@@ -16,7 +16,7 @@ members = [
     "crates/runic-substrate",
     "crates/runic-memory",
     "crates/runic-serve",
-    "crates/runic-foundry",
+    "crates/runic",
     "crates/runic-transcriber",
 ]
 
@@ -65,6 +65,7 @@ runic-plugins = { path = "crates/runic-plugins" }
 runic-substrate = { path = "crates/runic-substrate" }
 runic-memory = { path = "crates/runic-memory" }
 runic-serve = { path = "crates/runic-serve" }
+runic = { path = "crates/runic" }
 
 [profile.release]
 opt-level = 3

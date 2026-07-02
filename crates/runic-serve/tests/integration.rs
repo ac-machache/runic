@@ -1097,7 +1097,7 @@ impl AgentFactory for ResolvingFactory {
             session_id,
         )
         .system_prompt("test")
-        .media_resolver(Arc::new(runic_foundry::ArtifactResolver::new(
+        .media_resolver(Arc::new(runic::ArtifactResolver::new(
             self.store.clone(),
             tenant,
             session_id,

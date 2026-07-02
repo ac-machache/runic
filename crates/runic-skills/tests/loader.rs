@@ -7,10 +7,12 @@ use std::sync::Arc;
 use runic_skills::{SkillSet, source};
 use runic_tool::ToolContext;
 
-fn write(root: &std::path::Path, rel: &str, body: &str) {
+async fn write(root: &std::path::Path, rel: &str, body: &str) {
     let path = root.join(rel);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
+    tokio::fs::create_dir_all(path.parent().unwrap())
+        .await
+        .unwrap();
+    tokio::fs::write(path, body).await.unwrap();
 }
 
 #[tokio::test]
@@ -20,28 +22,38 @@ async fn load_dir_loads_valid_and_skips_the_rest() {
         root.path(),
         "valid/SKILL.md",
         "---\nname: valid\ndescription: works\n---\nFull instructions.",
-    );
+    )
+    .await;
     // no description -> dropped (description is required)
     write(
         root.path(),
         "nodesc/SKILL.md",
         "---\nname: nodesc\ndescription: \n---\nBody.",
-    );
+    )
+    .await;
     // no closing frontmatter -> dropped
     write(
         root.path(),
         "broken/SKILL.md",
         "---\nname: broken\nno terminator",
-    );
+    )
+    .await;
     // a folder without SKILL.md, a dotfile dir, and a loose top-level file -> ignored
-    std::fs::create_dir_all(root.path().join("plain-dir")).unwrap();
-    std::fs::create_dir_all(root.path().join(".hidden")).unwrap();
+    tokio::fs::create_dir_all(root.path().join("plain-dir"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir_all(root.path().join(".hidden"))
+        .await
+        .unwrap();
     write(
         root.path(),
         ".hidden/SKILL.md",
         "---\nname: h\ndescription: d\n---\nx",
-    );
-    std::fs::write(root.path().join("top-level.md"), "ignored").unwrap();
+    )
+    .await;
+    tokio::fs::write(root.path().join("top-level.md"), "ignored")
+        .await
+        .unwrap();
 
     let set = SkillSet::load_dir("core", root.path()).await;
 
@@ -64,12 +76,14 @@ async fn load_merges_multiple_namespaced_sources() {
         a.path(),
         "alpha/SKILL.md",
         "---\nname: alpha\ndescription: first\n---\nA.",
-    );
+    )
+    .await;
     write(
         b.path(),
         "beta/SKILL.md",
         "---\nname: beta\ndescription: second\n---\nB.",
-    );
+    )
+    .await;
 
     let set = SkillSet::load(HashMap::from([
         ("one".to_string(), source::local(a.path())),
@@ -89,8 +103,9 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
         root.path(),
         "alpha/SKILL.md",
         "---\nname: alpha\ndescription: first\n---\nAlpha body.",
-    );
-    write(root.path(), "alpha/references/note.md", "the note");
+    )
+    .await;
+    write(root.path(), "alpha/references/note.md", "the note").await;
 
     let set = Arc::new(SkillSet::load_dir("core", root.path()).await);
     let tool = set.view_tool().expect("non-empty set has a view tool");

@@ -64,6 +64,7 @@ fn base_assembly(provider: Arc<dyn Provider>) -> Assembly {
         custom_tools: Vec::new(),
         output_schema: None,
         max_turns: None,
+        compaction: None,
         write_hooks: Vec::new(),
         artifact_store: None,
     }
@@ -204,6 +205,63 @@ async fn assemble_omits_optional_prompt_sections_and_tools_when_empty() {
     agent.run("hello").await.unwrap();
 
     assert!(provider.last_request().tools.is_empty());
+}
+
+#[tokio::test]
+async fn compaction_folds_history_before_the_model_call() {
+    let provider = Arc::new(RecordingProvider::default());
+    let mut assembly = base_assembly(provider.clone());
+    assembly.compaction = Some(
+        runic::Compaction::new()
+            .max_context_tokens(12)
+            .keep_recent(2),
+    );
+
+    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let old = [
+        runic_types::Message::user("x".repeat(40)),
+        runic_types::Message::assistant("y".repeat(40)),
+        runic_types::Message::user("recent question"),
+    ];
+    for msg in old {
+        agent
+            .state_mut()
+            .push_event(runic_state::SessionEvent::Message {
+                run_id: "r0".into(),
+                msg,
+                at: chrono::Utc::now(),
+            });
+    }
+
+    agent.run("final question").await.unwrap();
+
+    assert_eq!(
+        provider.count(),
+        2,
+        "summarizer call + the turn's model call"
+    );
+    let turn_request = provider.last_request();
+    assert_eq!(turn_request.messages.len(), 3);
+    assert_eq!(turn_request.messages[0].role, runic_types::Role::Assistant);
+    assert!(
+        turn_request.messages[0]
+            .content
+            .text_content()
+            .contains("Conversation summary")
+    );
+    assert!(
+        turn_request.messages[1]
+            .content
+            .text_content()
+            .contains("recent question")
+    );
+    assert!(
+        agent
+            .state()
+            .events
+            .iter()
+            .any(|e| matches!(e, runic_state::SessionEvent::StateSnapshot { .. }))
+    );
 }
 
 #[tokio::test]

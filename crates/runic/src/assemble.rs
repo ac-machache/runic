@@ -13,6 +13,7 @@ use runic_tools::Tools;
 
 use crate::artifact_resolver::ArtifactResolver;
 use crate::child::FoundrySubagentBuilder;
+use crate::compaction::{Compaction, CompactionHook};
 use crate::context::Context;
 use crate::memory_review::MemoryReviewHook;
 
@@ -36,6 +37,8 @@ pub struct Assembly {
     pub output_schema: Option<serde_json::Value>,
     /// Cap the agent's turns per run.
     pub max_turns: Option<u32>,
+    /// Fold long history into a summary + kept tail before model calls.
+    pub compaction: Option<Compaction>,
     /// App-specific read-edit hooks (e.g. tenant-id injection into tool calls).
     pub write_hooks: Vec<Arc<dyn WriteHook>>,
     /// When set, `ArtifactRef` blocks resolve to the stored bytes just before
@@ -132,6 +135,13 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     }
 
     // ── hooks ────────────────────────────────────────────────────────────────
+    if let Some(c) = &a.compaction {
+        b = b.write_hook(Arc::new(CompactionHook::new(
+            c,
+            a.provider.clone(),
+            &a.model,
+        )));
+    }
     if let Some(m) = &a.memory
         && let Some(store) = &store
         && m.review_interval() > 0

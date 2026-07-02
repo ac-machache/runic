@@ -26,6 +26,17 @@ use runic_state::AgentState;
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
 
+pub use runic_state::HookLifecycle;
+
+pub const ALL_POINTS: &[HookLifecycle] = &[
+    HookLifecycle::BeforeAgent,
+    HookLifecycle::BeforeModel,
+    HookLifecycle::BeforeTool,
+    HookLifecycle::AfterTool,
+    HookLifecycle::AfterModel,
+    HookLifecycle::AfterAgent,
+];
+
 /// What a read-only [`ReadHook`] may ask the loop to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSignal {
@@ -62,6 +73,9 @@ pub trait ReadHook: Send + Sync {
     /// Lower runs first. Ties broken by registration order.
     fn priority(&self) -> i32 {
         0
+    }
+    fn points(&self) -> &'static [HookLifecycle] {
+        ALL_POINTS
     }
 
     /// Before the agent loop begins.
@@ -104,6 +118,9 @@ pub trait WriteHook: Send + Sync {
     /// Lower runs first. Ties broken by registration order.
     fn priority(&self) -> i32 {
         0
+    }
+    fn points(&self) -> &'static [HookLifecycle] {
+        ALL_POINTS
     }
 
     /// Before the agent loop begins.

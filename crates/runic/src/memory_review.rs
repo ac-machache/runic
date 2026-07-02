@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use runic_agent::Agent;
-use runic_hook::{HookOutcome, WriteHook};
+use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_memory::{BoundedMemoryStore, MEMORY_REVIEW_GUIDANCE, MemoryTool, ReviewScheduler};
 use runic_provider::Provider;
 use runic_state::AgentState;
@@ -38,6 +38,10 @@ impl MemoryReviewHook {
 impl WriteHook for MemoryReviewHook {
     fn name(&self) -> &str {
         "memory_review"
+    }
+
+    fn points(&self) -> &'static [HookLifecycle] {
+        &[HookLifecycle::AfterAgent]
     }
 
     async fn after_agent(&self, state: &mut AgentState) -> HookOutcome {

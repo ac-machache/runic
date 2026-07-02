@@ -7,12 +7,17 @@ mod harness;
 
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use harness::*;
 use runic_agent::{Agent, CancelToken, RunContext};
+use runic_hook::{HookLifecycle, HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::ProviderError;
+use runic_state::{AgentState, SessionEvent};
+use runic_tool::ToolResult;
+use runic_types::ToolCall;
 
 #[tokio::test]
-async fn substitution_path_leaves_a_hookran_audit_entry() {
+async fn every_hook_firing_leaves_a_hookran_entry() {
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
@@ -34,15 +39,126 @@ async fn substitution_path_leaves_a_hookran_audit_entry() {
         vec![
             "RunStart",
             "Message",      // user
+            "HookRan",      // before_agent (continue)
+            "HookRan",      // before_model (continue)
+            "Message",      // assistant (tool_use)
+            "HookRan",      // after_model (continue)
+            "TurnBoundary", // turn 1
+            "HookRan",      // before_tool (substitute)
+            "HookRan",      // after_tool (continue)
+            "Message",      // substituted tool result
+            "HookRan",      // before_model (continue)
+            "Message",      // assistant (final text)
+            "HookRan",      // after_model (continue)
+            "TurnBoundary", // turn 2
+            "HookRan",      // after_agent (continue)
+            "RunEnd",
+        ]
+    );
+}
+
+struct BeforeToolOnly;
+
+#[async_trait]
+impl WriteHook for BeforeToolOnly {
+    fn name(&self) -> &str {
+        "before-tool-only"
+    }
+    fn points(&self) -> &'static [HookLifecycle] {
+        &[HookLifecycle::BeforeTool]
+    }
+    async fn before_tool(&self, _state: &mut AgentState, _call: &mut ToolCall) -> HookOutcome {
+        HookOutcome::SubstituteToolResult(ToolResult::ok("hooked"))
+    }
+}
+
+#[tokio::test]
+async fn scoped_hook_fires_only_at_its_declared_points() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "REAL")))
+        .write_hook(Arc::new(BeforeToolOnly))
+        .build();
+    let mut events = capture_session_events(&mut agent);
+
+    agent.run("go").await.unwrap();
+
+    assert_eq!(
+        session_kinds(&drain(&mut events)),
+        vec![
+            "RunStart",
+            "Message",      // user
             "Message",      // assistant (tool_use)
             "TurnBoundary", // turn 1
-            "HookRan",      // the substitution itself
+            "HookRan",      // before_tool (substitute) — the only firing
             "Message",      // substituted tool result
             "Message",      // assistant (final text)
             "TurnBoundary", // turn 2
             "RunEnd",
         ]
     );
+}
+
+struct AfterToolWatcher;
+
+#[async_trait]
+impl ReadHook for AfterToolWatcher {
+    fn name(&self) -> &str {
+        "after-tool-watcher"
+    }
+    fn points(&self) -> &'static [HookLifecycle] {
+        &[HookLifecycle::AfterTool]
+    }
+    async fn after_tool(
+        &self,
+        _state: &AgentState,
+        _call: &ToolCall,
+        _result: &ToolResult,
+    ) -> HookSignal {
+        HookSignal::Continue
+    }
+}
+
+#[tokio::test]
+async fn scoped_read_hook_records_one_entry_with_full_fields() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "ran")))
+        .read_hook(Arc::new(AfterToolWatcher))
+        .build();
+    let mut events = capture_session_events(&mut agent);
+
+    agent.run("go").await.unwrap();
+
+    let hook_events: Vec<SessionEvent> = drain(&mut events)
+        .into_iter()
+        .filter(|e| matches!(e, SessionEvent::HookRan { .. }))
+        .collect();
+    assert_eq!(hook_events.len(), 1);
+    let SessionEvent::HookRan {
+        hook,
+        lifecycle,
+        hook_kind,
+        outcome,
+        note,
+        ..
+    } = &hook_events[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(hook, "after-tool-watcher");
+    assert_eq!(*lifecycle, HookLifecycle::AfterTool);
+    assert_eq!(hook_kind, "read");
+    assert_eq!(outcome, "continue");
+    assert!(note.is_none());
 }
 
 #[tokio::test]

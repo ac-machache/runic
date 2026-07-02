@@ -73,6 +73,9 @@ impl Agent {
 
             let mut substituted: Option<ToolResult> = None;
             for h in self.write_hooks.clone() {
+                if !h.points().contains(&HookLifecycle::BeforeTool) {
+                    continue;
+                }
                 let outcome = h.before_tool(&mut self.state, &mut call).await;
                 tracing::debug!(
                     hook_name = h.name(),
@@ -82,9 +85,7 @@ impl Agent {
                     outcome = outcome_kind(&outcome),
                     "hook fired"
                 );
-                if !matches!(outcome, HookOutcome::Continue) {
-                    self.record_write_hook(run_id, h.name(), HookLifecycle::BeforeTool, &outcome);
-                }
+                self.record_write_hook(run_id, h.name(), HookLifecycle::BeforeTool, &outcome);
                 match outcome {
                     HookOutcome::Continue => {}
                     HookOutcome::SubstituteToolResult(r) => {
@@ -241,6 +242,9 @@ impl Agent {
             // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
             // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
             for h in self.write_hooks.clone() {
+                if !h.points().contains(&HookLifecycle::AfterTool) {
+                    continue;
+                }
                 let outcome = h.after_tool(&mut self.state, call, &result).await;
                 tracing::debug!(
                     hook_name = h.name(),
@@ -250,9 +254,7 @@ impl Agent {
                     outcome = outcome_kind(&outcome),
                     "hook fired"
                 );
-                if !matches!(outcome, HookOutcome::Continue) {
-                    self.record_write_hook(run_id, h.name(), HookLifecycle::AfterTool, &outcome);
-                }
+                self.record_write_hook(run_id, h.name(), HookLifecycle::AfterTool, &outcome);
                 match outcome {
                     HookOutcome::Stop | HookOutcome::Cancel(_) => {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");

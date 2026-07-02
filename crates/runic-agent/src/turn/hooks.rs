@@ -87,13 +87,20 @@ impl Agent {
         });
     }
 
-    fn record_read_hook_stop(&mut self, run_id: &str, hook_name: &str, lifecycle: HookLifecycle) {
+    fn record_read_hook(
+        &mut self,
+        run_id: &str,
+        hook_name: &str,
+        lifecycle: HookLifecycle,
+        signal: &HookSignal,
+    ) {
+        let kind = signal_kind(signal);
         self.state.push_event(SessionEvent::HookRan {
             run_id: run_id.to_string(),
             hook: hook_name.to_string(),
             lifecycle,
             hook_kind: "read".to_string(),
-            outcome: "stop".to_string(),
+            outcome: kind.to_string(),
             note: None,
             at: Utc::now(),
         });
@@ -101,7 +108,7 @@ impl Agent {
             hook_name: hook_name.to_string(),
             hook_kind: "read",
             lifecycle,
-            outcome: "stop",
+            outcome: kind,
             note: None,
         });
     }
@@ -112,6 +119,9 @@ impl Agent {
         point: Point,
     ) -> Result<(), AgentError> {
         for h in self.write_hooks.clone() {
+            if !h.points().contains(&point.lifecycle()) {
+                continue;
+            }
             let outcome = match point {
                 Point::BeforeAgent => h.before_agent(&mut self.state).await,
                 Point::AfterAgent => h.after_agent(&mut self.state).await,
@@ -126,9 +136,7 @@ impl Agent {
                 outcome = outcome_kind(&outcome),
                 "hook fired"
             );
-            if !matches!(outcome, HookOutcome::Continue) {
-                self.record_write_hook(run_id, h.name(), point.lifecycle(), &outcome);
-            }
+            self.record_write_hook(run_id, h.name(), point.lifecycle(), &outcome);
             match outcome {
                 HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
                 HookOutcome::Cancel(_) | HookOutcome::Stop => return Err(AgentError::HookStop),
@@ -142,6 +150,7 @@ impl Agent {
         let state = &self.state;
         let futs: Vec<_> = hooks
             .iter()
+            .filter(|h| h.points().contains(&point.lifecycle()))
             .map(|h| {
                 let h = h.clone();
                 async move {
@@ -165,9 +174,7 @@ impl Agent {
             .collect();
         let results = futures::future::join_all(futs).await;
         for (hook_name, signal) in &results {
-            if matches!(signal, HookSignal::Stop) {
-                self.record_read_hook_stop(run_id, hook_name, point.lifecycle());
-            }
+            self.record_read_hook(run_id, hook_name, point.lifecycle(), signal);
         }
         signals_ok(results.into_iter().map(|(_, s)| s).collect())
     }
@@ -181,6 +188,7 @@ impl Agent {
         let state = &self.state;
         let futs: Vec<_> = hooks
             .iter()
+            .filter(|h| h.points().contains(&HookLifecycle::BeforeTool))
             .map(|h| {
                 let h = h.clone();
                 async move {
@@ -199,9 +207,7 @@ impl Agent {
             .collect();
         let results = futures::future::join_all(futs).await;
         for (hook_name, signal) in &results {
-            if matches!(signal, HookSignal::Stop) {
-                self.record_read_hook_stop(run_id, hook_name, HookLifecycle::BeforeTool);
-            }
+            self.record_read_hook(run_id, hook_name, HookLifecycle::BeforeTool, signal);
         }
         signals_ok(results.into_iter().map(|(_, s)| s).collect())
     }
@@ -216,6 +222,7 @@ impl Agent {
         let state = &self.state;
         let futs: Vec<_> = hooks
             .iter()
+            .filter(|h| h.points().contains(&HookLifecycle::AfterTool))
             .map(|h| {
                 let h = h.clone();
                 async move {
@@ -234,9 +241,7 @@ impl Agent {
             .collect();
         let results = futures::future::join_all(futs).await;
         for (hook_name, signal) in &results {
-            if matches!(signal, HookSignal::Stop) {
-                self.record_read_hook_stop(run_id, hook_name, HookLifecycle::AfterTool);
-            }
+            self.record_read_hook(run_id, hook_name, HookLifecycle::AfterTool, signal);
         }
         signals_ok(results.into_iter().map(|(_, s)| s).collect())
     }

@@ -86,6 +86,7 @@ impl ArtifactStore for LocalArtifactStore {
             .await
             .map_err(io)?;
         f.write_all(line.as_bytes()).await.map_err(io)?;
+        f.flush().await.map_err(io)?;
 
         Ok(artifact)
     }

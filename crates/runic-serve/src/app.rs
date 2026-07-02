@@ -101,6 +101,7 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),
         )
+        .route("/threads/{thread_id}/runs/wait", post(runs::wait_run))
         .route("/threads/{thread_id}/runs/cancel", post(runs::cancel_run))
         .route(
             "/threads/{thread_id}/runs/{run_id}/stream",

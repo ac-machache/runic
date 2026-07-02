@@ -522,6 +522,74 @@ async fn provider_failure_emits_run_error_then_done() {
     assert_eq!(kinds.last().unwrap(), "done");
 }
 
+fn wait_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
+    post_json(
+        &format!("/threads/{thread}/runs/wait"),
+        tenant,
+        json!({ "message": message }).to_string(),
+    )
+}
+
+#[tokio::test]
+async fn wait_run_returns_the_final_answer_as_json() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(wait_request("t1", TENANT, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["text"], "pong");
+    assert_eq!(body["stop_reason"], "end_turn");
+    assert_eq!(body["total_turns"], 1);
+    assert_eq!(body["input_tokens"], 1);
+    assert_eq!(body["output_tokens"], 2);
+    assert!(body["run_id"].as_str().unwrap().starts_with("r-"));
+}
+
+#[tokio::test]
+async fn wait_run_provider_failure_is_500_agent_error() {
+    let app = failing_run_router();
+    let resp = app
+        .oneshot(wait_request("t1", TENANT, "boom"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body_json(resp).await["error"], "agent");
+}
+
+#[tokio::test]
+async fn wait_run_rejects_empty_body() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(post_json("/threads/t1/runs/wait", TENANT, "{}".into()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn wait_run_without_human_channel_survives_an_ask() {
+    let app = asking_router();
+    let resp = app.oneshot(wait_request("t1", TENANT, "go")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["text"], "done");
+    assert_eq!(body["total_turns"], 2);
+}
+
+#[tokio::test]
+async fn wait_run_persists_the_same_lifecycle_as_streaming() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+    let resp = app
+        .oneshot(wait_request("persist", TENANT, "hi"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    wait_for_stored_events(store.as_ref(), TENANT, "persist", 4).await;
+}
+
 #[tokio::test]
 async fn cancel_with_no_run_in_flight_is_409() {
     let app = scripted_router();

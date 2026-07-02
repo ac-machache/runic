@@ -182,6 +182,20 @@ struct StreamErrorEvent {
     error: String,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WaitRunResponse {
+    pub run_id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    pub total_turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub structured: Option<serde_json::Value>,
+}
+
 /// `POST /threads/:id/runs/stream`
 ///
 /// Kicks off a streaming run in a detached task that locks the thread's Agent
@@ -312,6 +326,83 @@ pub async fn create_and_stream_run(
             .interval(Duration::from_secs(15))
             .text(":keepalive"),
     ))
+}
+
+/// `POST /threads/:id/runs/wait`
+///
+/// Run a turn to completion and return the final answer as one JSON body — no
+/// SSE. The run executes in a detached task (same as the streaming route), so
+/// a client disconnect never aborts it mid-turn. No human channel is wired:
+/// an `ask_user` raised mid-run fails in-band and the run continues.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs/wait",
+    tag = "runs",
+    request_body = RunMessageRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "The completed run", body = WaitRunResponse),
+        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 500, description = "The run failed (provider error, max turns, ...)", body = ErrorBody)
+    )
+)]
+pub async fn wait_run(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+    Json(req): Json<RunMessageRequest>,
+) -> Result<Json<WaitRunResponse>, ServeError> {
+    let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
+    let user_msg = req.into_message()?;
+    let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
+
+    let mut run_ctx = state
+        .pool
+        .factory()
+        .build_run_context(&tenant, &thread_id, &ctx_json)
+        .await;
+    let cancel = state.pool.begin_run(&tenant, &thread_id).await;
+    run_ctx = run_ctx.with_cancel(cancel.clone());
+
+    tracing::info!(%tenant, %thread_id, "wait run accepted");
+
+    let pool = state.pool.clone();
+    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
+    let task = tokio::spawn(async move {
+        let mut agent = agent_arc.lock().await;
+        let result = agent.run_message_with(user_msg, run_ctx).await;
+        pool.end_run(&tenant, &thread_id, &cancel).await;
+        match result {
+            Ok(outcome) => {
+                let run_id = agent
+                    .state()
+                    .runs()
+                    .last()
+                    .map(|r| r.id.clone())
+                    .unwrap_or_default();
+                let text = agent.state().last_assistant_text().unwrap_or_default();
+                Ok(WaitRunResponse {
+                    run_id,
+                    text,
+                    stop_reason: outcome.stop_reason,
+                    total_turns: outcome.total_turns,
+                    input_tokens: outcome.usage.input_tokens,
+                    output_tokens: outcome.usage.output_tokens,
+                    structured: outcome.structured,
+                })
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    });
+
+    match task.await {
+        Ok(Ok(response)) => Ok(Json(response)),
+        Ok(Err(e)) => Err(ServeError::Agent(e)),
+        Err(e) => Err(ServeError::Internal(format!("run task panicked: {e}"))),
+    }
 }
 
 /// `POST /threads/:id/runs/cancel`

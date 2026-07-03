@@ -63,6 +63,7 @@ fn session_event() -> impl Strategy<Value = SessionEvent> {
             messages: vec![],
             system_prompt: String::new(),
             reason: "c".into(),
+            stats: None,
             at,
         }),
     ]

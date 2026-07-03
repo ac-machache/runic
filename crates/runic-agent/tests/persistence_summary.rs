@@ -35,7 +35,7 @@ async fn full_output_reaches_model_only_summary_persists() {
     );
 
     // … but the persisted message view keeps only the summary.
-    let persisted = tool_result_contents(&agent.state().messages_for_provider());
+    let persisted = tool_result_contents(agent.state().messages_for_provider());
     assert!(
         persisted.iter().any(|c| c.contains("omitted from log")),
         "history keeps the summary: {persisted:?}"

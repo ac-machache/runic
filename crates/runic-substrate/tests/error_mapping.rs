@@ -65,6 +65,9 @@ impl SessionStore for DefaultsOnlyStore {
     async fn append(&self, t: &str, s: &str, e: &SessionEvent) -> Result<u64> {
         self.inner.append(t, s, e).await
     }
+    async fn append_batch(&self, t: &str, s: &str, events: &[SessionEvent]) -> Result<()> {
+        self.inner.append_batch(t, s, events).await
+    }
     async fn read(&self, t: &str, s: &str) -> Result<Vec<StoredEvent>> {
         self.inner.read(t, s).await
     }

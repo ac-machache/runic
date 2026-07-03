@@ -29,7 +29,7 @@ pub async fn replay_messages(
     tenant: &str,
     session_id: &str,
 ) -> Result<Vec<Message>, Error> {
-    let stored = store.read(tenant, session_id).await?;
+    let stored = store.read_tail(tenant, session_id).await?;
     let mut msgs: Vec<Message> = Vec::new();
     for entry in stored {
         match entry.event {
@@ -112,6 +112,7 @@ mod tests {
                     messages: vec![Message::user("compacted")],
                     system_prompt: "sp".into(),
                     reason: "compaction".into(),
+                    stats: None,
                     at: Utc::now(),
                 },
             )

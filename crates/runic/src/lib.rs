@@ -1,15 +1,14 @@
 mod artifact_resolver;
 mod assemble;
 mod child;
-mod compaction;
 mod context;
-mod memory_review;
+pub mod hooks;
 
 pub use artifact_resolver::ArtifactResolver;
 pub use assemble::{Assembly, assemble};
 pub use child::FoundrySubagentBuilder;
-pub use compaction::Compaction;
 pub use context::Context;
+pub use hooks::Compaction;
 
 pub mod agent {
     pub use runic_agent::*;

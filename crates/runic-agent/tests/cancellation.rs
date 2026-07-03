@@ -61,7 +61,7 @@ async fn cancel_during_a_tool_ends_before_the_next_model_call() {
     );
 
     // The tool result from turn 1 is still present and well-formed.
-    let contents = tool_result_contents(&agent.state().messages_for_provider());
+    let contents = tool_result_contents(agent.state().messages_for_provider());
     assert!(contents.iter().any(|c| c.contains("cancelled the run")));
     assert!(agent.state().current_run().is_none());
 }

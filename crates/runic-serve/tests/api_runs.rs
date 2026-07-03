@@ -863,3 +863,136 @@ async fn answering_same_ask_twice_is_202_then_400() {
         .unwrap();
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
 }
+
+struct SlowStore {
+    inner: MemorySessionStore,
+    delay: Duration,
+}
+
+#[async_trait]
+impl SessionStore for SlowStore {
+    async fn append(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        event: &runic_state::SessionEvent,
+    ) -> runic_substrate::Result<u64> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.append(tenant, session_id, event).await
+    }
+
+    async fn append_batch(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[runic_state::SessionEvent],
+    ) -> runic_substrate::Result<()> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.append_batch(tenant, session_id, events).await
+    }
+
+    async fn read(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+        self.inner.read(tenant, session_id).await
+    }
+
+    async fn read_after(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        after_seq: u64,
+    ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+        self.inner.read_after(tenant, session_id, after_seq).await
+    }
+
+    async fn list_sessions(
+        &self,
+        tenant: &str,
+    ) -> runic_substrate::Result<Vec<runic_substrate::SessionMeta>> {
+        self.inner.list_sessions(tenant).await
+    }
+
+    async fn session_meta(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> runic_substrate::Result<Option<runic_substrate::SessionMeta>> {
+        self.inner.session_meta(tenant, session_id).await
+    }
+
+    async fn set_label(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        label: Option<&str>,
+    ) -> runic_substrate::Result<()> {
+        self.inner.set_label(tenant, session_id, label).await
+    }
+
+    async fn delete_session(&self, tenant: &str, session_id: &str) -> runic_substrate::Result<()> {
+        self.inner.delete_session(tenant, session_id).await
+    }
+}
+
+#[tokio::test]
+async fn wait_response_implies_the_run_is_durable() {
+    let store = Arc::new(SlowStore {
+        inner: MemorySessionStore::new(),
+        delay: Duration::from_millis(200),
+    });
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+
+    let resp = app
+        .oneshot(wait_request("t1", TENANT, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = store.read(TENANT, "t1").await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|s| matches!(s.event, runic_state::SessionEvent::RunEnd { .. })),
+        "RunEnd must be durable before the wait response returns"
+    );
+}
+
+#[tokio::test]
+async fn stream_done_implies_the_run_is_durable() {
+    let store = Arc::new(SlowStore {
+        inner: MemorySessionStore::new(),
+        delay: Duration::from_millis(200),
+    });
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+
+    let resp = app
+        .oneshot(run_body("t1", TENANT, json!({ "message": "ping" })))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert_eq!(sse_kinds(&body).last().unwrap(), "done");
+
+    let stored = store.read(TENANT, "t1").await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|s| matches!(s.event, runic_state::SessionEvent::RunEnd { .. })),
+        "RunEnd must be durable before the stream's done event"
+    );
+}

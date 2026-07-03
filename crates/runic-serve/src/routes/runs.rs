@@ -234,6 +234,10 @@ pub async fn create_and_stream_run(
     // Extract context before `into_message` consumes the request, and validate
     // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
     let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
+    state
+        .pool
+        .check_persist_capacity(&tenant, &thread_id)
+        .await?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     // Inline media → stored refs; client refs validated. State only sees refs.
@@ -273,6 +277,10 @@ pub async fn create_and_stream_run(
         .pool
         .get_or_build(&tenant, &thread_id, &agent_name)
         .await?;
+    let persist = state
+        .pool
+        .persist_handle(&tenant, &thread_id, &agent_name)
+        .await;
     tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
         if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
@@ -302,6 +310,7 @@ pub async fn create_and_stream_run(
                         for w in from_agent_event(e) {
                             if matches!(w, WireEvent::Done { .. }) {
                                 done_sent = true;
+                                flush_persist(persist.as_deref()).await;
                             }
                             yield Ok(to_sse(&w, None));
                         }
@@ -319,6 +328,7 @@ pub async fn create_and_stream_run(
             yield Ok(to_sse(&err, None));
         }
         if !done_sent {
+            flush_persist(persist.as_deref()).await;
             yield Ok(to_sse(
                 &WireEvent::Done {
                     total_turns: None,
@@ -364,6 +374,10 @@ pub async fn wait_run(
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
     let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
+    state
+        .pool
+        .check_persist_capacity(&tenant, &thread_id)
+        .await?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
@@ -383,10 +397,15 @@ pub async fn wait_run(
         .pool
         .get_or_build(&tenant, &thread_id, &agent_name)
         .await?;
+    let persist = state
+        .pool
+        .persist_handle(&tenant, &thread_id, &agent_name)
+        .await;
     let task = tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
         let result = agent.run_message_with(user_msg, run_ctx).await;
         pool.end_run(&tenant, &thread_id, &cancel).await;
+        flush_persist(persist.as_deref()).await;
         match result {
             Ok(outcome) => {
                 let run_id = agent
@@ -414,6 +433,21 @@ pub async fn wait_run(
         Ok(Ok(response)) => Ok(Json(response)),
         Ok(Err(e)) => Err(ServeError::Agent(e)),
         Err(e) => Err(ServeError::Internal(format!("run task panicked: {e}"))),
+    }
+}
+
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn flush_persist(persist: Option<&crate::pool::PersistHandle>) {
+    if let Some(persist) = persist
+        && tokio::time::timeout(FLUSH_TIMEOUT, persist.flush())
+            .await
+            .is_err()
+    {
+        tracing::error!(
+            backlog = persist.backlog(),
+            "run finished but events are still unflushed after {FLUSH_TIMEOUT:?}"
+        );
     }
 }
 

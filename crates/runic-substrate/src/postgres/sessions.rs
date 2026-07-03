@@ -185,6 +185,24 @@ impl SessionStore for PostgresSessionStore {
         rows_to_events(rows)
     }
 
+    async fn read_tail(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
+        let rows = sqlx::query(
+            "SELECT seq, event FROM session_events
+             WHERE tenant = $1 AND session_id = $2
+               AND seq >= COALESCE((
+                 SELECT MAX(seq) FROM session_events
+                 WHERE tenant = $1 AND session_id = $2 AND kind = 'StateSnapshot'
+               ), 0)
+             ORDER BY seq",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows_to_events(rows)
+    }
+
     async fn read_after(
         &self,
         tenant: &str,

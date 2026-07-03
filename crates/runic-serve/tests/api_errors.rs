@@ -63,6 +63,14 @@ impl SessionStore for FailingSessionStore {
     ) -> runic_substrate::Result<u64> {
         Err(boom())
     }
+    async fn append_batch(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _events: &[SessionEvent],
+    ) -> runic_substrate::Result<()> {
+        Err(boom())
+    }
     async fn read(
         &self,
         _tenant: &str,

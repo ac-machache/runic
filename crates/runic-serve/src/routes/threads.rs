@@ -53,7 +53,7 @@ pub struct ThreadEventsResponse {
 }
 
 /// `GET /threads/{id}/state` — the agent's view of the thread. When a run is in
-/// flight the slot is locked, so `busy` is true and `system_prompt`/`run_count`
+/// flight the slot is locked, so `busy` is true and `system_prompt`
 /// are null (unreadable without the lock); `messages` is reconstructed from the
 /// store.
 #[derive(Debug, Serialize, ToSchema)]
@@ -66,7 +66,30 @@ pub struct ThreadStateResponse {
     #[schema(value_type = Vec<Object>)]
     pub messages: Vec<runic_types::Message>,
     pub event_count: u64,
-    pub run_count: Option<usize>,
+    pub stats: ThreadStatsView,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ThreadStatsView {
+    pub runs: u64,
+    pub turns: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tool_calls: u64,
+    pub tool_calls: std::collections::HashMap<String, u64>,
+}
+
+impl From<&runic_state::ThreadStats> for ThreadStatsView {
+    fn from(s: &runic_state::ThreadStats) -> Self {
+        Self {
+            runs: s.runs,
+            turns: s.turns,
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            total_tool_calls: s.total_tool_calls,
+            tool_calls: s.tool_calls.clone(),
+        }
+    }
 }
 
 fn default_threads_limit() -> usize {
@@ -435,20 +458,31 @@ pub async fn thread_state(
                 busy: false,
                 label,
                 system_prompt: Some(st.system_prompt.clone()),
-                messages: st.messages_for_provider(),
+                messages: st.messages_for_provider().to_vec(),
                 event_count,
-                run_count: Some(st.runs().len()),
+                stats: (&st.stats).into(),
             }));
         }
     }
 
-    // Cold thread, or every warm agent is mid-run — reconstruct messages from
-    // the store; the system prompt and run count aren't readable without a
-    // lock, so they're null (not a "" placeholder that looks like truth).
-    let messages =
-        runic_substrate::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
-            .await
-            .unwrap_or_default();
+    // Cold thread, or every warm agent is mid-run — reconstruct from the
+    // store; the system prompt isn't readable without a lock, so it's null
+    // (not a "" placeholder that looks like truth).
+    let stored = state
+        .session_store
+        .read_tail(&tenant, &thread_id)
+        .await
+        .unwrap_or_default();
+    let mut messages: Vec<runic_types::Message> = Vec::new();
+    let mut stats = runic_state::ThreadStats::default();
+    for entry in stored {
+        stats.fold(&entry.event);
+        match entry.event {
+            runic_state::SessionEvent::Message { msg, .. } => messages.push(msg),
+            runic_state::SessionEvent::StateSnapshot { messages: snap, .. } => messages = snap,
+            _ => {}
+        }
+    }
     Ok(Json(ThreadStateResponse {
         thread_id,
         tenant,
@@ -457,7 +491,7 @@ pub async fn thread_state(
         system_prompt: None,
         messages,
         event_count,
-        run_count: None,
+        stats: (&stats).into(),
     }))
 }
 

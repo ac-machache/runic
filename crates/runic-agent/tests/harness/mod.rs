@@ -726,7 +726,9 @@ impl ReadHook for RecordReadHook {
 /// [`SessionEvent`] the run pushes lands here in order.
 pub fn capture_session_events(agent: &mut Agent) -> mpsc::UnboundedReceiver<SessionEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
-    agent.state_mut().set_persist_tx(tx);
+    agent
+        .state_mut()
+        .set_persist_tx(runic_state::PersistSink::new(tx));
     rx
 }
 

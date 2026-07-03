@@ -11,14 +11,14 @@ use runic_types::Role;
 /// Every N turns, spawn an off-loop curator that reviews the transcript and
 /// curates the shared memory store. (Lives here, not in `runic-memory`, because
 /// it spawns an `Agent` — `runic-memory` must not depend on `runic-agent`.)
-pub struct MemoryReviewHook {
+pub struct MemoryCurator {
     scheduler: ReviewScheduler,
     provider: Arc<dyn Provider>,
     model: String,
     store: Arc<BoundedMemoryStore>,
 }
 
-impl MemoryReviewHook {
+impl MemoryCurator {
     pub fn new(
         interval: u32,
         provider: Arc<dyn Provider>,
@@ -35,9 +35,9 @@ impl MemoryReviewHook {
 }
 
 #[async_trait]
-impl WriteHook for MemoryReviewHook {
+impl WriteHook for MemoryCurator {
     fn name(&self) -> &str {
-        "memory_review"
+        "memory-curator"
     }
 
     fn points(&self) -> &'static [HookLifecycle] {

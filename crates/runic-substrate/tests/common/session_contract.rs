@@ -410,6 +410,7 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
             messages: vec![Message::user("compacted")],
             system_prompt: "sys".into(),
             reason: "compaction".into(),
+            stats: None,
             at: ts(7),
         },
         SessionEvent::Message {
@@ -840,6 +841,56 @@ pub async fn reconstruct_tool_call_and_result_messages(store: &dyn SessionStore)
     );
 }
 
+pub async fn read_tail_starts_at_the_last_snapshot(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store
+        .append_batch(
+            &t,
+            &s,
+            &[
+                user_msg("r1", "old", 0),
+                SessionEvent::StateSnapshot {
+                    run_id: "r1".into(),
+                    messages: vec![Message::user("first snap")],
+                    system_prompt: "sys".into(),
+                    reason: "compaction".into(),
+                    stats: None,
+                    at: ts(1),
+                },
+                user_msg("r2", "middle", 2),
+                SessionEvent::StateSnapshot {
+                    run_id: "r2".into(),
+                    messages: vec![Message::user("second snap")],
+                    system_prompt: "sys".into(),
+                    reason: "compaction".into(),
+                    stats: None,
+                    at: ts(3),
+                },
+                user_msg("r3", "tail", 4),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let tail = store.read_tail(&t, &s).await.unwrap();
+    assert_eq!(tail.len(), 2);
+    assert!(matches!(tail[0].event, SessionEvent::StateSnapshot { .. }));
+    match &tail[1].event {
+        SessionEvent::Message { msg, .. } => assert_eq!(msg.content.text_content(), "tail"),
+        other => panic!("expected the tail message, got {other:?}"),
+    }
+}
+
+pub async fn read_tail_without_a_snapshot_reads_everything(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store
+        .append_batch(&t, &s, &[user_msg("r1", "a", 0), user_msg("r1", "b", 1)])
+        .await
+        .unwrap();
+    let tail = store.read_tail(&t, &s).await.unwrap();
+    assert_eq!(tail.len(), 2);
+}
+
 pub async fn snapshot_replaces_messages_on_replay(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store
@@ -854,6 +905,7 @@ pub async fn snapshot_replaces_messages_on_replay(store: &dyn SessionStore) {
                     messages: vec![Message::user("compacted")],
                     system_prompt: "sys".into(),
                     reason: "compaction".into(),
+                    stats: None,
                     at: ts(2),
                 },
                 assistant_msg("r1", "after", 3),

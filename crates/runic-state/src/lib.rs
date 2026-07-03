@@ -5,14 +5,18 @@
 //! - **event-sourced log** (runic) — replayable, auditable, non-destructive
 //!   compaction;
 //! - **structured `Message`** (`runic_types`, copied from OpenFang);
-//! - **session metadata** — `label`, `context_window_tokens` (OpenFang);
+//! - **session metadata** — `label` (OpenFang);
 //! - keyed by **`(user_id, session_id)`**.
 
 pub mod event;
 pub mod state;
+pub mod stats;
 
 pub use event::{HookLifecycle, RunOutcome, SessionEvent};
-pub use state::{AgentState, EVENT_BROADCAST_CAPACITY, RunTimeContext, RunView, new_run_id};
+pub use state::{
+    AgentState, EVENT_BROADCAST_CAPACITY, PersistSink, RunTimeContext, RunView, new_run_id,
+};
+pub use stats::ThreadStats;
 
 #[cfg(test)]
 mod tests {
@@ -59,6 +63,7 @@ mod tests {
             messages: vec![Message::user("compacted")],
             system_prompt: String::new(),
             reason: "trim".into(),
+            stats: None,
             at: Utc::now(),
         });
         push_msg(&mut s, "r1", Message::user("c"));
@@ -67,8 +72,8 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].content.text_content(), "compacted");
         assert_eq!(m[1].content.text_content(), "c");
-        // …but the raw events are all still there (nothing lost):
-        assert_eq!(s.events.len(), 4);
+        // …and pre-snapshot events leave RAM (the store keeps the full log):
+        assert_eq!(s.events.len(), 2);
     }
 
     #[test]
@@ -93,6 +98,44 @@ mod tests {
         let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
         assert_eq!(s.current_run().unwrap().id, "b");
+    }
+
+    #[test]
+    fn mid_run_compaction_keeps_the_in_flight_run_visible() {
+        let mut s = AgentState::new("u1", "sess", "");
+        s.push_event(SessionEvent::RunStart {
+            run_id: "old".into(),
+            agent: None,
+            at: Utc::now(),
+        });
+        push_msg(&mut s, "old", Message::user("ancient"));
+        s.push_event(SessionEvent::RunEnd {
+            run_id: "old".into(),
+            outcome: RunOutcome::default(),
+            at: Utc::now(),
+        });
+        s.push_event(SessionEvent::RunStart {
+            run_id: "live".into(),
+            agent: None,
+            at: Utc::now(),
+        });
+        push_msg(&mut s, "live", Message::user("now"));
+        s.push_event(SessionEvent::StateSnapshot {
+            run_id: "live".into(),
+            messages: vec![Message::assistant("summary")],
+            system_prompt: String::new(),
+            reason: "compaction".into(),
+            stats: None,
+            at: Utc::now(),
+        });
+
+        assert_eq!(s.current_run().unwrap().id, "live");
+        assert!(
+            !s.events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::RunEnd { run_id, .. } if run_id == "old"))
+        );
+        assert_eq!(s.stats.runs, 1);
     }
 
     #[test]

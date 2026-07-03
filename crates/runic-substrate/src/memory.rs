@@ -148,6 +148,35 @@ impl SessionStore for MemorySessionStore {
         Ok(seq)
     }
 
+    async fn append_batch(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        let Some(first) = events.first() else {
+            return Ok(());
+        };
+        let mut sessions = self.sessions.lock().unwrap();
+        let rec = sessions
+            .entry((tenant.to_string(), session_id.to_string()))
+            .or_insert_with(|| SessionRec {
+                events: Vec::new(),
+                label: None,
+                created_at: event_at(first),
+                last_activity: event_at(first),
+            });
+        for event in events {
+            let seq = rec.events.len() as u64 + 1;
+            rec.last_activity = event_at(event);
+            rec.events.push(StoredEvent {
+                seq,
+                event: event.clone(),
+            });
+        }
+        Ok(())
+    }
+
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
         Ok(self
             .sessions

@@ -58,22 +58,26 @@ pub trait SessionStore: Send + Sync {
     /// Append one event; the store assigns and returns its `seq`.
     async fn append(&self, tenant: &str, session_id: &str, event: &SessionEvent) -> Result<u64>;
 
-    /// Append several events in order. Override for a single-transaction batch;
-    /// the default loops `append`.
     async fn append_batch(
         &self,
         tenant: &str,
         session_id: &str,
         events: &[SessionEvent],
-    ) -> Result<()> {
-        for event in events {
-            self.append(tenant, session_id, event).await?;
-        }
-        Ok(())
-    }
+    ) -> Result<()>;
 
     /// Read every event for a session, in `seq` order.
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>>;
+
+    async fn read_tail(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
+        let mut all = self.read(tenant, session_id).await?;
+        if let Some(i) = all
+            .iter()
+            .rposition(|s| matches!(s.event, SessionEvent::StateSnapshot { .. }))
+        {
+            all.drain(..i);
+        }
+        Ok(all)
+    }
 
     /// Read events with `seq > after_seq` — for tailing (poll with the last
     /// seen seq).

@@ -13,9 +13,8 @@ use runic_tools::Tools;
 
 use crate::artifact_resolver::ArtifactResolver;
 use crate::child::FoundrySubagentBuilder;
-use crate::compaction::{Compaction, CompactionHook};
 use crate::context::Context;
-use crate::memory_review::MemoryReviewHook;
+use crate::hooks::{Compaction, CompactionHook, MemoryCurator};
 
 /// The bundle of parts an agent is assembled from. Set the optional slices you
 /// want; leave the rest `None`.
@@ -146,7 +145,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         && let Some(store) = &store
         && m.review_interval() > 0
     {
-        let hook = MemoryReviewHook::new(
+        let hook = MemoryCurator::new(
             m.review_interval(),
             a.provider.clone(),
             &a.model,

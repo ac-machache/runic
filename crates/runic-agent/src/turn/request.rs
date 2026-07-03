@@ -19,7 +19,7 @@ fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
 
 impl Agent {
     pub(crate) fn prepare_request(&self) -> CompletionRequest {
-        let mut messages = self.state.messages_for_provider();
+        let mut messages = self.state.messages_for_provider().to_vec();
 
         // Swap summarized tool results for their full output, for this call
         // only; the overlay is consumed (cleared) here.

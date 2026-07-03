@@ -1,16 +1,4 @@
 //! `ThreadPool` — one warm Agent per (tenant, thread_id), Mutex-guarded.
-//!
-//! The pool bridges stateless HTTP requests to stateful Agent instances. When
-//! `POST /threads/:id/runs/stream` arrives we look up the agent for that
-//! thread, lock it, run a turn, release. Concurrent requests for the same
-//! thread queue on the Mutex (intended — runs on one thread serialize);
-//! different threads run in parallel (independent mutexes). The outer map is
-//! `RwLock`d so a warm-thread lookup doesn't block on insertion.
-//!
-//! At build time the pool installs a `SessionEvent` broadcast into the agent's
-//! state and spawns a **persister** that drains it into the [`SessionStore`] —
-//! one per agent (not per run), so events from every run on the thread land in
-//! the store without double-writing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,15 +6,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use runic_agent::{Agent, CancelToken};
-use runic_state::{EVENT_BROADCAST_CAPACITY, SessionEvent};
+use runic_state::{EVENT_BROADCAST_CAPACITY, PersistSink, SessionEvent};
 use runic_substrate::SessionStore;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
 use crate::error::ServeError;
 use crate::factory::BoxedAgentFactory;
 
 pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+pub const DEFAULT_PERSIST_BACKLOG_MAX: u64 = 10_000;
+const RETRY_BASE: Duration = Duration::from_millis(100);
+const RETRY_CAP: Duration = Duration::from_secs(5);
+const RETRY_ESCALATE_AFTER: u32 = 5;
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ThreadKey {
@@ -35,22 +28,45 @@ struct ThreadKey {
     agent: String,
 }
 
+pub struct PersistHandle {
+    enqueued: Arc<AtomicU64>,
+    committed: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl PersistHandle {
+    pub fn backlog(&self) -> u64 {
+        self.enqueued
+            .load(Ordering::SeqCst)
+            .saturating_sub(self.committed.load(Ordering::SeqCst))
+    }
+
+    pub async fn flush(&self) {
+        let target = self.enqueued.load(Ordering::SeqCst);
+        loop {
+            let notified = self.notify.notified();
+            if self.committed.load(Ordering::SeqCst) >= target {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 struct WarmEntry {
     agent: Arc<Mutex<Agent>>,
     last_active: AtomicU64,
+    persist: Arc<PersistHandle>,
 }
 
 pub struct ThreadPool {
-    /// One slot per active (tenant, thread, agent). `run_message_with` takes
-    /// `&mut self`, so the handler locks the Mutex for the duration of a run;
-    /// the outer RwLock lets warm-thread reads run without contending on
-    /// first-insert.
     agents: RwLock<HashMap<ThreadKey, WarmEntry>>,
     cancel_tokens: RwLock<HashMap<(String, String), CancelToken>>,
     factories: HashMap<String, BoxedAgentFactory>,
     session_store: Arc<dyn SessionStore>,
     started_at: Instant,
     idle_ttl: Duration,
+    persist_backlog_max: u64,
 }
 
 impl ThreadPool {
@@ -69,11 +85,17 @@ impl ThreadPool {
             session_store,
             started_at: Instant::now(),
             idle_ttl: DEFAULT_IDLE_TTL,
+            persist_backlog_max: DEFAULT_PERSIST_BACKLOG_MAX,
         }
     }
 
     pub fn with_idle_ttl(mut self, ttl: Duration) -> Self {
         self.idle_ttl = ttl;
+        self
+    }
+
+    pub fn with_persist_backlog_max(mut self, max: u64) -> Self {
+        self.persist_backlog_max = max;
         self
     }
 
@@ -201,16 +223,18 @@ impl ThreadPool {
             agent.state_mut().label = meta.label;
         }
 
-        // Replay the thread's persisted conversation into the fresh state —
-        // only message-bearing events, so run bookkeeping stays clean. This is
-        // what lets a rebuilt (or different) agent continue the conversation.
-        match self.session_store.read(tenant, thread_id).await {
+        // Replay the working set (last snapshot + tail) into the fresh state.
+        // RunEnd rebuilds stats; RunStart is skipped so an orphaned run can't
+        // look in-flight on a fresh agent.
+        match self.session_store.read_tail(tenant, thread_id).await {
             Ok(stored) => {
                 let mut replayed = 0usize;
                 for entry in stored {
                     if matches!(
                         entry.event,
-                        SessionEvent::Message { .. } | SessionEvent::StateSnapshot { .. }
+                        SessionEvent::Message { .. }
+                            | SessionEvent::StateSnapshot { .. }
+                            | SessionEvent::RunEnd { .. }
                     ) {
                         agent.state_mut().push_event(entry.event);
                         replayed += 1;
@@ -232,12 +256,19 @@ impl ThreadPool {
         let (tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         agent.state_mut().set_events_tx(tx);
         let (persist_tx, persist_rx) = mpsc::unbounded_channel();
-        agent.state_mut().set_persist_tx(persist_tx);
+        let sink = PersistSink::new(persist_tx);
+        let persist = Arc::new(PersistHandle {
+            enqueued: sink.enqueued(),
+            committed: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(Notify::new()),
+        });
+        agent.state_mut().set_persist_tx(sink);
         spawn_persister(
             persist_rx,
             self.session_store.clone(),
             tenant.to_string(),
             thread_id.to_string(),
+            persist.clone(),
         );
 
         let arc = Arc::new(Mutex::new(agent));
@@ -246,10 +277,50 @@ impl ThreadPool {
             WarmEntry {
                 agent: arc.clone(),
                 last_active: AtomicU64::new(now),
+                persist,
             },
         );
         tracing::info!(%tenant, %thread_id, agent = %agent_name, "agent built");
         Ok(arc)
+    }
+
+    pub async fn check_persist_capacity(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+    ) -> Result<(), ServeError> {
+        let map = self.agents.read().await;
+        let worst = map
+            .iter()
+            .filter(|(k, _)| k.tenant == tenant && k.thread_id == thread_id)
+            .map(|(_, e)| e.persist.backlog())
+            .max()
+            .unwrap_or(0);
+        if worst > self.persist_backlog_max {
+            return Err(ServeError::PersistenceDegraded {
+                thread: thread_id.to_string(),
+                backlog: worst,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn persist_handle(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        agent_name: &str,
+    ) -> Option<Arc<PersistHandle>> {
+        let key = ThreadKey {
+            tenant: tenant.to_string(),
+            thread_id: thread_id.to_string(),
+            agent: agent_name.to_string(),
+        };
+        self.agents
+            .read()
+            .await
+            .get(&key)
+            .map(|e| e.persist.clone())
     }
 
     pub async fn warm_agents(&self, tenant: &str, thread_id: &str) -> Vec<Arc<Mutex<Agent>>> {
@@ -360,28 +431,50 @@ fn spawn_persister(
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
+    handle: Arc<PersistHandle>,
 ) {
     tokio::spawn(async move {
-        // Block for one event, then drain everything else already buffered so a
-        // burst persists in a single batched transaction. The channel is
-        // unbounded, so nothing is ever dropped.
+        // append_batch is one transaction, so retrying a failed batch can't
+        // double-write.
         while let Some(first) = rx.recv().await {
             let mut batch = vec![first];
             while let Ok(event) = rx.try_recv() {
                 batch.push(event);
             }
             let batch_size = batch.len();
-            match store.append_batch(&tenant, &session_id, &batch).await {
-                Ok(()) => {
-                    tracing::debug!(%tenant, %session_id, batch_size, "persister batch append")
+            let mut attempt = 0u32;
+            loop {
+                match store.append_batch(&tenant, &session_id, &batch).await {
+                    Ok(()) => {
+                        handle
+                            .committed
+                            .fetch_add(batch_size as u64, Ordering::SeqCst);
+                        handle.notify.notify_waiters();
+                        tracing::debug!(%tenant, %session_id, batch_size, "persister batch append");
+                        break;
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        let delay = RETRY_BASE
+                            .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+                            .min(RETRY_CAP);
+                        if attempt >= RETRY_ESCALATE_AFTER {
+                            tracing::error!(
+                                %tenant, %session_id, batch_size, attempt,
+                                backlog = handle.backlog(),
+                                error = %e,
+                                "persist batch still failing — retrying"
+                            );
+                        } else {
+                            tracing::warn!(
+                                %tenant, %session_id, batch_size, attempt,
+                                error = %e,
+                                "persist batch failed — retrying"
+                            );
+                        }
+                        tokio::time::sleep(delay).await;
+                    }
                 }
-                Err(e) => tracing::warn!(
-                    %tenant,
-                    %session_id,
-                    batch_size,
-                    error = %e,
-                    "persist session events failed"
-                ),
             }
         }
     });
@@ -434,6 +527,205 @@ mod tests {
             Arc::new(TestFactory) as BoxedAgentFactory,
         )]);
         ThreadPool::new(factories, Arc::new(MemorySessionStore::new())).with_idle_ttl(ttl)
+    }
+
+    struct FlakyStore {
+        inner: MemorySessionStore,
+        failures_left: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl SessionStore for FlakyStore {
+        async fn append(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            event: &SessionEvent,
+        ) -> runic_substrate::Result<u64> {
+            self.inner.append(tenant, session_id, event).await
+        }
+
+        async fn append_batch(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            events: &[SessionEvent],
+        ) -> runic_substrate::Result<()> {
+            let left = self.failures_left.load(Ordering::SeqCst);
+            if left > 0 {
+                self.failures_left.store(left - 1, Ordering::SeqCst);
+                return Err(runic_substrate::Error::Unsupported("store is down".into()));
+            }
+            self.inner.append_batch(tenant, session_id, events).await
+        }
+
+        async fn read(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            self.inner.read(tenant, session_id).await
+        }
+
+        async fn read_after(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            after_seq: u64,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            self.inner.read_after(tenant, session_id, after_seq).await
+        }
+
+        async fn list_sessions(
+            &self,
+            tenant: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::SessionMeta>> {
+            self.inner.list_sessions(tenant).await
+        }
+
+        async fn session_meta(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<Option<runic_substrate::SessionMeta>> {
+            self.inner.session_meta(tenant, session_id).await
+        }
+
+        async fn set_label(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            label: Option<&str>,
+        ) -> runic_substrate::Result<()> {
+            self.inner.set_label(tenant, session_id, label).await
+        }
+
+        async fn delete_session(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<()> {
+            self.inner.delete_session(tenant, session_id).await
+        }
+    }
+
+    fn message_event(i: usize) -> SessionEvent {
+        SessionEvent::Message {
+            run_id: "r1".into(),
+            msg: runic_types::Message::user(format!("m{i}")),
+            at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_rebuild_restores_stats_from_the_tail() {
+        let store = Arc::new(MemorySessionStore::new());
+        let snapshot_stats = runic_state::ThreadStats {
+            runs: 7,
+            total_tool_calls: 12,
+            ..Default::default()
+        };
+        store
+            .append_batch(
+                "t",
+                "s",
+                &[
+                    SessionEvent::StateSnapshot {
+                        run_id: "r7".into(),
+                        messages: vec![runic_types::Message::assistant("summary")],
+                        system_prompt: "sys".into(),
+                        reason: "compaction".into(),
+                        stats: Some(snapshot_stats),
+                        at: chrono::Utc::now(),
+                    },
+                    message_event(0),
+                    SessionEvent::RunEnd {
+                        run_id: "r8".into(),
+                        outcome: runic_state::RunOutcome {
+                            total_turns: 2,
+                            ..Default::default()
+                        },
+                        at: chrono::Utc::now(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let factories = HashMap::from([(
+            "solo".to_string(),
+            Arc::new(TestFactory) as BoxedAgentFactory,
+        )]);
+        let pool = ThreadPool::new(factories, store);
+        let agent = pool.get_or_build("t", "s", "solo").await.unwrap();
+        let agent = agent.lock().await;
+
+        assert_eq!(agent.state().stats.runs, 8);
+        assert_eq!(agent.state().stats.total_tool_calls, 12);
+        assert_eq!(agent.state().stats.turns, 2);
+        assert_eq!(agent.state().messages_for_provider().len(), 2);
+        assert!(agent.state().current_run().is_none());
+    }
+
+    #[tokio::test]
+    async fn persister_retries_until_the_store_recovers() {
+        let store = Arc::new(FlakyStore {
+            inner: MemorySessionStore::new(),
+            failures_left: std::sync::atomic::AtomicU32::new(3),
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sink = PersistSink::new(tx);
+        let handle = Arc::new(PersistHandle {
+            enqueued: sink.enqueued(),
+            committed: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(Notify::new()),
+        });
+        spawn_persister(rx, store.clone(), "t".into(), "s".into(), handle.clone());
+
+        for i in 0..5 {
+            sink.send(message_event(i));
+        }
+        handle.flush().await;
+
+        let stored = store.inner.read("t", "s").await.unwrap();
+        let texts: Vec<String> = stored
+            .iter()
+            .filter_map(|s| match &s.event {
+                SessionEvent::Message { msg, .. } => Some(msg.content.text_content()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["m0", "m1", "m2", "m3", "m4"]);
+        assert_eq!(handle.backlog(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_drowning_persister_refuses_new_runs() {
+        let store = Arc::new(FlakyStore {
+            inner: MemorySessionStore::new(),
+            failures_left: std::sync::atomic::AtomicU32::new(u32::MAX),
+        });
+        let factories = HashMap::from([(
+            "solo".to_string(),
+            Arc::new(TestFactory) as BoxedAgentFactory,
+        )]);
+        let pool = ThreadPool::new(factories, store).with_persist_backlog_max(3);
+
+        pool.check_persist_capacity("t", "s").await.unwrap();
+
+        let agent = pool.get_or_build("t", "s", "solo").await.unwrap();
+        {
+            let mut agent = agent.lock().await;
+            for i in 0..5 {
+                agent.state_mut().push_event(message_event(i));
+            }
+        }
+
+        assert!(matches!(
+            pool.check_persist_capacity("t", "s").await,
+            Err(ServeError::PersistenceDegraded { backlog: 5, .. })
+        ));
+        pool.check_persist_capacity("t", "other").await.unwrap();
     }
 
     #[tokio::test]

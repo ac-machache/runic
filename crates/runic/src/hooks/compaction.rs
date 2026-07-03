@@ -87,12 +87,16 @@ impl WriteHook for CompactionHook {
     }
 
     async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
-        let msgs = state.messages_for_provider();
-        let total_chars: usize = msgs.iter().map(|m| m.content.text_content().len()).sum();
-        let est_tokens = total_chars / CHARS_PER_TOKEN;
-        if est_tokens <= self.max_context_tokens || msgs.len() <= self.keep_recent {
-            return HookOutcome::Continue;
-        }
+        let est_tokens = {
+            let msgs = state.messages_for_provider();
+            let total_chars: usize = msgs.iter().map(|m| m.content.text_length()).sum();
+            let est = total_chars / CHARS_PER_TOKEN;
+            if est <= self.max_context_tokens || msgs.len() <= self.keep_recent {
+                return HookOutcome::Continue;
+            }
+            est
+        };
+        let msgs = state.messages_for_provider().to_vec();
 
         let want = msgs.len() - self.keep_recent;
         let Some(split) = clean_boundary(&msgs, want) else {
@@ -134,6 +138,7 @@ impl WriteHook for CompactionHook {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "compaction".to_string());
         let folded = split;
+        let stats = state.stats.clone();
         state.push_event(SessionEvent::StateSnapshot {
             run_id,
             messages,
@@ -142,6 +147,7 @@ impl WriteHook for CompactionHook {
                 "context ~{est_tokens} tokens > {} max",
                 self.max_context_tokens
             ),
+            stats: Some(stats),
             at: Utc::now(),
         });
         tracing::info!(

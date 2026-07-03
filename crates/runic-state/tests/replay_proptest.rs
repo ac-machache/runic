@@ -56,6 +56,7 @@ fn event() -> impl Strategy<Value = SessionEvent> {
                 messages,
                 system_prompt: String::new(),
                 reason: "compact".into(),
+                stats: None,
                 at,
             }
         }),
@@ -98,7 +99,8 @@ proptest! {
     /// events, in order — nothing dropped, nothing reordered, nothing invented.
     #[test]
     fn no_snapshot_keeps_all_messages_in_order(events in prop::collection::vec(event_no_snapshot(), 0..16)) {
-        let got = state_from(&events).messages_for_provider();
+        let state = state_from(&events);
+        let got = state.messages_for_provider();
         let expected: Vec<String> = events
             .iter()
             .filter_map(|e| match e {
@@ -117,7 +119,8 @@ proptest! {
     /// an independent path here (find last snapshot, count after).
     #[test]
     fn last_snapshot_truncates_then_appends(events in prop::collection::vec(event(), 0..16)) {
-        let got = state_from(&events).messages_for_provider();
+        let state = state_from(&events);
+        let got = state.messages_for_provider();
         let expected_len = match events.iter().rposition(|e| matches!(e, SessionEvent::StateSnapshot { .. })) {
             Some(i) => {
                 let snap_len = match &events[i] {
@@ -138,10 +141,12 @@ proptest! {
     /// Replay is deterministic — folding the same log twice yields the same list.
     #[test]
     fn replay_is_deterministic(events in prop::collection::vec(event(), 0..16)) {
-        let a = state_from(&events).messages_for_provider();
-        let b = state_from(&events).messages_for_provider();
+        let state_a = state_from(&events);
+        let state_b = state_from(&events);
+        let a = state_a.messages_for_provider();
+        let b = state_b.messages_for_provider();
         prop_assert_eq!(a.len(), b.len());
-        for (x, y) in a.iter().zip(&b) {
+        for (x, y) in a.iter().zip(b) {
             prop_assert_eq!(x.content.text_content(), y.content.text_content());
         }
     }

@@ -51,6 +51,7 @@ use crate::wire::WireEvent;
         threads::ThreadEventsResponse,
         threads::StoredEventEnvelope,
         threads::ThreadStateResponse,
+        threads::ThreadStatsView,
         artifacts::UploadedArtifact,
         artifacts::ArtifactMeta,
         transcribe::TranscriptResponse,

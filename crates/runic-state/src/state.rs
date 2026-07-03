@@ -1,16 +1,9 @@
 //! `AgentState` — the agent's working state for one conversation.
-//!
-//! The better state, synthesized:
-//! - **event-sourced log** (`events: Vec<SessionEvent>`) — runic's design;
-//!   replayable, auditable, non-destructive compaction.
-//! - **structured messages** — `runic_types::Message` (`Vec<ContentBlock>`),
-//!   the model copied from OpenFang.
-//! - **session metadata** — `label`, `context_window_tokens` (OpenFang).
-//! - keyed by **`(user_id, session_id)`**.
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use runic_types::Message;
@@ -19,20 +12,36 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::event::SessionEvent;
 
-/// Capacity of the broadcast channel that fans `SessionEvent`s out to
-/// subscribers (persisters, observers). A subscriber that falls this far
-/// behind gets `RecvError::Lagged(n)`.
 pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 
-/// Generate a fresh run id.
 pub fn new_run_id() -> String {
     format!("r-{}", uuid::Uuid::new_v4().simple())
 }
 
-// ─── Build-time runtime context (typed handles) ──────────────────────────────
+#[derive(Debug, Clone)]
+pub struct PersistSink {
+    tx: mpsc::UnboundedSender<SessionEvent>,
+    enqueued: Arc<AtomicU64>,
+}
 
-/// A small typed bag for build-time, per-thread handles (a DB pool, an
-/// approver, …) keyed by `TypeId`. Distinct from the per-run `config` map.
+impl PersistSink {
+    pub fn new(tx: mpsc::UnboundedSender<SessionEvent>) -> Self {
+        Self {
+            tx,
+            enqueued: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn send(&self, ev: SessionEvent) {
+        self.enqueued.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(ev);
+    }
+
+    pub fn enqueued(&self) -> Arc<AtomicU64> {
+        self.enqueued.clone()
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct RunTimeContext {
     ctx: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
@@ -66,52 +75,39 @@ impl std::fmt::Debug for RunTimeContext {
     }
 }
 
-// ─── Agent state ─────────────────────────────────────────────────────────────
-
-/// The agent's state for one `(user_id, session_id)` conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentState {
-    /// Owning user (the tenant axis).
     pub user_id: String,
-    /// This conversation's id.
+
     pub session_id: String,
-    /// Optional human-readable label (OpenFang).
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// The base system prompt the agent was built with.
+
     pub system_prompt: String,
-    /// Estimated tokens this conversation occupies in the context window
-    /// (OpenFang) — a cheap budget signal for compaction.
+
     #[serde(default)]
-    pub context_window_tokens: u64,
-    /// The event log — the source of truth. Messages are derived from it.
+    pub stats: crate::stats::ThreadStats,
+
     pub events: Vec<SessionEvent>,
 
-    /// Build-time typed handles (DB pool, approver, …). Not persisted.
     #[serde(skip, default)]
     pub runtime: RunTimeContext,
 
-    /// Per-run open config map (user_id, allow_web_search, …). Set fresh each
-    /// run and overwritten, so it never leaks across runs. Not persisted.
     #[serde(skip, default)]
     pub config: serde_json::Map<String, serde_json::Value>,
 
-    /// Broadcast sender; `push_event` fans every event out to subscribers in
-    /// addition to appending. `None` on a deserialized (replay) state.
     #[serde(skip, default)]
     events_tx: Option<broadcast::Sender<SessionEvent>>,
 
-    // Lossless sink for the durable persister, fanned alongside `events_tx`.
     #[serde(skip, default)]
-    persist_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+    persist_tx: Option<PersistSink>,
 
-    // Folded from `events` in `push_event` so the turn build skips re-scanning.
     #[serde(skip, default)]
     messages: Vec<Message>,
 }
 
 impl AgentState {
-    /// Fresh state for `(user_id, session_id)`.
     pub fn new(
         user_id: impl Into<String>,
         session_id: impl Into<String>,
@@ -122,7 +118,7 @@ impl AgentState {
             session_id: session_id.into(),
             label: None,
             system_prompt: system_prompt.into(),
-            context_window_tokens: 0,
+            stats: crate::stats::ThreadStats::default(),
             events: Vec::new(),
             runtime: RunTimeContext::default(),
             config: serde_json::Map::new(),
@@ -132,49 +128,55 @@ impl AgentState {
         }
     }
 
-    /// Read a per-run config value.
     pub fn config(&self, key: &str) -> Option<&serde_json::Value> {
         self.config.get(key)
     }
 
-    /// Install a broadcast sender so `push_event` fans out to subscribers.
     pub fn set_events_tx(&mut self, tx: broadcast::Sender<SessionEvent>) {
         self.events_tx = Some(tx);
     }
 
-    /// Install the lossless persister sink — `push_event` fans every event here
-    /// in addition to the (lossy) broadcast.
-    pub fn set_persist_tx(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
-        self.persist_tx = Some(tx);
+    pub fn set_persist_tx(&mut self, sink: PersistSink) {
+        self.persist_tx = Some(sink);
     }
 
-    /// Subscribe to future events (None if no channel is installed).
     pub fn subscribe_events(&self) -> Option<broadcast::Receiver<SessionEvent>> {
         self.events_tx.as_ref().map(|tx| tx.subscribe())
     }
 
-    /// Append an event, broadcasting it first. A full channel drops the
-    /// slowest subscriber's oldest event (it sees `Lagged` on next recv).
     pub fn push_event(&mut self, ev: SessionEvent) {
         if let Some(tx) = &self.events_tx {
             let _ = tx.send(ev.clone());
         }
-        if let Some(tx) = &self.persist_tx {
-            let _ = tx.send(ev.clone());
+        if let Some(sink) = &self.persist_tx {
+            sink.send(ev.clone());
         }
+        self.stats.fold(&ev);
         match &ev {
             SessionEvent::Message { msg, .. } => self.messages.push(msg.clone()),
-            SessionEvent::StateSnapshot { messages, .. } => self.messages = messages.clone(),
+            SessionEvent::StateSnapshot {
+                messages, run_id, ..
+            } => {
+                self.messages = messages.clone();
+                // Pre-snapshot events leave RAM; the store keeps the full log.
+                // The in-flight run's events stay so run bookkeeping works.
+                let cut = self.events.iter().rposition(
+                    |e| matches!(e, SessionEvent::RunStart { run_id: r, .. } if r == run_id),
+                );
+                match cut {
+                    Some(i) => {
+                        self.events.drain(..i);
+                    }
+                    None => self.events.clear(),
+                }
+            }
             _ => {}
         }
         self.events.push(ev);
     }
 
-    /// The provider-facing message list — `Message` events appended,
-    /// `StateSnapshot` replacing history (compaction). Maintained in
-    /// `push_event`, so this is a clone, not a re-fold.
-    pub fn messages_for_provider(&self) -> Vec<Message> {
-        self.messages.clone()
+    pub fn messages_for_provider(&self) -> &[Message] {
+        &self.messages
     }
 
     /// Grouped view of runs, derived from the log. Cheap, on demand.
@@ -237,10 +239,8 @@ impl AgentState {
 
     /// Most recent assistant text in the log (e.g. the final answer).
     pub fn last_assistant_text(&self) -> Option<String> {
-        for ev in self.events.iter().rev() {
-            if let SessionEvent::Message { msg, .. } = ev
-                && msg.role == runic_types::Role::Assistant
-            {
+        for msg in self.messages.iter().rev() {
+            if msg.role == runic_types::Role::Assistant {
                 let t = msg.content.text_content();
                 if !t.is_empty() {
                     return Some(t);
@@ -324,6 +324,7 @@ mod tests {
             messages: vec![Message::user("compacted")],
             system_prompt: "sys".into(),
             reason: "compaction".into(),
+            stats: None,
             at: Utc::now(),
         });
         state.push_event(message("after", false));

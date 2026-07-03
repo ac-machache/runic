@@ -141,7 +141,7 @@ async fn before_tool_substitution_skips_real_execution() {
         calls.lock().unwrap().is_empty(),
         "substituted call must not execute the real tool"
     );
-    let contents = tool_result_contents(&agent.state().messages_for_provider());
+    let contents = tool_result_contents(agent.state().messages_for_provider());
     assert!(
         contents.iter().any(|c| c == "from-hook"),
         "the substituted result is what reaches history: {contents:?}"
@@ -192,7 +192,7 @@ async fn write_hook_cancel_at_before_tool_substitutes_an_error_and_continues() {
 
     assert_eq!(outcome.total_turns, 2, "the run continued past the cancel");
     assert!(calls.lock().unwrap().is_empty(), "cancelled tool never ran");
-    let contents = tool_result_contents(&agent.state().messages_for_provider());
+    let contents = tool_result_contents(agent.state().messages_for_provider());
     assert!(
         contents.iter().any(|c| c.contains("blocked by policy")),
         "cancel reason becomes the model-facing error result: {contents:?}"

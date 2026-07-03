@@ -132,6 +132,8 @@ macro_rules! session_store_contract_suite {
             reconstruct_multiple_runs_in_order,
             reconstruct_tool_call_and_result_messages,
             snapshot_replaces_messages_on_replay,
+            read_tail_starts_at_the_last_snapshot,
+            read_tail_without_a_snapshot_reads_everything,
         );
     };
 }

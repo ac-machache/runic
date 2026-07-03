@@ -82,7 +82,7 @@ proptest! {
             prop_assert!(agent.state().current_run().is_none());
 
             // Persistence-summary safety holds for every executed tool turn.
-            let persisted = tool_result_contents(&agent.state().messages_for_provider());
+            let persisted = tool_result_contents(agent.state().messages_for_provider());
             prop_assert!(!persisted.iter().any(|c| c.contains("SECRET")));
             if tool_turns > 0 {
                 prop_assert!(persisted.iter().any(|c| c.contains("omitted from log")));

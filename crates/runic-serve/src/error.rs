@@ -35,6 +35,9 @@ pub enum ServeError {
     #[error("artifact {id:?} not found on thread {thread:?}")]
     ArtifactNotFound { id: String, thread: String },
 
+    #[error("persistence degraded on thread {thread:?} ({backlog} events unflushed)")]
+    PersistenceDegraded { thread: String, backlog: u64 },
+
     #[error("session store error: {0}")]
     Store(String),
 
@@ -68,6 +71,7 @@ impl IntoResponse for ServeError {
             | Self::AgentNotFound { .. }
             | Self::ArtifactNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
             Self::NoRunInFlight { .. } => (StatusCode::CONFLICT, "conflict"),
+            Self::PersistenceDegraded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "degraded"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
             Self::Agent(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
@@ -80,7 +84,7 @@ impl IntoResponse for ServeError {
             Self::Store(_) | Self::Agent(_) | Self::Internal(_) => {
                 tracing::error!(kind, error = %self, "request failed")
             }
-            Self::Upstream(_) | Self::NotConfigured(_) => {
+            Self::Upstream(_) | Self::NotConfigured(_) | Self::PersistenceDegraded { .. } => {
                 tracing::warn!(kind, error = %self, "request failed")
             }
             Self::ThreadNotFound { .. }

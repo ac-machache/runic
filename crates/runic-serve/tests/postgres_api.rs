@@ -77,7 +77,7 @@ fn make_router(sessions: Arc<dyn SessionStore>, artifacts: Arc<dyn ArtifactStore
         session_store: sessions,
         artifact_store: artifacts,
         transcriber: None,
-        agents: single_agent(Arc::new(ScriptedFactory)),
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }

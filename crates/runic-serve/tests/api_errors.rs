@@ -119,7 +119,7 @@ fn crud_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -129,7 +129,7 @@ fn failing_store_router() -> Router {
         session_store: Arc::new(FailingSessionStore),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -139,7 +139,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -149,7 +149,7 @@ fn failing_agent_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(FailingAgentFactory)),
+        agents: single_agent("main", Arc::new(FailingAgentFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }

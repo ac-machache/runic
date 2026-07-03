@@ -61,7 +61,7 @@ fn crud_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -71,7 +71,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(ScriptedFactory)),
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }

@@ -45,10 +45,10 @@ pub mod routes;
 pub mod tenant;
 pub mod wire;
 
-pub use app::{AppState, ServeConfig, router, single_agent};
+pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
 pub use error::ServeError;
 pub use factory::{AgentFactory, BoxedAgentFactory};
 pub use human::{HumanChannel, HumanHub};
-pub use pool::{DEFAULT_AGENT, ThreadPool};
+pub use pool::ThreadPool;
 pub use tenant::Tenant;
 pub use wire::WireEvent;

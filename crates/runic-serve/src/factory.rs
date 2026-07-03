@@ -20,6 +20,10 @@ pub trait AgentFactory: Send + Sync {
         None
     }
 
+    fn stateless(&self) -> bool {
+        false
+    }
+
     async fn build_run_context(
         &self,
         _tenant: &str,

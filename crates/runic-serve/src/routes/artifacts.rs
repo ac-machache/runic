@@ -168,3 +168,36 @@ pub async fn list_artifacts(
     let arts = state.artifact_store.list(&tenant, &thread_id).await?;
     Ok(Json(arts.into_iter().map(ArtifactMeta::from).collect()))
 }
+
+/// `GET /threads/:id/artifacts/:artifact_id` — the raw bytes, served with the
+/// stored media type. The artifact must belong to `(tenant, thread)`.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/artifacts/{artifact_id}",
+    tag = "artifacts",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("artifact_id" = String, Path, description = "Artifact id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact bytes", content_type = "application/octet-stream"),
+        (status = 404, description = "Unknown thread or artifact", body = ErrorBody)
+    )
+)]
+pub async fn download_artifact(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path((thread_id, artifact_id)): Path<(String, String)>,
+) -> Result<impl axum::response::IntoResponse, ServeError> {
+    require_thread(&state, &tenant, &thread_id).await?;
+    let arts = state.artifact_store.list(&tenant, &thread_id).await?;
+    let Some(meta) = arts.into_iter().find(|a| a.id == artifact_id) else {
+        return Err(ServeError::ArtifactNotFound {
+            id: artifact_id,
+            thread: thread_id,
+        });
+    };
+    let bytes = state.artifact_store.get(&meta.id).await?;
+    Ok(([(header::CONTENT_TYPE, meta.mime_type)], bytes))
+}

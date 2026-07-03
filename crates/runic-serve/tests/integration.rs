@@ -37,7 +37,7 @@ fn make_router() -> axum::Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -88,7 +88,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
         session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(ScriptedFactory)),
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -131,7 +131,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> axum::Router
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -510,7 +510,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: artifact_store.clone(),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     });
     create_thread(&app, "with-artifact").await;
@@ -558,7 +558,7 @@ async fn tenant_header_isolates_thread_listings() {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     });
 
@@ -1121,10 +1121,13 @@ fn resolving_setup() -> (
         session_store: session.clone(),
         artifact_store: artifacts.clone(),
         transcriber: None,
-        agents: single_agent(Arc::new(ResolvingFactory {
-            store: artifacts.clone(),
-            last: last.clone(),
-        })),
+        agents: single_agent(
+            "main",
+            Arc::new(ResolvingFactory {
+                store: artifacts.clone(),
+                last: last.clone(),
+            }),
+        ),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, session, artifacts, last)

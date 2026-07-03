@@ -28,8 +28,6 @@ use crate::factory::BoxedAgentFactory;
 pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-pub const DEFAULT_AGENT: &str = "default";
-
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ThreadKey {
     tenant: String,
@@ -60,6 +58,10 @@ impl ThreadPool {
         factories: HashMap<String, BoxedAgentFactory>,
         session_store: Arc<dyn SessionStore>,
     ) -> Self {
+        assert!(
+            !factories.is_empty(),
+            "runic-serve needs at least one agent registered"
+        );
         Self {
             agents: RwLock::new(HashMap::new()),
             cancel_tokens: RwLock::new(HashMap::new()),
@@ -117,6 +119,24 @@ impl ThreadPool {
             })
     }
 
+    pub fn resolve_agent(&self, requested: Option<&str>) -> Result<String, ServeError> {
+        match requested {
+            Some(name) => {
+                self.factory(name)?;
+                Ok(name.to_string())
+            }
+            None if self.factories.len() == 1 => Ok(self.factories.keys().next().unwrap().clone()),
+            None => {
+                let mut names: Vec<_> = self.factories.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                Err(ServeError::BadRequest(format!(
+                    "this server hosts several agents; set \"agent\" to one of: {}",
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
     pub fn agent_names(&self) -> Vec<(&str, Option<&str>)> {
         let mut names: Vec<_> = self
             .factories
@@ -135,6 +155,17 @@ impl ThreadPool {
         agent_name: &str,
     ) -> Result<Arc<Mutex<Agent>>, ServeError> {
         let factory = self.factory(agent_name)?.clone();
+
+        // Stateless agents are never warmed, persisted, or replayed —
+        // reconstructed from scratch on every run.
+        if factory.stateless() {
+            let mut agent = factory.build(tenant, thread_id).await;
+            let (tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+            agent.state_mut().set_events_tx(tx);
+            tracing::debug!(%tenant, %thread_id, agent = %agent_name, "stateless agent built");
+            return Ok(Arc::new(Mutex::new(agent)));
+        }
+
         let key = ThreadKey {
             tenant: tenant.to_string(),
             thread_id: thread_id.to_string(),
@@ -399,7 +430,7 @@ mod tests {
 
     fn pool_with_ttl(ttl: Duration) -> ThreadPool {
         let factories = HashMap::from([(
-            DEFAULT_AGENT.to_string(),
+            "solo".to_string(),
             Arc::new(TestFactory) as BoxedAgentFactory,
         )]);
         ThreadPool::new(factories, Arc::new(MemorySessionStore::new())).with_idle_ttl(ttl)
@@ -408,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_entry_is_not_evicted() {
         let pool = pool_with_ttl(Duration::from_secs(3600));
-        pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
+        pool.get_or_build("t", "s", "solo").await.unwrap();
         pool.evict_idle().await;
         assert_eq!(pool.len().await, 1);
     }
@@ -416,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn idle_past_ttl_entry_is_evicted() {
         let pool = pool_with_ttl(Duration::from_millis(20));
-        pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
+        pool.get_or_build("t", "s", "solo").await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         pool.evict_idle().await;
         assert_eq!(pool.len().await, 0);
@@ -425,7 +456,7 @@ mod tests {
     #[tokio::test]
     async fn locked_entry_is_not_evicted_even_if_idle() {
         let pool = pool_with_ttl(Duration::from_millis(20));
-        let agent = pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
+        let agent = pool.get_or_build("t", "s", "solo").await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
 
         let guard = agent.lock().await;
@@ -435,6 +466,64 @@ mod tests {
 
         pool.evict_idle().await;
         assert_eq!(pool.len().await, 0, "released agent is swept next pass");
+    }
+
+    struct StatelessTestFactory;
+
+    #[async_trait]
+    impl AgentFactory for StatelessTestFactory {
+        async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+            Agent::builder(Arc::new(TestProvider), tenant, session_id)
+                .system_prompt("test")
+                .build()
+        }
+
+        fn stateless(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_agent_is_never_pooled() {
+        let factories = HashMap::from([(
+            "flash".to_string(),
+            Arc::new(StatelessTestFactory) as BoxedAgentFactory,
+        )]);
+        let pool = ThreadPool::new(factories, Arc::new(MemorySessionStore::new()));
+
+        let a = pool.get_or_build("t", "s", "flash").await.unwrap();
+        let b = pool.get_or_build("t", "s", "flash").await.unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(pool.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_picks_the_only_agent_or_demands_a_name() {
+        let pool = pool_with_ttl(Duration::from_secs(3600));
+        assert_eq!(pool.resolve_agent(None).unwrap(), "solo");
+        assert_eq!(pool.resolve_agent(Some("solo")).unwrap(), "solo");
+        assert!(matches!(
+            pool.resolve_agent(Some("ghost")),
+            Err(ServeError::AgentNotFound { .. })
+        ));
+
+        let factories = HashMap::from([
+            (
+                "coral".to_string(),
+                Arc::new(TestFactory) as BoxedAgentFactory,
+            ),
+            (
+                "scout".to_string(),
+                Arc::new(TestFactory) as BoxedAgentFactory,
+            ),
+        ]);
+        let pool = ThreadPool::new(factories, Arc::new(MemorySessionStore::new()));
+        match pool.resolve_agent(None) {
+            Err(ServeError::BadRequest(message)) => {
+                assert!(message.contains("coral") && message.contains("scout"));
+            }
+            other => panic!("expected bad request, got {other:?}"),
+        }
     }
 
     #[tokio::test]

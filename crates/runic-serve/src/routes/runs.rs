@@ -32,7 +32,6 @@ use runic_types::{ContentBlock, Message, MessageContent};
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
 use crate::human::HumanChannel;
-use crate::pool::DEFAULT_AGENT;
 use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 use crate::tenant::Tenant;
 use crate::wire::{WireEvent, from_agent_event, from_session_event};
@@ -234,7 +233,7 @@ pub async fn create_and_stream_run(
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
     // Extract context before `into_message` consumes the request, and validate
     // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
-    let agent_name = req.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
+    let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     // Inline media → stored refs; client refs validated. State only sees refs.
@@ -364,7 +363,7 @@ pub async fn wait_run(
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
-    let agent_name = req.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
+    let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;

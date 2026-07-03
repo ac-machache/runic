@@ -68,6 +68,23 @@ impl AgentFactory for EchoFactory {
     }
 }
 
+struct StatelessEchoFactory {
+    provider: Arc<EchoProvider>,
+}
+
+#[async_trait]
+impl AgentFactory for StatelessEchoFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(self.provider.clone(), tenant, session_id)
+            .system_prompt("test")
+            .build()
+    }
+
+    fn stateless(&self) -> bool {
+        true
+    }
+}
+
 struct Fixture {
     app: Router,
     coral: Arc<EchoProvider>,
@@ -192,10 +209,94 @@ async fn unknown_agent_is_404() {
 }
 
 #[tokio::test]
-async fn missing_agent_without_default_is_404() {
+async fn missing_agent_on_a_multi_agent_server_is_400_listing_the_roster() {
     let f = fixture();
     let resp = f.app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "bad_request");
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("coral") && message.contains("scout"));
+}
+
+#[tokio::test]
+async fn missing_agent_on_a_single_agent_server_routes_to_it() {
+    let coral = EchoProvider::new("from-coral");
+    let app = router(ServeConfig {
+        session_store: Arc::new(runic_substrate::MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: runic_serve::single_agent(
+            "coral",
+            Arc::new(EchoFactory {
+                provider: coral,
+                description: "support agent",
+            }),
+        ),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+    let resp = app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["text"], "from-coral");
+}
+
+#[test]
+#[should_panic(expected = "at least one agent")]
+fn an_empty_roster_refuses_to_serve() {
+    runic_serve::ThreadPool::new(
+        HashMap::new(),
+        Arc::new(runic_substrate::MemorySessionStore::new()),
+    );
+}
+
+#[tokio::test]
+async fn stateless_agent_is_rebuilt_every_run_and_persists_nothing() {
+    let provider = EchoProvider::new("flash-reply");
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: runic_serve::single_agent(
+            "flash",
+            Arc::new(StatelessEchoFactory {
+                provider: provider.clone(),
+            }),
+        ),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+
+    let first = app
+        .clone()
+        .oneshot(wait_request("t1", None, "remember me"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .clone()
+        .oneshot(wait_request("t1", None, "what did i say?"))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let seen = provider.last_request();
+    let all_text: String = seen
+        .messages
+        .iter()
+        .map(|m| m.content.text_content())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(all_text.contains("what did i say?"));
+    assert!(!all_text.contains("remember me"));
+    assert!(!all_text.contains("flash-reply"));
+
+    let persisted = store
+        .read(TENANT, "t1")
+        .await
+        .map(|events| events.len())
+        .unwrap_or(0);
+    assert_eq!(persisted, 0);
 }
 
 #[tokio::test]

@@ -27,7 +27,7 @@ fn crud_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -226,6 +226,73 @@ async fn wrong_tenant_cannot_list_foreign_thread() {
     create_thread(&app, "alice", "shared-id").await;
     let resp = app
         .oneshot(get("/threads/shared-id/artifacts", "bob"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+async fn upload_ok(app: &Router, thread: &str, tenant: &str, bytes: &[u8]) -> String {
+    let resp = app
+        .clone()
+        .oneshot(upload(thread, tenant, Some("image/png"), None, bytes))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    body_json(resp).await["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn download_returns_the_bytes_with_the_stored_type() {
+    let app = crud_router();
+    create_thread(&app, TENANT, "t1").await;
+    let id = upload_ok(&app, "t1", TENANT, b"\x89PNG fake image bytes").await;
+
+    let resp = app
+        .oneshot(get(&format!("/threads/t1/artifacts/{id}"), TENANT))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["content-type"], "image/png");
+    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"\x89PNG fake image bytes");
+}
+
+#[tokio::test]
+async fn download_unknown_artifact_is_404() {
+    let app = crud_router();
+    create_thread(&app, TENANT, "t1").await;
+    let resp = app
+        .oneshot(get("/threads/t1/artifacts/ghost", TENANT))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(resp).await["error"], "not_found");
+}
+
+#[tokio::test]
+async fn download_from_another_thread_is_404() {
+    let app = crud_router();
+    create_thread(&app, TENANT, "t1").await;
+    create_thread(&app, TENANT, "t2").await;
+    let id = upload_ok(&app, "t1", TENANT, b"secret").await;
+
+    let resp = app
+        .oneshot(get(&format!("/threads/t2/artifacts/{id}"), TENANT))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn wrong_tenant_cannot_download_foreign_artifact() {
+    let app = crud_router();
+    create_thread(&app, "alice", "t1").await;
+    let id = upload_ok(&app, "t1", "alice", b"secret").await;
+
+    let resp = app
+        .oneshot(get(&format!("/threads/t1/artifacts/{id}"), "bob"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

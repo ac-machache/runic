@@ -220,7 +220,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(ScriptedFactory)),
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -231,7 +231,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: artifacts.clone(),
         transcriber: None,
-        agents: single_agent(Arc::new(ScriptedFactory)),
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, artifacts)
@@ -242,7 +242,7 @@ fn failing_run_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(FailingFactory)),
+        agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -252,7 +252,7 @@ fn asking_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(AskingFactory)),
+        agents: single_agent("main", Arc::new(AskingFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -264,10 +264,13 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agents: single_agent(Arc::new(GatedFactory {
-            entered: entered.clone(),
-            gate: gate.clone(),
-        })),
+        agents: single_agent(
+            "main",
+            Arc::new(GatedFactory {
+                entered: entered.clone(),
+                gate: gate.clone(),
+            }),
+        ),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, entered, gate)

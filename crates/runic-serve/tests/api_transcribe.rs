@@ -44,7 +44,7 @@ fn transcribe_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: Some(Arc::new(EchoFilenameTranscriber)),
-        agents: single_agent(Arc::new(PanicFactory)),
+        agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }

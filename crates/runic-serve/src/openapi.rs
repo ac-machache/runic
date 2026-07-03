@@ -1,8 +1,9 @@
 //! OpenAPI spec aggregation and the `GET /openapi.json` handler.
 
 use axum::Json;
+use axum::extract::OriginalUri;
 use utoipa::OpenApi;
-use utoipa::openapi::OpenApi as OpenApiSpec;
+use utoipa::openapi::{OpenApi as OpenApiSpec, Server};
 
 use crate::error::ErrorBody;
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
@@ -29,6 +30,7 @@ use crate::wire::WireEvent;
         threads::thread_state,
         artifacts::upload_artifact,
         artifacts::list_artifacts,
+        artifacts::download_artifact,
         transcribe::transcribe,
         runs::create_and_stream_run,
         runs::wait_run,
@@ -69,6 +71,12 @@ use crate::wire::WireEvent;
 )]
 pub struct ApiDoc;
 
-pub async fn openapi_json() -> Json<OpenApiSpec> {
-    Json(ApiDoc::openapi())
+pub async fn openapi_json(OriginalUri(uri): OriginalUri) -> Json<OpenApiSpec> {
+    let mut spec = ApiDoc::openapi();
+    if let Some(base) = uri.path().strip_suffix("/openapi.json")
+        && !base.is_empty()
+    {
+        spec.servers = Some(vec![Server::new(base)]);
+    }
+    Json(spec)
 }

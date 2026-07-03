@@ -24,7 +24,7 @@ use utoipa::OpenApi;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
-use crate::pool::{DEFAULT_AGENT, ThreadPool};
+use crate::pool::ThreadPool;
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
@@ -55,14 +55,14 @@ pub struct ServeConfig {
     pub human_hub: Arc<HumanHub>,
 }
 
-pub fn single_agent(factory: BoxedAgentFactory) -> HashMap<String, BoxedAgentFactory> {
-    HashMap::from([(DEFAULT_AGENT.to_string(), factory)])
+pub fn single_agent(
+    name: impl Into<String>,
+    factory: BoxedAgentFactory,
+) -> HashMap<String, BoxedAgentFactory> {
+    HashMap::from([(name.into(), factory)])
 }
 
-/// Build the axum `Router` with every endpoint mounted. The binary owns the
-/// network layer (`axum::serve` / TLS / shutdown); this crate just produces the
-/// route surface.
-pub fn router(config: ServeConfig) -> Router {
+pub fn bare_router(config: ServeConfig) -> Router {
     let pool = Arc::new(ThreadPool::new(config.agents, config.session_store.clone()));
     if tokio::runtime::Handle::try_current().is_ok() {
         pool.spawn_eviction_sweep();
@@ -98,6 +98,10 @@ pub fn router(config: ServeConfig) -> Router {
                 .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BYTES)),
         )
         .route(
+            "/threads/{thread_id}/artifacts/{artifact_id}",
+            get(artifacts::download_artifact),
+        )
+        .route(
             "/transcribe",
             post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
@@ -119,40 +123,6 @@ pub fn router(config: ServeConfig) -> Router {
             "/threads/{thread_id}/asks/{ask_id}",
             post(runs::submit_answer),
         )
-        .layer(CorsLayer::permissive())
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-                            let request_id = request
-                                .extensions()
-                                .get::<RequestId>()
-                                .and_then(|id| id.header_value().to_str().ok())
-                                .unwrap_or("-")
-                                .to_string();
-                            tracing::info_span!(
-                                "http_request",
-                                method = %request.method(),
-                                path = %request.uri().path(),
-                                request_id = %request_id,
-                            )
-                        })
-                        .on_response(
-                            |response: &axum::response::Response,
-                             latency: Duration,
-                             _span: &tracing::Span| {
-                                tracing::info!(
-                                    status = %response.status().as_u16(),
-                                    latency_ms = %latency.as_millis(),
-                                    "request completed"
-                                );
-                            },
-                        ),
-                )
-                .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
-        )
         .with_state(state);
 
     // Swagger UI reads the spec from an internal path so it doesn't collide with
@@ -164,4 +134,75 @@ pub fn router(config: ServeConfig) -> Router {
     );
 
     router
+}
+
+pub fn router(config: ServeConfig) -> Router {
+    bare_router(config).layer(CorsLayer::permissive()).layer(
+        ServiceBuilder::new()
+            .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                        let request_id = request
+                            .extensions()
+                            .get::<RequestId>()
+                            .and_then(|id| id.header_value().to_str().ok())
+                            .unwrap_or("-")
+                            .to_string();
+                        tracing::info_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                            request_id = %request_id,
+                        )
+                    })
+                    .on_response(
+                        |response: &axum::response::Response,
+                         latency: Duration,
+                         _span: &tracing::Span| {
+                            tracing::info!(
+                                status = %response.status().as_u16(),
+                                latency_ms = %latency.as_millis(),
+                                "request completed"
+                            );
+                        },
+                    ),
+            )
+            .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
+    )
+}
+
+pub async fn serve(
+    config: ServeConfig,
+    addr: impl tokio::net::ToSocketAddrs,
+) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!(addr = %listener.local_addr()?, "runic-serve listening");
+    axum::serve(listener, router(config))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl-c handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }

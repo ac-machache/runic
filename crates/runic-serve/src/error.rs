@@ -32,6 +32,9 @@ pub enum ServeError {
     #[error("agent {name:?} not found")]
     AgentNotFound { name: String },
 
+    #[error("artifact {id:?} not found on thread {thread:?}")]
+    ArtifactNotFound { id: String, thread: String },
+
     #[error("session store error: {0}")]
     Store(String),
 
@@ -60,9 +63,10 @@ impl From<runic_substrate::Error> for ServeError {
 impl IntoResponse for ServeError {
     fn into_response(self) -> Response {
         let (status, kind) = match &self {
-            Self::ThreadNotFound { .. } | Self::RunNotFound { .. } | Self::AgentNotFound { .. } => {
-                (StatusCode::NOT_FOUND, "not_found")
-            }
+            Self::ThreadNotFound { .. }
+            | Self::RunNotFound { .. }
+            | Self::AgentNotFound { .. }
+            | Self::ArtifactNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
             Self::NoRunInFlight { .. } => (StatusCode::CONFLICT, "conflict"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
@@ -82,6 +86,7 @@ impl IntoResponse for ServeError {
             Self::ThreadNotFound { .. }
             | Self::RunNotFound { .. }
             | Self::AgentNotFound { .. }
+            | Self::ArtifactNotFound { .. }
             | Self::NoRunInFlight { .. }
             | Self::BadRequest(_) => {}
         }

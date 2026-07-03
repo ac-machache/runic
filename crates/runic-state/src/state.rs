@@ -284,6 +284,7 @@ mod tests {
         let mut state = AgentState::new("u", "s", "sys");
         state.push_event(SessionEvent::RunStart {
             run_id: "r".into(),
+            agent: None,
             at: Utc::now(),
         });
         state.push_event(message("hello", true));
@@ -339,6 +340,7 @@ mod tests {
         for ev in [
             SessionEvent::RunStart {
                 run_id: "r".into(),
+                agent: None,
                 at: Utc::now(),
             },
             message("a", true),
@@ -368,6 +370,7 @@ mod tests {
         let mut state = AgentState::new("u", "s", "sys");
         state.push_event(SessionEvent::RunStart {
             run_id: "r1".into(),
+            agent: None,
             at: Utc::now(),
         });
         state.push_event(SessionEvent::RunEnd {
@@ -377,6 +380,7 @@ mod tests {
         });
         state.push_event(SessionEvent::RunStart {
             run_id: "r2".into(),
+            agent: None,
             at: Utc::now(),
         });
 

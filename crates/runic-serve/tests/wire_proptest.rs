@@ -42,7 +42,11 @@ fn agent_event() -> impl Strategy<Value = AgentEvent> {
 fn session_event() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
-        "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::RunStart { run_id, at }),
+        "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::RunStart {
+            run_id,
+            agent: None,
+            at
+        }),
         (
             "[a-z0-9-]{1,8}",
             "[a-z ]{0,20}".prop_map(Message::assistant)

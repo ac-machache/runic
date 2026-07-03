@@ -424,24 +424,27 @@ pub async fn thread_state(
     let label = meta.label;
     let event_count = meta.event_count;
 
-    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-    if let Ok(agent) = agent_arc.try_lock() {
-        let st = agent.state();
-        return Ok(Json(ThreadStateResponse {
-            thread_id,
-            tenant,
-            busy: false,
-            label,
-            system_prompt: Some(st.system_prompt.clone()),
-            messages: st.messages_for_provider(),
-            event_count,
-            run_count: Some(st.runs().len()),
-        }));
+    let warm = state.pool.warm_agents(&tenant, &thread_id).await;
+    let any_warm = !warm.is_empty();
+    for agent_arc in warm {
+        if let Ok(agent) = agent_arc.try_lock() {
+            let st = agent.state();
+            return Ok(Json(ThreadStateResponse {
+                thread_id,
+                tenant,
+                busy: false,
+                label,
+                system_prompt: Some(st.system_prompt.clone()),
+                messages: st.messages_for_provider(),
+                event_count,
+                run_count: Some(st.runs().len()),
+            }));
+        }
     }
 
-    // Busy (run in progress) — reconstruct messages from the store; the system
-    // prompt and run count aren't readable without the lock, so they're null
-    // (not a "" placeholder that looks like truth).
+    // Cold thread, or every warm agent is mid-run — reconstruct messages from
+    // the store; the system prompt and run count aren't readable without a
+    // lock, so they're null (not a "" placeholder that looks like truth).
     let messages =
         runic_substrate::replay_messages(state.session_store.as_ref(), &tenant, &thread_id)
             .await
@@ -449,7 +452,7 @@ pub async fn thread_state(
     Ok(Json(ThreadStateResponse {
         thread_id,
         tenant,
-        busy: true,
+        busy: any_warm,
         label,
         system_prompt: None,
         messages,

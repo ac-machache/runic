@@ -22,15 +22,19 @@ use runic_state::{EVENT_BROADCAST_CAPACITY, SessionEvent};
 use runic_substrate::SessionStore;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+use crate::error::ServeError;
 use crate::factory::BoxedAgentFactory;
 
 pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+pub const DEFAULT_AGENT: &str = "default";
+
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct ThreadKey {
     tenant: String,
     thread_id: String,
+    agent: String,
 }
 
 struct WarmEntry {
@@ -39,24 +43,27 @@ struct WarmEntry {
 }
 
 pub struct ThreadPool {
-    /// One slot per active (tenant, thread). `run_message_with` takes
+    /// One slot per active (tenant, thread, agent). `run_message_with` takes
     /// `&mut self`, so the handler locks the Mutex for the duration of a run;
     /// the outer RwLock lets warm-thread reads run without contending on
     /// first-insert.
     agents: RwLock<HashMap<ThreadKey, WarmEntry>>,
-    cancel_tokens: RwLock<HashMap<ThreadKey, CancelToken>>,
-    factory: BoxedAgentFactory,
+    cancel_tokens: RwLock<HashMap<(String, String), CancelToken>>,
+    factories: HashMap<String, BoxedAgentFactory>,
     session_store: Arc<dyn SessionStore>,
     started_at: Instant,
     idle_ttl: Duration,
 }
 
 impl ThreadPool {
-    pub fn new(factory: BoxedAgentFactory, session_store: Arc<dyn SessionStore>) -> Self {
+    pub fn new(
+        factories: HashMap<String, BoxedAgentFactory>,
+        session_store: Arc<dyn SessionStore>,
+    ) -> Self {
         Self {
             agents: RwLock::new(HashMap::new()),
             cancel_tokens: RwLock::new(HashMap::new()),
-            factory,
+            factories,
             session_store,
             started_at: Instant::now(),
             idle_ttl: DEFAULT_IDLE_TTL,
@@ -102,18 +109,36 @@ impl ThreadPool {
         }
     }
 
-    /// The agent factory backing this pool. The runs handler uses it to build
-    /// a per-request [`runic_agent::RunContext`] via
-    /// [`crate::AgentFactory::build_run_context`].
-    pub fn factory(&self) -> &BoxedAgentFactory {
-        &self.factory
+    pub fn factory(&self, agent: &str) -> Result<&BoxedAgentFactory, ServeError> {
+        self.factories
+            .get(agent)
+            .ok_or_else(|| ServeError::AgentNotFound {
+                name: agent.to_string(),
+            })
     }
 
-    /// Get (or lazily build) the Agent for this thread.
-    pub async fn get_or_build(&self, tenant: &str, thread_id: &str) -> Arc<Mutex<Agent>> {
+    pub fn agent_names(&self) -> Vec<(&str, Option<&str>)> {
+        let mut names: Vec<_> = self
+            .factories
+            .iter()
+            .map(|(name, f)| (name.as_str(), f.describe()))
+            .collect();
+        names.sort_by_key(|(name, _)| *name);
+        names
+    }
+
+    /// Get (or lazily build) the Agent running this thread as `agent_name`.
+    pub async fn get_or_build(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        agent_name: &str,
+    ) -> Result<Arc<Mutex<Agent>>, ServeError> {
+        let factory = self.factory(agent_name)?.clone();
         let key = ThreadKey {
             tenant: tenant.to_string(),
             thread_id: thread_id.to_string(),
+            agent: agent_name.to_string(),
         };
 
         let now = self.now();
@@ -123,8 +148,8 @@ impl ThreadPool {
             let map = self.agents.read().await;
             if let Some(existing) = map.get(&key) {
                 existing.last_active.store(now, Ordering::Relaxed);
-                tracing::debug!(%tenant, %thread_id, "thread pool warm hit");
-                return existing.agent.clone();
+                tracing::debug!(%tenant, %thread_id, agent = %agent_name, "thread pool warm hit");
+                return Ok(existing.agent.clone());
             }
         }
 
@@ -133,21 +158,46 @@ impl ThreadPool {
         let mut map = self.agents.write().await;
         if let Some(existing) = map.get(&key) {
             existing.last_active.store(now, Ordering::Relaxed);
-            tracing::debug!(%tenant, %thread_id, "thread pool warm hit");
-            return existing.agent.clone();
+            tracing::debug!(%tenant, %thread_id, agent = %agent_name, "thread pool warm hit");
+            return Ok(existing.agent.clone());
         }
-        tracing::debug!(%tenant, %thread_id, "thread pool warm miss");
+        tracing::debug!(%tenant, %thread_id, agent = %agent_name, "thread pool warm miss");
 
         // thread_id == session_id, so persisted events land under
         // sessions/<tenant>/<thread_id>.
-        let mut agent = self.factory.build(tenant, thread_id).await;
+        let mut agent = factory.build(tenant, thread_id).await;
         if let Ok(Some(meta)) = self.session_store.session_meta(tenant, thread_id).await {
             agent.state_mut().label = meta.label;
         }
 
-        // Install both sinks BEFORE the first run so the opening RunStart is
-        // captured: a (lossy) broadcast for live UI subscribers and a lossless
-        // mpsc for the durable persister.
+        // Replay the thread's persisted conversation into the fresh state —
+        // only message-bearing events, so run bookkeeping stays clean. This is
+        // what lets a rebuilt (or different) agent continue the conversation.
+        match self.session_store.read(tenant, thread_id).await {
+            Ok(stored) => {
+                let mut replayed = 0usize;
+                for entry in stored {
+                    if matches!(
+                        entry.event,
+                        SessionEvent::Message { .. } | SessionEvent::StateSnapshot { .. }
+                    ) {
+                        agent.state_mut().push_event(entry.event);
+                        replayed += 1;
+                    }
+                }
+                if replayed > 0 {
+                    tracing::debug!(%tenant, %thread_id, replayed, "replayed history into cold agent");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%tenant, %thread_id, error = %e, "history replay failed — starting cold");
+            }
+        }
+
+        // Install both sinks AFTER replay and BEFORE the first run, so replayed
+        // events are never re-persisted but the opening RunStart is captured:
+        // a (lossy) broadcast for live UI subscribers and a lossless mpsc for
+        // the durable persister.
         let (tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         agent.state_mut().set_events_tx(tx);
         let (persist_tx, persist_rx) = mpsc::unbounded_channel();
@@ -167,37 +217,66 @@ impl ThreadPool {
                 last_active: AtomicU64::new(now),
             },
         );
-        tracing::info!(%tenant, %thread_id, "agent built");
-        arc
+        tracing::info!(%tenant, %thread_id, agent = %agent_name, "agent built");
+        Ok(arc)
     }
 
-    /// Drop the Agent for this thread — next request rebuilds it. Returns true
-    /// if there was one.
-    pub async fn evict(&self, tenant: &str, thread_id: &str) -> bool {
-        let key = ThreadKey {
-            tenant: tenant.to_string(),
-            thread_id: thread_id.to_string(),
+    pub async fn warm_agents(&self, tenant: &str, thread_id: &str) -> Vec<Arc<Mutex<Agent>>> {
+        let map = self.agents.read().await;
+        map.iter()
+            .filter(|(k, _)| k.tenant == tenant && k.thread_id == thread_id)
+            .map(|(_, e)| e.agent.clone())
+            .collect()
+    }
+
+    /// Find the warm agent (any name) whose in-flight run is `run_id`.
+    pub async fn find_live_run(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Option<Arc<Mutex<Agent>>> {
+        let candidates: Vec<Arc<Mutex<Agent>>> = {
+            let map = self.agents.read().await;
+            map.iter()
+                .filter(|(k, _)| k.tenant == tenant && k.thread_id == thread_id)
+                .map(|(_, e)| e.agent.clone())
+                .collect()
         };
-        let evicted = self.agents.write().await.remove(&key).is_some();
+        for candidate in candidates {
+            let is_live = candidate
+                .lock()
+                .await
+                .state()
+                .current_run()
+                .is_some_and(|run| run.id == run_id);
+            if is_live {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Drop every warm Agent for this thread — next request rebuilds. Returns
+    /// true if any existed.
+    pub async fn evict(&self, tenant: &str, thread_id: &str) -> bool {
+        let mut map = self.agents.write().await;
+        let before = map.len();
+        map.retain(|k, _| !(k.tenant == tenant && k.thread_id == thread_id));
+        let evicted = before != map.len();
         tracing::info!(%tenant, %thread_id, evicted, "thread pool evict");
         evicted
     }
 
     pub async fn begin_run(&self, tenant: &str, thread_id: &str) -> CancelToken {
-        let key = ThreadKey {
-            tenant: tenant.to_string(),
-            thread_id: thread_id.to_string(),
-        };
+        let key = (tenant.to_string(), thread_id.to_string());
         let token = CancelToken::new();
         self.cancel_tokens.write().await.insert(key, token.clone());
         token
     }
 
     pub async fn end_run(&self, tenant: &str, thread_id: &str, token: &CancelToken) {
-        let key = ThreadKey {
-            tenant: tenant.to_string(),
-            thread_id: thread_id.to_string(),
-        };
+        let key = (tenant.to_string(), thread_id.to_string());
         let mut tokens = self.cancel_tokens.write().await;
         if tokens.get(&key).is_some_and(|t| t.is_same(token)) {
             tokens.remove(&key);
@@ -205,10 +284,7 @@ impl ThreadPool {
     }
 
     pub async fn cancel_run(&self, tenant: &str, thread_id: &str) -> bool {
-        let key = ThreadKey {
-            tenant: tenant.to_string(),
-            thread_id: thread_id.to_string(),
-        };
+        let key = (tenant.to_string(), thread_id.to_string());
         let cancelled = match self.cancel_tokens.read().await.get(&key) {
             Some(token) => {
                 token.cancel();
@@ -220,18 +296,17 @@ impl ThreadPool {
         cancelled
     }
 
-    /// Mirror a persisted label into the warm agent, if this thread is loaded.
+    /// Mirror a persisted label into every warm agent on this thread.
     pub async fn set_warm_label(&self, tenant: &str, thread_id: &str, label: Option<String>) {
-        let key = ThreadKey {
-            tenant: tenant.to_string(),
-            thread_id: thread_id.to_string(),
-        };
-        let existing = {
+        let existing: Vec<Arc<Mutex<Agent>>> = {
             let map = self.agents.read().await;
-            map.get(&key).map(|entry| entry.agent.clone())
+            map.iter()
+                .filter(|(k, _)| k.tenant == tenant && k.thread_id == thread_id)
+                .map(|(_, e)| e.agent.clone())
+                .collect()
         };
-        if let Some(agent) = existing {
-            agent.lock().await.state_mut().label = label;
+        for agent in existing {
+            agent.lock().await.state_mut().label = label.clone();
         }
     }
 
@@ -323,14 +398,17 @@ mod tests {
     }
 
     fn pool_with_ttl(ttl: Duration) -> ThreadPool {
-        ThreadPool::new(Arc::new(TestFactory), Arc::new(MemorySessionStore::new()))
-            .with_idle_ttl(ttl)
+        let factories = HashMap::from([(
+            DEFAULT_AGENT.to_string(),
+            Arc::new(TestFactory) as BoxedAgentFactory,
+        )]);
+        ThreadPool::new(factories, Arc::new(MemorySessionStore::new())).with_idle_ttl(ttl)
     }
 
     #[tokio::test]
     async fn fresh_entry_is_not_evicted() {
         let pool = pool_with_ttl(Duration::from_secs(3600));
-        pool.get_or_build("t", "s").await;
+        pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
         pool.evict_idle().await;
         assert_eq!(pool.len().await, 1);
     }
@@ -338,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn idle_past_ttl_entry_is_evicted() {
         let pool = pool_with_ttl(Duration::from_millis(20));
-        pool.get_or_build("t", "s").await;
+        pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         pool.evict_idle().await;
         assert_eq!(pool.len().await, 0);
@@ -347,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn locked_entry_is_not_evicted_even_if_idle() {
         let pool = pool_with_ttl(Duration::from_millis(20));
-        let agent = pool.get_or_build("t", "s").await;
+        let agent = pool.get_or_build("t", "s", DEFAULT_AGENT).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
 
         let guard = agent.lock().await;
@@ -359,26 +437,45 @@ mod tests {
         assert_eq!(pool.len().await, 0, "released agent is swept next pass");
     }
 
+    #[tokio::test]
+    async fn unknown_agent_is_not_found() {
+        let pool = pool_with_ttl(Duration::from_secs(3600));
+        assert!(matches!(
+            pool.get_or_build("t", "s", "ghost").await,
+            Err(ServeError::AgentNotFound { .. })
+        ));
+    }
+
     #[test]
-    fn thread_key_equality_uses_both_fields() {
+    fn thread_key_equality_uses_all_fields() {
         let a = ThreadKey {
             tenant: "alice".into(),
             thread_id: "t1".into(),
+            agent: "default".into(),
         };
         let b = ThreadKey {
             tenant: "alice".into(),
             thread_id: "t1".into(),
+            agent: "default".into(),
         };
         let c = ThreadKey {
             tenant: "bob".into(),
             thread_id: "t1".into(),
+            agent: "default".into(),
         };
         let d = ThreadKey {
             tenant: "alice".into(),
             thread_id: "t2".into(),
+            agent: "default".into(),
+        };
+        let e = ThreadKey {
+            tenant: "alice".into(),
+            thread_id: "t1".into(),
+            agent: "coral".into(),
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
+        assert_ne!(a, e);
     }
 }

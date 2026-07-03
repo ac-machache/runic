@@ -1,27 +1,4 @@
-//! `runic-plugins` — bundle skills, subagents, and commands into discoverable
-//! plugins (folder-bundle model; deliberately **not** WASM).
-//!
-//! A "plugin" is a directory under `<root>/<name>/` that ships any combination
-//! of:
-//!   - `skills/<skill>/SKILL.md` — skills (progressive-disclosure)
-//!   - `agents/<agent>/AGENT.md` — delegatable subagents
-//!   - `commands/<cmd>/COMMAND.md` — slash-command prompt templates
-//!
-//! and, optionally, a `plugin.json` manifest declaring its `name` (the
-//! namespace its skills are loaded under), `version`, `description`, and an
-//! `enabled` kill-switch.
-//!
-//! ```text
-//! <root>/code-review/
-//!   plugin.json                       (optional)
-//!   skills/review-diff/SKILL.md
-//!   agents/reviewer/AGENT.md
-//!   commands/review/COMMAND.md
-//! ```
-//!
-//! Zero-code: drop a folder in and restart. The manager namespaces each
-//! plugin's skills by plugin name (`code-review:review-diff`) and aggregates
-//! every plugin's contributions for the app to wire.
+//! Folder-bundle plugins for skills, subagents, and slash commands.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -32,7 +9,6 @@ use runic_commands::{Command, CommandRegistry};
 use runic_skills::{SkillSet, source};
 use runic_subagent::{AgentDef, AgentRoster};
 
-/// Max chars for a plugin name (it becomes a skill namespace).
 const MAX_PLUGIN_NAME: usize = 64;
 
 /// Optional `plugin.json` manifest. Every field is optional; a missing or
@@ -76,11 +52,9 @@ fn read_manifest(dir: &Path) -> Manifest {
     }
 }
 
-/// One plugin's contributions. Skills are loaded lazily (async) at aggregation;
-/// agents/commands are loaded eagerly here.
+/// One plugin's contributions.
 #[derive(Debug, Clone)]
 pub struct Plugin {
-    /// The namespace its skills load under (manifest `name` or folder name).
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
@@ -117,7 +91,6 @@ impl Plugin {
     }
 }
 
-/// All discovered plugins (sorted by name, deterministic).
 #[derive(Debug, Clone, Default)]
 pub struct PluginManager {
     plugins: Vec<Plugin>,
@@ -211,7 +184,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // plugin "alpha": one skill + one agent + one command
         write(
             &root.join("alpha/skills/greet/SKILL.md"),
             "---\nname: greet\ndescription: greeting skill\n---\nSay hello.",

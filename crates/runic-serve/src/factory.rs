@@ -14,22 +14,12 @@ use runic_agent::{Agent, RunContext};
 
 #[async_trait]
 pub trait AgentFactory: Send + Sync {
-    /// Build a fresh Agent for `(tenant, session_id)`. The serve crate calls
-    /// this once per thread on first use, then keeps the Agent warm in the
-    /// [`crate::ThreadPool`] for subsequent runs.
     async fn build(&self, tenant: &str, session_id: &str) -> Agent;
 
-    /// Build the per-run context for a single request from the tenant, the
-    /// session id, and the request body's open `context` JSON. Called on EVERY
-    /// run (the pooled agent is reused), so request-varying values (user_id,
-    /// provider, allow_web_search, …) belong here — not in [`Self::build`]. The
-    /// serve crate stays agnostic to the keys; the app decides what they mean
-    /// and resolves things like a provider override.
-    ///
-    /// The serve crate attaches the live-event sink and the HITL human channel
-    /// to whatever this returns, so the factory should NOT set those.
-    ///
-    /// Default: an empty context, so existing factories keep working.
+    fn describe(&self) -> Option<&str> {
+        None
+    }
+
     async fn build_run_context(
         &self,
         _tenant: &str,
@@ -40,6 +30,4 @@ pub trait AgentFactory: Send + Sync {
     }
 }
 
-/// Type alias for what `runic-serve` actually stores — `Arc<dyn ...>` so the
-/// same factory can be cloned across thread spawns cheaply.
 pub type BoxedAgentFactory = Arc<dyn AgentFactory>;

@@ -1,25 +1,4 @@
-//! `runic-hook` — Layer 2 hook contract.
-//!
-//! Synthesized from the two reference donors:
-//!
-//! - **runic** contributes the *power*: a hook reaches the whole
-//!   [`AgentState`] (not a typed sliver), and the rich [`HookOutcome`] return
-//!   (`SubstituteToolResult` / `Cancel` / `Stop`, plus rewriting the call in
-//!   place via `&mut ToolCall`).
-//! - **ZeroClaw** contributes the *innovations*: `priority()` ordering and the
-//!   *void vs modifying* split — generalized here into two distinct hook
-//!   **types** rather than a per-method classification:
-//!
-//!   * [`ReadHook`] — read-only. Gets `&AgentState`, so the loop runs every
-//!     read hook **in parallel**. It can observe everything but only steer with
-//!     [`HookSignal`] (`Continue` / `Stop`).
-//!   * [`WriteHook`] — read-edit. Gets `&mut AgentState` (and `&mut ToolCall`
-//!     at the tool seam), so the loop runs them **sequentially** ordered by
-//!     `priority()`. It returns the full [`HookOutcome`].
-//!
-//! A hook author picks the trait by capability: observe → `ReadHook`,
-//! mutate/steer → `WriteHook`. The firing points are identical across both;
-//! the *type* decides parallel-vs-sequential and what a hook may return.
+//! Hook contracts for observing, mutating, or steering the agent loop.
 
 use async_trait::async_trait;
 use runic_state::AgentState;
@@ -40,24 +19,19 @@ pub const ALL_POINTS: &[HookLifecycle] = &[
 /// What a read-only [`ReadHook`] may ask the loop to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSignal {
-    /// Proceed normally.
     Continue,
-    /// Halt the agent loop after this point.
     Stop,
 }
 
 /// What a read-edit [`WriteHook`] may ask the loop to do.
 #[derive(Debug, Clone)]
 pub enum HookOutcome {
-    /// Proceed normally (any in-place edits to state/call are kept).
     Continue,
     /// Skip the tool entirely and use this result instead. Honored only when
     /// returned from [`WriteHook::before_tool`]; ignored elsewhere.
     SubstituteToolResult(ToolResult),
-    /// Abort this step with a reason; surfaced to the model as a tool error
-    /// (at the tool seam) or ends the turn.
+    /// Abort this step with a reason.
     Cancel(String),
-    /// Halt the agent loop after this point.
     Stop,
 }
 
@@ -68,33 +42,32 @@ pub enum HookOutcome {
 /// Read-only hooks: observe state, run in parallel, may only `Continue`/`Stop`.
 #[async_trait]
 pub trait ReadHook: Send + Sync {
-    /// Stable name (for logging / ordering ties).
     fn name(&self) -> &str;
-    /// Lower runs first. Ties broken by registration order.
+
     fn priority(&self) -> i32 {
         0
     }
+
     fn points(&self) -> &'static [HookLifecycle] {
         ALL_POINTS
     }
 
-    /// Before the agent loop begins.
     async fn before_agent(&self, _state: &AgentState) -> HookSignal {
         HookSignal::Continue
     }
-    /// Before each model call.
+
     async fn before_model(&self, _state: &AgentState) -> HookSignal {
         HookSignal::Continue
     }
-    /// Before a tool runs (call is read-only here).
+
     async fn before_tool(&self, _state: &AgentState, _call: &ToolCall) -> HookSignal {
         HookSignal::Continue
     }
-    /// After each model call (the response is already on `state`).
+
     async fn after_model(&self, _state: &AgentState) -> HookSignal {
         HookSignal::Continue
     }
-    /// After a tool runs.
+
     async fn after_tool(
         &self,
         _state: &AgentState,
@@ -103,7 +76,7 @@ pub trait ReadHook: Send + Sync {
     ) -> HookSignal {
         HookSignal::Continue
     }
-    /// After the agent loop ends.
+
     async fn after_agent(&self, _state: &AgentState) -> HookSignal {
         HookSignal::Continue
     }
@@ -113,34 +86,34 @@ pub trait ReadHook: Send + Sync {
 /// `priority()`, may return the full [`HookOutcome`].
 #[async_trait]
 pub trait WriteHook: Send + Sync {
-    /// Stable name (for logging / ordering ties).
     fn name(&self) -> &str;
-    /// Lower runs first. Ties broken by registration order.
+
     fn priority(&self) -> i32 {
         0
     }
+
     fn points(&self) -> &'static [HookLifecycle] {
         ALL_POINTS
     }
 
-    /// Before the agent loop begins.
     async fn before_agent(&self, _state: &mut AgentState) -> HookOutcome {
         HookOutcome::Continue
     }
-    /// Before each model call (e.g. inject context, trim history).
+
     async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
         HookOutcome::Continue
     }
+
     /// Before a tool runs: rewrite the call in place via `&mut ToolCall`, or
     /// short-circuit with `SubstituteToolResult` / `Cancel` / `Stop`.
     async fn before_tool(&self, _state: &mut AgentState, _call: &mut ToolCall) -> HookOutcome {
         HookOutcome::Continue
     }
-    /// After each model call (e.g. record usage onto state).
+
     async fn after_model(&self, _state: &mut AgentState) -> HookOutcome {
         HookOutcome::Continue
     }
-    /// After a tool runs (e.g. cache the result into state).
+
     async fn after_tool(
         &self,
         _state: &mut AgentState,
@@ -149,7 +122,7 @@ pub trait WriteHook: Send + Sync {
     ) -> HookOutcome {
         HookOutcome::Continue
     }
-    /// After the agent loop ends.
+
     async fn after_agent(&self, _state: &mut AgentState) -> HookOutcome {
         HookOutcome::Continue
     }
@@ -171,7 +144,6 @@ mod tests {
         }
     }
 
-    // A read-only hook that stops the loop once it sees a banned tool.
     struct StopOnTool(&'static str);
 
     #[async_trait]
@@ -188,8 +160,6 @@ mod tests {
         }
     }
 
-    // A read-edit hook that serves a cached result instead of running the tool,
-    // and rewrites the call args for everything else.
     struct CacheAndRewrite;
 
     #[async_trait]
@@ -204,7 +174,6 @@ mod tests {
             if c.name == "search" {
                 return HookOutcome::SubstituteToolResult(ToolResult::ok("cached: 42"));
             }
-            // rewrite in place
             c.input = serde_json::json!({ "q": 2 });
             HookOutcome::Continue
         }

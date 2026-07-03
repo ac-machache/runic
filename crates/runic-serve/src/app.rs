@@ -1,5 +1,6 @@
 //! `AppState` and the top-level `router()` factory.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +24,8 @@ use utoipa::OpenApi;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
-use crate::pool::ThreadPool;
-use crate::routes::{artifacts, health, runs, threads, transcribe};
+use crate::pool::{DEFAULT_AGENT, ThreadPool};
+use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
 /// `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
@@ -46,21 +47,23 @@ pub struct ServeConfig {
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Optional speech-to-text backend; `None` disables `POST /transcribe`.
     pub transcriber: Option<Arc<dyn SpeechToText>>,
-    pub agent_factory: BoxedAgentFactory,
+    /// Named agents; run requests pick one via `"agent"` (default: `default`).
+    pub agents: HashMap<String, BoxedAgentFactory>,
     /// Shared HITL hub; the serve crate builds a per-run `HumanChannel` over it
     /// and installs it on each run's context, so an `ask_user` raised mid-run
     /// resolves via the HTTP answer endpoint.
     pub human_hub: Arc<HumanHub>,
 }
 
+pub fn single_agent(factory: BoxedAgentFactory) -> HashMap<String, BoxedAgentFactory> {
+    HashMap::from([(DEFAULT_AGENT.to_string(), factory)])
+}
+
 /// Build the axum `Router` with every endpoint mounted. The binary owns the
 /// network layer (`axum::serve` / TLS / shutdown); this crate just produces the
 /// route surface.
 pub fn router(config: ServeConfig) -> Router {
-    let pool = Arc::new(ThreadPool::new(
-        config.agent_factory,
-        config.session_store.clone(),
-    ));
+    let pool = Arc::new(ThreadPool::new(config.agents, config.session_store.clone()));
     if tokio::runtime::Handle::try_current().is_ok() {
         pool.spawn_eviction_sweep();
     }
@@ -75,6 +78,7 @@ pub fn router(config: ServeConfig) -> Router {
     let router = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/openapi.json", get(crate::openapi::openapi_json))
+        .route("/agents", get(agents::list_agents))
         .route(
             "/threads",
             post(threads::create_thread).get(threads::list_threads),

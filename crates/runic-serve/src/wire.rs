@@ -26,6 +26,8 @@ pub enum WireEvent {
     RunStart {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         at: Option<DateTime<Utc>>,
     },
 
@@ -168,7 +170,11 @@ fn lifecycle_str(lifecycle: HookLifecycle) -> &'static str {
 /// completed run yields both `usage` and `done`.
 pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
     match event {
-        AgentEvent::RunStarted { run_id } => vec![WireEvent::RunStart { run_id, at: None }],
+        AgentEvent::RunStarted { run_id } => vec![WireEvent::RunStart {
+            run_id,
+            agent: None,
+            at: None,
+        }],
         AgentEvent::TextDelta(text) => vec![WireEvent::AssistantTextDelta { text }],
         AgentEvent::ThinkingDelta(text) => vec![WireEvent::AssistantThinkingDelta { text }],
         AgentEvent::ToolStarted { id, name, input } => {
@@ -221,8 +227,9 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
 /// internal bookkeeping events (`TurnBoundary`, `StateSnapshot`).
 pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
     match event {
-        SessionEvent::RunStart { run_id, at } => Some(WireEvent::RunStart {
+        SessionEvent::RunStart { run_id, agent, at } => Some(WireEvent::RunStart {
             run_id,
+            agent,
             at: Some(at),
         }),
         SessionEvent::RunEnd {

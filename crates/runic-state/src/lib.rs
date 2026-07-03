@@ -76,6 +76,7 @@ mod tests {
         let mut s = AgentState::new("u1", "sess", "");
         s.push_event(SessionEvent::RunStart {
             run_id: "a".into(),
+            agent: None,
             at: Utc::now(),
         });
         s.push_event(SessionEvent::RunEnd {
@@ -85,6 +86,7 @@ mod tests {
         });
         s.push_event(SessionEvent::RunStart {
             run_id: "b".into(),
+            agent: None,
             at: Utc::now(),
         });
         let runs = s.runs();
@@ -109,6 +111,7 @@ mod tests {
         let mut rx = s.subscribe_events().expect("channel installed");
         s.push_event(SessionEvent::RunStart {
             run_id: "r1".into(),
+            agent: None,
             at: Utc::now(),
         });
         assert!(rx.try_recv().is_ok(), "subscriber should receive the event");

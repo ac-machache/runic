@@ -1,21 +1,8 @@
-//! Background memory-review — hermes's "memory nudge". Every N user turns the
-//! agent should spend a cheap off-loop pass curating memory (saving durable
-//! facts it noticed, tidying stale entries) instead of relying on the model to
-//! remember to call the tool mid-task.
-//!
-//! This module owns only the **policy**: a turn counter that says *when* a
-//! review is due, plus the guidance text the review runs with. The actual
-//! spawn — a memory-and-skills-only sub-agent sharing the same
-//! [`BoundedMemoryStore`](crate::store::BoundedMemoryStore) — belongs to the
-//! wiring layer (it needs the agent loop / `delegate`, which must not be a
-//! dependency of this crate). The wiring calls [`ReviewScheduler::record_turn`]
-//! after each user turn and, when it returns `true`, delegates a curator agent
-//! seeded with [`MEMORY_REVIEW_GUIDANCE`].
+//! Background memory-review policy and guidance.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Guidance handed to the background curator sub-agent (hermes
-/// `MEMORY_REVIEW_GUIDANCE`).
+/// Guidance handed to the background curator.
 pub const MEMORY_REVIEW_GUIDANCE: &str = "\
 Review the conversation above and curate memory if anything durable stands out.
 
@@ -26,18 +13,13 @@ transient details — task outcomes, PR/issue numbers, commit SHAs, 'phase done'
 Tidy obviously stale or duplicated entries with `replace`/`remove`. If nothing \
 is worth saving, do nothing.";
 
-/// Turn counter governing when a background review fires. Cheap, lock-free, and
-/// shareable across the agent's turn boundary.
 #[derive(Debug)]
 pub struct ReviewScheduler {
-    /// Turns between reviews. `0` disables the nudge entirely.
     interval: u32,
     since: AtomicU32,
 }
 
 impl ReviewScheduler {
-    /// `interval` turns between reviews (`0` = disabled, matching
-    /// [`MemoryConfig::nudge_interval`](crate::config::MemoryConfig)).
     pub fn new(interval: u32) -> Self {
         Self {
             interval,
@@ -50,14 +32,11 @@ impl ReviewScheduler {
         self.interval > 0
     }
 
-    /// Record one completed user turn. Returns `true` exactly when a review is
-    /// due, resetting the counter in the same step. Always `false` when
-    /// disabled.
+    /// Record one completed user turn and return whether review is due.
     pub fn record_turn(&self) -> bool {
         if self.interval == 0 {
             return false;
         }
-        // fetch_add returns the value *before* the increment.
         let prev = self.since.fetch_add(1, Ordering::SeqCst);
         if prev + 1 >= self.interval {
             self.since.store(0, Ordering::SeqCst);
@@ -67,7 +46,6 @@ impl ReviewScheduler {
         }
     }
 
-    /// Turns elapsed since the last review (for diagnostics/UX).
     pub fn turns_since(&self) -> u32 {
         self.since.load(Ordering::SeqCst)
     }
@@ -81,13 +59,13 @@ mod tests {
     fn fires_every_interval_turns() {
         let s = ReviewScheduler::new(3);
         assert!(s.enabled());
-        assert!(!s.record_turn()); // 1
-        assert!(!s.record_turn()); // 2
-        assert!(s.record_turn()); // 3 → due, resets
+        assert!(!s.record_turn());
+        assert!(!s.record_turn());
+        assert!(s.record_turn());
         assert_eq!(s.turns_since(), 0);
-        assert!(!s.record_turn()); // 1
-        assert!(!s.record_turn()); // 2
-        assert!(s.record_turn()); // 3 → due again
+        assert!(!s.record_turn());
+        assert!(!s.record_turn());
+        assert!(s.record_turn());
     }
 
     #[test]

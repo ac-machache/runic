@@ -34,7 +34,11 @@ fn message() -> impl Strategy<Value = Message> {
 fn event() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
-        run_id().prop_map(move |run_id| SessionEvent::RunStart { run_id, at }),
+        run_id().prop_map(move |run_id| SessionEvent::RunStart {
+            run_id,
+            agent: None,
+            at
+        }),
         (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
             run_id,
             msg,
@@ -62,7 +66,11 @@ fn event() -> impl Strategy<Value = SessionEvent> {
 fn event_no_snapshot() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
-        run_id().prop_map(move |run_id| SessionEvent::RunStart { run_id, at }),
+        run_id().prop_map(move |run_id| SessionEvent::RunStart {
+            run_id,
+            agent: None,
+            at
+        }),
         (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
             run_id,
             msg,

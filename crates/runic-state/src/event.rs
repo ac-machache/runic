@@ -40,7 +40,12 @@ pub struct RunOutcome {
 #[serde(tag = "kind")]
 pub enum SessionEvent {
     /// A run (one user request → its answer) began.
-    RunStart { run_id: String, at: DateTime<Utc> },
+    RunStart {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        at: DateTime<Utc>,
+    },
     /// A run finished.
     RunEnd {
         run_id: String,

@@ -135,6 +135,8 @@ pub struct RunContext {
     /// Optional human channel for HITL tools (`ask_user` / `escalate_to_human`).
     /// Provided per run by the surface; flows into [`ToolContext`].
     pub human: Option<Arc<dyn HumanInterface>>,
+    /// Optional agent name recorded on the run's `RunStart` event.
+    pub agent: Option<String>,
 }
 
 impl RunContext {
@@ -175,6 +177,10 @@ impl RunContext {
     /// Attach a human channel for HITL tools this run.
     pub fn with_human(mut self, human: Arc<dyn HumanInterface>) -> Self {
         self.human = Some(human);
+        self
+    }
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
         self
     }
 }

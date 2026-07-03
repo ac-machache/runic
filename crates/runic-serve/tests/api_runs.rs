@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
+use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
 use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -220,7 +220,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(ScriptedFactory),
+        agents: single_agent(Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -231,7 +231,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: artifacts.clone(),
         transcriber: None,
-        agent_factory: Arc::new(ScriptedFactory),
+        agents: single_agent(Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, artifacts)
@@ -242,7 +242,7 @@ fn failing_run_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(FailingFactory),
+        agents: single_agent(Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -252,7 +252,7 @@ fn asking_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(AskingFactory),
+        agents: single_agent(Arc::new(AskingFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -264,10 +264,10 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(GatedFactory {
+        agents: single_agent(Arc::new(GatedFactory {
             entered: entered.clone(),
             gate: gate.clone(),
-        }),
+        })),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, entered, gate)

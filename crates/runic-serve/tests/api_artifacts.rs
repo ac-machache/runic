@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use runic_agent::Agent;
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
+use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore};
 
 const TENANT: &str = "alice";
@@ -27,7 +27,7 @@ fn crud_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(PanicFactory),
+        agents: single_agent(Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }

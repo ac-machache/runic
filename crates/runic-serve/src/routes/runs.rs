@@ -32,6 +32,7 @@ use runic_types::{ContentBlock, Message, MessageContent};
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
 use crate::human::HumanChannel;
+use crate::pool::DEFAULT_AGENT;
 use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 use crate::tenant::Tenant;
 use crate::wire::{WireEvent, from_agent_event, from_session_event};
@@ -43,6 +44,9 @@ use crate::wire::{WireEvent, from_agent_event, from_session_event};
 ///                {"type":"image","media_type":"image/png","data":"<base64>"}]}
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RunMessageRequest {
+    /// Which registered agent runs this turn; defaults to `default`.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Plain-text shorthand for the user turn. Ignored when `content` is a
     /// non-empty array.
     #[serde(default)]
@@ -230,6 +234,7 @@ pub async fn create_and_stream_run(
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
     // Extract context before `into_message` consumes the request, and validate
     // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
+    let agent_name = req.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     // Inline media → stored refs; client refs validated. State only sees refs.
@@ -238,7 +243,7 @@ pub async fn create_and_stream_run(
     // App-resolved per-run context (provider override, identity keys, …).
     let mut run_ctx = state
         .pool
-        .factory()
+        .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
 
@@ -254,6 +259,7 @@ pub async fn create_and_stream_run(
     run_ctx = run_ctx
         .with_events(evt_tx)
         .with_cancel(cancel.clone())
+        .with_agent(&agent_name)
         .with_human(Arc::new(HumanChannel::new(
             state.human_hub.clone(),
             ask_tx,
@@ -261,10 +267,13 @@ pub async fn create_and_stream_run(
             thread_id.clone(),
         )));
 
-    tracing::info!(%tenant, %thread_id, "run stream accepted");
+    tracing::info!(%tenant, %thread_id, agent = %agent_name, "run stream accepted");
 
     let pool = state.pool.clone();
-    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
+    let agent_arc = state
+        .pool
+        .get_or_build(&tenant, &thread_id, &agent_name)
+        .await?;
     tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
         if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
@@ -355,22 +364,26 @@ pub async fn wait_run(
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
+    let agent_name = req.agent.clone().unwrap_or_else(|| DEFAULT_AGENT.into());
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
     let user_msg = req.into_message()?;
     let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
 
     let mut run_ctx = state
         .pool
-        .factory()
+        .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
     let cancel = state.pool.begin_run(&tenant, &thread_id).await;
-    run_ctx = run_ctx.with_cancel(cancel.clone());
+    run_ctx = run_ctx.with_cancel(cancel.clone()).with_agent(&agent_name);
 
-    tracing::info!(%tenant, %thread_id, "wait run accepted");
+    tracing::info!(%tenant, %thread_id, agent = %agent_name, "wait run accepted");
 
     let pool = state.pool.clone();
-    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
+    let agent_arc = state
+        .pool
+        .get_or_build(&tenant, &thread_id, &agent_name)
+        .await?;
     let task = tokio::spawn(async move {
         let mut agent = agent_arc.lock().await;
         let result = agent.run_message_with(user_msg, run_ctx).await;
@@ -487,13 +500,8 @@ pub async fn replay_run(
         .read_run_after(&tenant, &thread_id, &run_id, 0)
         .await?;
 
-    let agent_arc = state.pool.get_or_build(&tenant, &thread_id).await;
-    let is_live = agent_arc
-        .lock()
-        .await
-        .state()
-        .current_run()
-        .is_some_and(|run| run.id == run_id);
+    let live_agent = state.pool.find_live_run(&tenant, &thread_id, &run_id).await;
+    let is_live = live_agent.is_some();
 
     if all.is_empty() && !is_live {
         return Err(ServeError::RunNotFound {
@@ -525,13 +533,16 @@ pub async fn replay_run(
 
         // 2) attach to the live broadcast only if still in flight, following
         // until this run's RunEnd (capturing its real turn count).
-        let rx = {
-            let agent = agent_arc.lock().await;
-            if agent.state().current_run().is_some_and(|run| run.id == run_id) {
-                agent.state().subscribe_events()
-            } else {
-                None
+        let rx = match &live_agent {
+            Some(agent_arc) => {
+                let agent = agent_arc.lock().await;
+                if agent.state().current_run().is_some_and(|run| run.id == run_id) {
+                    agent.state().subscribe_events()
+                } else {
+                    None
+                }
             }
+            None => None,
         };
         let (mut total_turns, mut stop_reason) = match completed {
             Some((t, s)) => (Some(t), s),

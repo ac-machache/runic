@@ -24,6 +24,7 @@ fn ts(offset_micros: i64) -> DateTime<Utc> {
 fn run_start(run: &str, n: i64) -> SessionEvent {
     SessionEvent::RunStart {
         run_id: run.into(),
+        agent: None,
         at: ts(n),
     }
 }

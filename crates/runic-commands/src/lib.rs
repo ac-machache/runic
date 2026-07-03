@@ -1,22 +1,4 @@
-//! `runic-commands` — user slash commands as Markdown (`COMMAND.md`).
-//!
-//! A command is a reusable **prompt template** the user invokes as `/name args`
-//! from whatever surface hosts the agent (REPL, HTTP, …). It does NOT bypass
-//! the model and it is NOT a tool: the surface parses `/name args`, expands the
-//! template, and sends the result as the run's user input.
-//!
-//! ```text
-//! commands/review/COMMAND.md
-//! ```
-//! ```markdown
-//! ---
-//! name: review
-//! description: Review a file for bugs and style
-//! ---
-//! Review the following file and list issues:
-//!
-//! $ARGUMENTS
-//! ```
+//! Markdown-backed slash-command prompt templates.
 
 use std::path::Path;
 
@@ -24,7 +6,6 @@ use serde::Deserialize;
 
 mod security;
 
-/// A parsed command (a named prompt template).
 #[derive(Debug, Clone)]
 pub struct Command {
     pub name: String,
@@ -84,7 +65,7 @@ impl Command {
 /// invocation, else `None`.
 pub fn split_invocation(input: &str) -> Option<(&str, &str)> {
     let rest = input.trim_start().strip_prefix('/')?;
-    let rest = rest.trim_start_matches('/'); // tolerate "//"
+    let rest = rest.trim_start_matches('/');
     let (name, args) = match rest.split_once(char::is_whitespace) {
         Some((n, a)) => (n, a.trim()),
         None => (rest, ""),
@@ -130,7 +111,6 @@ impl CommandRegistry {
         };
         for entry in std::fs::read_dir(root)?.flatten() {
             let path = entry.path();
-            // Skip hidden entries (.git, dotfiles, …).
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -159,7 +139,6 @@ impl CommandRegistry {
         self.commands.iter().map(|c| c.name.as_str()).collect()
     }
 
-    /// All commands (for aggregation, e.g. by the plugin manager).
     pub fn all(&self) -> &[Command] {
         &self.commands
     }
@@ -209,14 +188,10 @@ mod tests {
 
     #[test]
     fn parse_hardens_fields() {
-        // multi-line description collapses to one line
         let c = cmd("---\nname: x\ndescription: |\n  one\n  two\n---\nbody");
         assert_eq!(c.description, "one two");
-        // missing/empty description rejected
         assert!(Command::parse("---\nname: x\n---\nbody").is_err());
-        // whitespace-in-name rejected (uninvokable as a slash command)
         assert!(Command::parse("---\nname: two words\ndescription: d\n---\nb").is_err());
-        // over-long name rejected
         let long = "n".repeat(65);
         assert!(Command::parse(&format!("---\nname: {long}\ndescription: d\n---\nb")).is_err());
     }

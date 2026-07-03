@@ -59,9 +59,10 @@ impl Agent {
         self.human = ctx.human.take();
         let cancel = ctx.cancel.take();
         let mut steering = ctx.steering.take();
+        let agent_label = ctx.agent.take();
 
         let result = self
-            .run_loop(user_msg, cancel.as_ref(), steering.as_mut())
+            .run_loop(user_msg, agent_label, cancel.as_ref(), steering.as_mut())
             .await;
 
         self.events = None; // drop the sink (closes the receiver)
@@ -84,6 +85,7 @@ impl Agent {
     async fn run_loop(
         &mut self,
         user_msg: Message,
+        agent_label: Option<String>,
         cancel: Option<&CancelToken>,
         mut steering: Option<&mut mpsc::UnboundedReceiver<String>>,
     ) -> Result<RunOutcome, AgentError> {
@@ -93,6 +95,7 @@ impl Agent {
         let now = Utc::now();
         self.state.push_event(SessionEvent::RunStart {
             run_id: run_id.clone(),
+            agent: agent_label,
             at: now,
         });
         self.state.push_event(SessionEvent::Message {

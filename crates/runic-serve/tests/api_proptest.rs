@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router};
+use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
 use runic_state::SessionEvent;
 use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
@@ -61,7 +61,7 @@ fn crud_router() -> Router {
         session_store: Arc::new(MemorySessionStore::new()),
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
-        agent_factory: Arc::new(PanicFactory),
+        agents: single_agent(Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
     })
 }
@@ -73,7 +73,7 @@ fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
         session_store: sessions.clone(),
         artifact_store: artifacts.clone(),
         transcriber: None,
-        agent_factory: Arc::new(ScriptedFactory),
+        agents: single_agent(Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
     });
     (app, sessions, artifacts)

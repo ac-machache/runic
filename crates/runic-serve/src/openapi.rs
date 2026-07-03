@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use utoipa::openapi::OpenApi as OpenApiSpec;
 
 use crate::error::ErrorBody;
-use crate::routes::{artifacts, health, runs, threads, transcribe};
+use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 use crate::wire::WireEvent;
 
 #[derive(OpenApi)]
@@ -19,6 +19,7 @@ use crate::wire::WireEvent;
     ),
     paths(
         health::healthz,
+        agents::list_agents,
         threads::create_thread,
         threads::list_threads,
         threads::get_thread,
@@ -38,6 +39,8 @@ use crate::wire::WireEvent;
     ),
     components(schemas(
         health::HealthResponse,
+        agents::AgentInfo,
+        agents::AgentList,
         threads::Thread,
         threads::ThreadSummary,
         threads::ThreadList,
@@ -57,6 +60,7 @@ use crate::wire::WireEvent;
     )),
     tags(
         (name = "health", description = "Liveness"),
+        (name = "agents", description = "The named agents this server hosts"),
         (name = "threads", description = "Thread (session) lifecycle and history"),
         (name = "artifacts", description = "Per-thread blob upload and listing"),
         (name = "runs", description = "Streaming agent runs, replay, and HITL answers"),

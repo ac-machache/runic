@@ -38,9 +38,6 @@ pub struct Assembly {
     pub max_turns: Option<u32>,
     /// Fold long history into a summary + kept tail before model calls.
     pub compaction: Option<Compaction>,
-    /// Shared queue for model-facing reminders: installs the reminder hook and
-    /// hands the queue to the delegate tool for background-task notifications.
-    pub reminders: Option<runic_agent::ReminderQueue>,
     /// App-specific read-edit hooks (e.g. tenant-id injection into tool calls).
     pub write_hooks: Vec<Arc<dyn WriteHook>>,
     /// When set, `ArtifactRef` blocks resolve to the stored bytes just before
@@ -155,9 +152,6 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
             store.clone(),
         );
         b = b.write_hook(Arc::new(hook));
-    }
-    if let Some(queue) = &a.reminders {
-        b = b.write_hook(Arc::new(crate::hooks::ReminderHook::new(queue.clone())));
     }
     for hook in &a.write_hooks {
         b = b.write_hook(hook.clone());

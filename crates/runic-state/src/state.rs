@@ -20,19 +20,19 @@ pub fn new_run_id() -> String {
 
 #[derive(Debug, Clone)]
 pub struct PersistSink {
-    tx: mpsc::UnboundedSender<SessionEvent>,
+    tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
     enqueued: Arc<AtomicU64>,
 }
 
 impl PersistSink {
-    pub fn new(tx: mpsc::UnboundedSender<SessionEvent>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<Arc<SessionEvent>>) -> Self {
         Self {
             tx,
             enqueued: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    pub fn send(&self, ev: SessionEvent) {
+    pub fn send(&self, ev: Arc<SessionEvent>) {
         self.enqueued.fetch_add(1, Ordering::SeqCst);
         let _ = self.tx.send(ev);
     }
@@ -104,7 +104,7 @@ pub struct AgentState {
     pub config: serde_json::Map<String, serde_json::Value>,
 
     #[serde(skip, default)]
-    events_tx: Option<broadcast::Sender<SessionEvent>>,
+    events_tx: Option<broadcast::Sender<Arc<SessionEvent>>>,
 
     #[serde(skip, default)]
     persist_tx: Option<PersistSink>,
@@ -140,7 +140,7 @@ impl AgentState {
         self.config.get(key)
     }
 
-    pub fn set_events_tx(&mut self, tx: broadcast::Sender<SessionEvent>) {
+    pub fn set_events_tx(&mut self, tx: broadcast::Sender<Arc<SessionEvent>>) {
         self.events_tx = Some(tx);
     }
 
@@ -148,16 +148,19 @@ impl AgentState {
         self.persist_tx = Some(sink);
     }
 
-    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<SessionEvent>> {
+    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<Arc<SessionEvent>>> {
         self.events_tx.as_ref().map(|tx| tx.subscribe())
     }
 
     pub fn push_event(&mut self, ev: SessionEvent) {
-        if let Some(tx) = &self.events_tx {
-            let _ = tx.send(ev.clone());
-        }
-        if let Some(sink) = &self.persist_tx {
-            sink.send(ev.clone());
+        if self.events_tx.is_some() || self.persist_tx.is_some() {
+            let shared = Arc::new(ev.clone());
+            if let Some(tx) = &self.events_tx {
+                let _ = tx.send(shared.clone());
+            }
+            if let Some(sink) = &self.persist_tx {
+                sink.send(shared);
+            }
         }
         self.fold_event(ev);
     }
@@ -274,7 +277,7 @@ impl AgentState {
         self.persist_tx.clone()
     }
 
-    pub fn events_sender(&self) -> Option<broadcast::Sender<SessionEvent>> {
+    pub fn events_sender(&self) -> Option<broadcast::Sender<Arc<SessionEvent>>> {
         self.events_tx.clone()
     }
 

@@ -102,7 +102,7 @@ async fn persisted_session_events_never_carry_the_full_bytes() {
 
     agent.run("go").await.unwrap();
 
-    for ev in drain(&mut events) {
+    for ev in drain_session(&mut events) {
         if let SessionEvent::Message { msg, .. } = &ev
             && let MessageContent::Blocks(blocks) = &msg.content
         {

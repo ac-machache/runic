@@ -116,7 +116,7 @@ async fn cancelled_run_is_recorded_as_a_clean_terminal_run_end() {
         .await
         .unwrap();
 
-    let evs = drain(&mut events);
+    let evs = drain_session(&mut events);
     let end = evs.iter().rev().find_map(|e| match e {
         SessionEvent::RunEnd { outcome, .. } => Some(outcome.clone()),
         _ => None,

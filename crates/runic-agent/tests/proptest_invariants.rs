@@ -58,7 +58,7 @@ proptest! {
             prop_assert_eq!(outcome.total_turns, expected_turns);
             prop_assert_eq!(provider.call_count(), tool_turns + 1);
 
-            let evs = drain(&mut events);
+            let evs = drain_session(&mut events);
             let starts = evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count();
             let ends = evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count();
             let boundaries = evs.iter().filter(|e| matches!(e, SessionEvent::TurnBoundary { .. })).count();
@@ -157,7 +157,7 @@ proptest! {
             prop_assert_eq!(outcome.total_turns, expected_turns);
             prop_assert_eq!(provider.call_count(), kinds.len() + 1);
 
-            let evs = drain(&mut events);
+            let evs = drain_session(&mut events);
             prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count(), 1);
             prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count(), 1);
             prop_assert!(

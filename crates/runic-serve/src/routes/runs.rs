@@ -634,13 +634,13 @@ pub async fn replay_run(
                 if event.run_id() != run_id {
                     continue;
                 }
-                let end = match &event {
+                let end = match event.as_ref() {
                     SessionEvent::RunEnd { outcome, .. } => {
                         Some((outcome.total_turns, outcome.stop_reason.clone()))
                     }
                     _ => None,
                 };
-                if let Some(wire) = from_session_event(event) {
+                if let Some(wire) = from_session_event((*event).clone()) {
                     yield Ok(to_sse(&wire, None));
                 }
                 if let Some((t, s)) = end {

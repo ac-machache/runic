@@ -35,7 +35,7 @@ async fn every_hook_firing_leaves_a_hookran_entry() {
     agent.run("go").await.unwrap();
 
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -88,7 +88,7 @@ async fn scoped_hook_fires_only_at_its_declared_points() {
     agent.run("go").await.unwrap();
 
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -138,7 +138,7 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
 
     agent.run("go").await.unwrap();
 
-    let hook_events: Vec<SessionEvent> = drain(&mut events)
+    let hook_events: Vec<SessionEvent> = drain_session(&mut events)
         .into_iter()
         .filter(|e| matches!(e, SessionEvent::HookRan { .. }))
         .collect();
@@ -175,7 +175,7 @@ async fn precancel_path_emits_only_runstart_message_runend() {
         .unwrap();
 
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec!["RunStart", "Message", "RunEnd"]
     );
 }
@@ -203,7 +203,7 @@ async fn cancel_after_tool_stops_before_the_next_assistant_message() {
         .unwrap();
 
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -227,7 +227,7 @@ async fn first_call_failure_emits_runstart_message_runend() {
 
     // No assistant message was ever appended (the call failed before that).
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec!["RunStart", "Message", "RunEnd"]
     );
 }
@@ -250,7 +250,7 @@ async fn failure_after_a_tool_round_trip_keeps_the_partial_log() {
     agent.run("go").await.unwrap_err();
 
     assert_eq!(
-        session_kinds(&drain(&mut events)),
+        session_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user

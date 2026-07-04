@@ -724,12 +724,24 @@ impl ReadHook for RecordReadHook {
 
 /// Install a lossless persist sink on the agent and return its receiver. Every
 /// [`SessionEvent`] the run pushes lands here in order.
-pub fn capture_session_events(agent: &mut Agent) -> mpsc::UnboundedReceiver<SessionEvent> {
+pub fn capture_session_events(
+    agent: &mut Agent,
+) -> mpsc::UnboundedReceiver<std::sync::Arc<SessionEvent>> {
     let (tx, rx) = mpsc::unbounded_channel();
     agent
         .state_mut()
         .set_persist_tx(runic_state::PersistSink::new(tx));
     rx
+}
+
+pub fn drain_session(
+    rx: &mut mpsc::UnboundedReceiver<std::sync::Arc<SessionEvent>>,
+) -> Vec<SessionEvent> {
+    let mut out = Vec::new();
+    while let Ok(v) = rx.try_recv() {
+        out.push(std::sync::Arc::try_unwrap(v).unwrap_or_else(|shared| (*shared).clone()));
+    }
+    out
 }
 
 /// Drain everything currently queued on an unbounded receiver.

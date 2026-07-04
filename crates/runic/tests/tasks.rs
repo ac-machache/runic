@@ -109,10 +109,10 @@ fn scout_roster() -> Arc<AgentRoster> {
     }]))
 }
 
-async fn wait_for_finish(rx: &mut tokio::sync::broadcast::Receiver<SessionEvent>) {
+async fn wait_for_finish(rx: &mut tokio::sync::broadcast::Receiver<Arc<SessionEvent>>) {
     loop {
         match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
-            Ok(Ok(SessionEvent::TaskFinished { .. })) => return,
+            Ok(Ok(ev)) if matches!(ev.as_ref(), SessionEvent::TaskFinished { .. }) => return,
             Ok(Ok(_)) => continue,
             other => panic!("background task never finished: {other:?}"),
         }

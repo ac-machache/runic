@@ -26,7 +26,7 @@ async fn text_only_run_emits_bookended_events_for_one_run_id() {
     assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(outcome.usage.input_tokens, 10);
 
-    let evs = drain(&mut events);
+    let evs = drain_session(&mut events);
     // First event opens the run, last closes it.
     assert!(matches!(evs.first(), Some(SessionEvent::RunStart { .. })));
     assert!(matches!(evs.last(), Some(SessionEvent::RunEnd { .. })));
@@ -59,11 +59,11 @@ async fn each_run_gets_a_fresh_run_id() {
 
     let mut e1 = capture_session_events(&mut agent);
     agent.run("first").await.unwrap();
-    let id1 = first_run_id(&drain(&mut e1));
+    let id1 = first_run_id(&drain_session(&mut e1));
 
     let mut e2 = capture_session_events(&mut agent);
     agent.run("second").await.unwrap();
-    let id2 = first_run_id(&drain(&mut e2));
+    let id2 = first_run_id(&drain_session(&mut e2));
 
     assert_ne!(id1, id2, "a new run must mint a new run id");
 
@@ -120,7 +120,7 @@ async fn provider_error_closes_the_run_and_leaves_nothing_in_flight() {
     let err = agent.run("hi").await.unwrap_err();
     assert!(matches!(err, AgentError::Provider(_)), "got {err:?}");
 
-    let evs = drain(&mut events);
+    let evs = drain_session(&mut events);
     // The run is still closed with a RunEnd carrying the error stop reason.
     let end = evs
         .iter()
@@ -181,7 +181,7 @@ async fn provider_error_after_a_tool_round_trip_still_closes_cleanly() {
     assert!(has_tool_result, "the executed tool result is persisted");
 
     assert!(matches!(
-        drain(&mut events).last(),
+        drain_session(&mut events).last(),
         Some(SessionEvent::RunEnd { .. })
     ));
     assert!(agent.state().current_run().is_none());

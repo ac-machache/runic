@@ -451,7 +451,7 @@ impl ThreadPool {
 /// agent. `Lagged` is skipped (the store has the durable copy of older events
 /// via earlier appends); `Closed` ends the task when the agent is dropped.
 fn spawn_persister(
-    mut rx: mpsc::UnboundedReceiver<SessionEvent>,
+    mut rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
@@ -461,10 +461,11 @@ fn spawn_persister(
         // append_batch is one transaction, so retrying a failed batch can't
         // double-write.
         while let Some(first) = rx.recv().await {
-            let mut batch = vec![first];
+            let mut shared = vec![first];
             while let Ok(event) = rx.try_recv() {
-                batch.push(event);
+                shared.push(event);
             }
+            let batch: Vec<SessionEvent> = shared.iter().map(|e| (**e).clone()).collect();
             let batch_size = batch.len();
             let mut attempt = 0u32;
             loop {
@@ -709,7 +710,7 @@ mod tests {
         spawn_persister(rx, store.clone(), "t".into(), "s".into(), handle.clone());
 
         for i in 0..5 {
-            sink.send(message_event(i));
+            sink.send(Arc::new(message_event(i)));
         }
         handle.flush().await;
 

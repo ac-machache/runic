@@ -258,10 +258,11 @@ pub async fn create_and_stream_run(
     // Clone the wire sender so the run task can report a failure on the same
     // channel the HITL asks use (no third channel needed).
     let err_tx = ask_tx.clone();
-    let cancel = state.pool.begin_run(&tenant, &thread_id).await;
+    let (cancel, steering_rx) = state.pool.begin_run(&tenant, &thread_id).await;
     run_ctx = run_ctx
         .with_events(evt_tx)
         .with_cancel(cancel.clone())
+        .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_human(Arc::new(HumanChannel::new(
             state.human_hub.clone(),
@@ -387,8 +388,11 @@ pub async fn wait_run(
         .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
-    let cancel = state.pool.begin_run(&tenant, &thread_id).await;
-    run_ctx = run_ctx.with_cancel(cancel.clone()).with_agent(&agent_name);
+    let (cancel, steering_rx) = state.pool.begin_run(&tenant, &thread_id).await;
+    run_ctx = run_ctx
+        .with_cancel(cancel.clone())
+        .with_steering(steering_rx)
+        .with_agent(&agent_name);
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, "wait run accepted");
 
@@ -475,6 +479,48 @@ pub async fn cancel_run(
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
     if state.pool.cancel_run(&tenant, &thread_id).await {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ServeError::NoRunInFlight { thread_id })
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SteerRequest {
+    pub text: String,
+}
+
+/// `POST /threads/:id/runs/steer`
+///
+/// Injects `text` as a user message into the thread's in-flight run at its
+/// next turn boundary — a mid-run nudge, not a new run.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs/steer",
+    tag = "runs",
+    request_body = SteerRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 202, description = "Steering text queued for the next turn"),
+        (status = 400, description = "Empty text", body = ErrorBody),
+        (status = 409, description = "No run in flight on this thread", body = ErrorBody)
+    )
+)]
+pub async fn steer_run(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+    Json(req): Json<SteerRequest>,
+) -> Result<StatusCode, ServeError> {
+    if req.text.trim().is_empty() {
+        return Err(ServeError::BadRequest(
+            "steer requires non-empty text".into(),
+        ));
+    }
+    if state.pool.steer_run(&tenant, &thread_id, req.text).await {
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ServeError::NoRunInFlight { thread_id })

@@ -62,6 +62,7 @@ struct WarmEntry {
 pub struct ThreadPool {
     agents: RwLock<HashMap<ThreadKey, WarmEntry>>,
     cancel_tokens: RwLock<HashMap<(String, String), CancelToken>>,
+    steering_senders: RwLock<HashMap<(String, String), mpsc::UnboundedSender<String>>>,
     factories: HashMap<String, BoxedAgentFactory>,
     session_store: Arc<dyn SessionStore>,
     started_at: Instant,
@@ -81,6 +82,7 @@ impl ThreadPool {
         Self {
             agents: RwLock::new(HashMap::new()),
             cancel_tokens: RwLock::new(HashMap::new()),
+            steering_senders: RwLock::new(HashMap::new()),
             factories,
             session_store,
             started_at: Instant::now(),
@@ -372,11 +374,20 @@ impl ThreadPool {
         evicted
     }
 
-    pub async fn begin_run(&self, tenant: &str, thread_id: &str) -> CancelToken {
+    pub async fn begin_run(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+    ) -> (CancelToken, mpsc::UnboundedReceiver<String>) {
         let key = (tenant.to_string(), thread_id.to_string());
         let token = CancelToken::new();
-        self.cancel_tokens.write().await.insert(key, token.clone());
-        token
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        self.cancel_tokens
+            .write()
+            .await
+            .insert(key.clone(), token.clone());
+        self.steering_senders.write().await.insert(key, steer_tx);
+        (token, steer_rx)
     }
 
     pub async fn end_run(&self, tenant: &str, thread_id: &str, token: &CancelToken) {
@@ -384,7 +395,18 @@ impl ThreadPool {
         let mut tokens = self.cancel_tokens.write().await;
         if tokens.get(&key).is_some_and(|t| t.is_same(token)) {
             tokens.remove(&key);
+            self.steering_senders.write().await.remove(&key);
         }
+    }
+
+    pub async fn steer_run(&self, tenant: &str, thread_id: &str, text: String) -> bool {
+        let key = (tenant.to_string(), thread_id.to_string());
+        let steered = match self.steering_senders.read().await.get(&key) {
+            Some(tx) => tx.send(text).is_ok(),
+            None => false,
+        };
+        tracing::info!(%tenant, %thread_id, steered, "run steer requested");
+        steered
     }
 
     pub async fn cancel_run(&self, tenant: &str, thread_id: &str) -> bool {

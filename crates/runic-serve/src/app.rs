@@ -111,6 +111,7 @@ pub fn bare_router(config: ServeConfig) -> Router {
         )
         .route("/threads/{thread_id}/runs/wait", post(runs::wait_run))
         .route("/threads/{thread_id}/runs/cancel", post(runs::cancel_run))
+        .route("/threads/{thread_id}/runs/steer", post(runs::steer_run))
         .route(
             "/threads/{thread_id}/runs/{run_id}/stream",
             get(runs::replay_run),

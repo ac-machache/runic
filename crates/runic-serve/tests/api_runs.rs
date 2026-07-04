@@ -996,3 +996,152 @@ async fn stream_done_implies_the_run_is_durable() {
         "RunEnd must be durable before the stream's done event"
     );
 }
+
+struct SteerableProvider {
+    entered: Arc<Notify>,
+    gate: Arc<Notify>,
+    first: AtomicBool,
+    requests: std::sync::Mutex<Vec<CompletionRequest>>,
+}
+
+#[async_trait]
+impl Provider for SteerableProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        self.requests.lock().unwrap().push(req);
+        if !self.first.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.gate.notified().await;
+            return Ok(CompletionResponse {
+                content: vec![],
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "noop".into(),
+                    input: json!({}),
+                }],
+                usage: TokenUsage::default(),
+            });
+        }
+        Ok(CompletionResponse {
+            content: vec![ContentBlock::Text {
+                text: "steered done".into(),
+                provider_metadata: None,
+            }],
+            stop_reason: StopReason::EndTurn,
+            tool_calls: vec![],
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+struct SteerableFactory {
+    provider: Arc<SteerableProvider>,
+}
+
+#[async_trait]
+impl AgentFactory for SteerableFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(self.provider.clone(), tenant, session_id)
+            .system_prompt("test")
+            .tool(Arc::new(NoopTool))
+            .build()
+    }
+}
+
+#[tokio::test]
+async fn steer_with_no_run_in_flight_is_409() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "hey" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn steer_lands_at_the_next_turn_boundary() {
+    let provider = Arc::new(SteerableProvider {
+        entered: Arc::new(Notify::new()),
+        gate: Arc::new(Notify::new()),
+        first: AtomicBool::new(false),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent(
+            "main",
+            Arc::new(SteerableFactory {
+                provider: provider.clone(),
+            }),
+        ),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+
+    let run_app = app.clone();
+    let run_task = tokio::spawn(async move {
+        let resp = run_app
+            .oneshot(run_request("t1", TENANT, "go"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+
+    provider.entered.notified().await;
+
+    let steer_resp = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "check the db instead" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(steer_resp.status(), StatusCode::ACCEPTED);
+
+    provider.gate.notify_one();
+
+    let body = run_task.await.unwrap();
+    assert_eq!(sse_kinds(&body).last().unwrap(), "done");
+
+    let second_texts: String = {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        requests[1]
+            .messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(second_texts.contains("check the db instead"));
+
+    let stored = store.read(TENANT, "t1").await.unwrap();
+    assert!(stored.iter().any(|s| matches!(
+        &s.event,
+        runic_state::SessionEvent::Message { msg, .. }
+            if msg.content.text_content().contains("check the db instead")
+    )));
+}
+
+#[tokio::test]
+async fn steer_with_empty_text_is_400() {
+    let app = scripted_router();
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "  " }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

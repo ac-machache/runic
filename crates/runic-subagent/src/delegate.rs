@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{Agent, CancelToken, RunContext};
+use runic_agent::{Agent, CancelToken, ExternalEvents, RunContext, TasksSnapshot};
+use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::def::{AgentDef, AgentRoster};
@@ -261,6 +262,18 @@ impl DelegateTool {
             },
         );
 
+        let external = ctx.get::<ExternalEvents>();
+        let run_id = ctx.run_id.clone();
+        if let Some(external) = &external {
+            external.emit(SessionEvent::TaskSpawned {
+                run_id: run_id.clone(),
+                task_id: task_id.clone(),
+                agent: agent.to_string(),
+                prompt: head(&prompt, 300),
+                at: chrono::Utc::now(),
+            });
+        }
+
         let builder = self.builder.clone();
         let tasks = self.tasks.clone();
         let dctx = self.child_ctx(cancel, ctx);
@@ -268,20 +281,35 @@ impl DelegateTool {
         tokio::spawn(async move {
             let _guard = guard; // hold the concurrent slot until done
             let result = run_child(&builder, &def, &dctx, &prompt).await;
-            if let Some(task) = tasks.lock().unwrap().get_mut(&tid) {
+            let outcome = {
+                let mut tasks = tasks.lock().unwrap();
+                let Some(task) = tasks.get_mut(&tid) else {
+                    return;
+                };
                 if task.status == TaskStatus::Cancelled {
                     return;
                 }
                 match result {
                     Ok(text) => {
                         task.status = TaskStatus::Completed;
-                        task.output = Some(text);
+                        task.output = Some(text.clone());
+                        (runic_state::TaskStatus::Completed, Some(text))
                     }
                     Err(e) => {
                         task.status = TaskStatus::Failed;
                         task.error = Some(e.to_string());
+                        (runic_state::TaskStatus::Failed, Some(e.to_string()))
                     }
                 }
+            };
+            if let Some(external) = &external {
+                external.emit(SessionEvent::TaskFinished {
+                    run_id,
+                    task_id: tid,
+                    status: outcome.0,
+                    result: outcome.1,
+                    at: chrono::Utc::now(),
+                });
             }
         });
 
@@ -290,10 +318,9 @@ impl DelegateTool {
         ))
     }
 
-    fn check_result(&self, task_id: &str) -> ToolResult {
-        match self.tasks.lock().unwrap().get(task_id) {
-            None => ToolResult::error(format!("no such task '{task_id}'")),
-            Some(task) => match task.status {
+    fn check_result(&self, task_id: &str, ctx: &ToolContext) -> ToolResult {
+        if let Some(task) = self.tasks.lock().unwrap().get(task_id) {
+            return match task.status {
                 TaskStatus::Running => ToolResult::ok(format!("task '{task_id}' is still running")),
                 TaskStatus::Completed => ToolResult::ok(task.output.clone().unwrap_or_default()),
                 TaskStatus::Failed => ToolResult::error(format!(
@@ -301,36 +328,91 @@ impl DelegateTool {
                     task.error.clone().unwrap_or_default()
                 )),
                 TaskStatus::Cancelled => ToolResult::ok(format!("task '{task_id}' was cancelled")),
+            };
+        }
+        let Some(snapshot) = ctx.get::<TasksSnapshot>() else {
+            return ToolResult::error(format!("no such task '{task_id}'"));
+        };
+        match snapshot.0.get(task_id) {
+            None => ToolResult::error(format!("no such task '{task_id}'")),
+            Some(record) => match record.status {
+                runic_state::TaskStatus::Running => ToolResult::ok(format!(
+                    "task '{task_id}' was orphaned by a restart — its live handle is gone"
+                )),
+                runic_state::TaskStatus::Completed => {
+                    ToolResult::ok(record.result.clone().unwrap_or_default())
+                }
+                runic_state::TaskStatus::Failed => ToolResult::error(format!(
+                    "task '{task_id}' failed: {}",
+                    record.result.clone().unwrap_or_default()
+                )),
+                runic_state::TaskStatus::Cancelled => {
+                    ToolResult::ok(format!("task '{task_id}' was cancelled"))
+                }
             },
         }
     }
 
-    fn list_results(&self) -> ToolResult {
-        let tasks = self.tasks.lock().unwrap();
-        if tasks.is_empty() {
-            return ToolResult::ok("no background delegations");
-        }
-        let lines: Vec<String> = tasks
-            .iter()
-            .map(|(id, t)| format!("- {id}: {} [{:?}]", t.agent, t.status))
-            .collect();
-        ToolResult::ok(lines.join("\n"))
-    }
-
-    fn cancel_task(&self, task_id: &str) -> ToolResult {
-        match self.tasks.lock().unwrap().get_mut(task_id) {
-            None => ToolResult::error(format!("no such task '{task_id}'")),
-            Some(task) => {
-                if task.status == TaskStatus::Running {
-                    task.cancel.cancel();
-                    task.status = TaskStatus::Cancelled;
-                    ToolResult::ok(format!("cancelled task '{task_id}'"))
-                } else {
-                    ToolResult::ok(format!("task '{task_id}' already {:?}", task.status))
-                }
+    fn list_results(&self, ctx: &ToolContext) -> ToolResult {
+        let mut lines: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        if let Some(snapshot) = ctx.get::<TasksSnapshot>() {
+            for (id, record) in snapshot.0.iter() {
+                lines.insert(
+                    id.clone(),
+                    format!("- {id}: {} [{:?}]", record.agent, record.status),
+                );
             }
         }
+        for (id, task) in self.tasks.lock().unwrap().iter() {
+            lines.insert(
+                id.clone(),
+                format!("- {id}: {} [{:?}]", task.agent, task.status),
+            );
+        }
+        if lines.is_empty() {
+            return ToolResult::ok("no background delegations");
+        }
+        ToolResult::ok(lines.into_values().collect::<Vec<_>>().join("\n"))
     }
+
+    fn cancel_task(&self, task_id: &str, ctx: &ToolContext) -> ToolResult {
+        let transitioned = {
+            match self.tasks.lock().unwrap().get_mut(task_id) {
+                None => return ToolResult::error(format!("no such task '{task_id}'")),
+                Some(task) => {
+                    if task.status == TaskStatus::Running {
+                        task.cancel.cancel();
+                        task.status = TaskStatus::Cancelled;
+                        true
+                    } else {
+                        return ToolResult::ok(format!(
+                            "task '{task_id}' already {:?}",
+                            task.status
+                        ));
+                    }
+                }
+            }
+        };
+        if transitioned && let Some(external) = ctx.get::<ExternalEvents>() {
+            external.emit(SessionEvent::TaskFinished {
+                run_id: ctx.run_id.clone(),
+                task_id: task_id.to_string(),
+                status: runic_state::TaskStatus::Cancelled,
+                result: None,
+                at: chrono::Utc::now(),
+            });
+        }
+        ToolResult::ok(format!("cancelled task '{task_id}'"))
+    }
+}
+
+fn head(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let h: String = s.chars().take(max).collect();
+    format!("{h}…")
 }
 
 /// Build + run a child agent to completion; return its final assistant text.
@@ -409,12 +491,12 @@ impl Tool for DelegateTool {
 
         let result = match action {
             "check_result" => match args.get("task_id").and_then(|v| v.as_str()) {
-                Some(id) => self.check_result(id),
+                Some(id) => self.check_result(id, ctx),
                 None => ToolResult::error("check_result requires task_id"),
             },
-            "list_results" => self.list_results(),
+            "list_results" => self.list_results(ctx),
             "cancel_task" => match args.get("task_id").and_then(|v| v.as_str()) {
-                Some(id) => self.cancel_task(id),
+                Some(id) => self.cancel_task(id, ctx),
                 None => ToolResult::error("cancel_task requires task_id"),
             },
             "delegate" => {

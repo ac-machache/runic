@@ -11,12 +11,14 @@
 pub mod event;
 pub mod state;
 pub mod stats;
+pub mod tasks;
 
 pub use event::{HookLifecycle, RunOutcome, SessionEvent};
 pub use state::{
     AgentState, EVENT_BROADCAST_CAPACITY, PersistSink, RunTimeContext, RunView, new_run_id,
 };
 pub use stats::ThreadStats;
+pub use tasks::{TaskRecord, TaskStatus};
 
 #[cfg(test)]
 mod tests {
@@ -64,6 +66,8 @@ mod tests {
             system_prompt: String::new(),
             reason: "trim".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
         push_msg(&mut s, "r1", Message::user("c"));
@@ -126,6 +130,8 @@ mod tests {
             system_prompt: String::new(),
             reason: "compaction".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
 

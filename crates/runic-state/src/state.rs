@@ -89,6 +89,12 @@ pub struct AgentState {
     #[serde(default)]
     pub stats: crate::stats::ThreadStats,
 
+    #[serde(default)]
+    pub tasks: HashMap<String, crate::tasks::TaskRecord>,
+
+    #[serde(default)]
+    data: serde_json::Map<String, serde_json::Value>,
+
     pub events: Vec<SessionEvent>,
 
     #[serde(skip, default)]
@@ -119,6 +125,8 @@ impl AgentState {
             label: None,
             system_prompt: system_prompt.into(),
             stats: crate::stats::ThreadStats::default(),
+            tasks: HashMap::new(),
+            data: serde_json::Map::new(),
             events: Vec::new(),
             runtime: RunTimeContext::default(),
             config: serde_json::Map::new(),
@@ -151,13 +159,68 @@ impl AgentState {
         if let Some(sink) = &self.persist_tx {
             sink.send(ev.clone());
         }
+        self.fold_event(ev);
+    }
+
+    /// Fold without fanning to the sinks — for events that are already
+    /// persisted (replay, or a tool's out-of-dispatch emission).
+    pub fn fold_event(&mut self, ev: SessionEvent) {
         self.stats.fold(&ev);
         match &ev {
             SessionEvent::Message { msg, .. } => self.messages.push(msg.clone()),
+            SessionEvent::TaskSpawned {
+                task_id,
+                agent,
+                prompt,
+                at,
+                ..
+            } => {
+                self.tasks.insert(
+                    task_id.clone(),
+                    crate::tasks::TaskRecord {
+                        task_id: task_id.clone(),
+                        agent: agent.clone(),
+                        prompt: prompt.clone(),
+                        status: crate::tasks::TaskStatus::Running,
+                        result: None,
+                        spawned_at: *at,
+                        finished_at: None,
+                    },
+                );
+            }
+            SessionEvent::TaskFinished {
+                task_id,
+                status,
+                result,
+                at,
+                ..
+            } => {
+                if let Some(record) = self.tasks.get_mut(task_id) {
+                    record.status = *status;
+                    record.result = result.clone();
+                    record.finished_at = Some(*at);
+                }
+            }
+            SessionEvent::StateUpdated { key, value, .. } => {
+                self.data.insert(key.clone(), value.clone());
+            }
             SessionEvent::StateSnapshot {
-                messages, run_id, ..
+                messages,
+                run_id,
+                open_tasks,
+                data,
+                ..
             } => {
                 self.messages = messages.clone();
+                if let Some(open) = open_tasks {
+                    self.tasks = open
+                        .iter()
+                        .map(|t| (t.task_id.clone(), t.clone()))
+                        .collect();
+                }
+                if let Some(data) = data {
+                    self.data = data.clone();
+                }
                 // Pre-snapshot events leave RAM; the store keeps the full log.
                 // The in-flight run's events stay so run bookkeeping works.
                 let cut = self.events.iter().rposition(
@@ -173,6 +236,46 @@ impl AgentState {
             _ => {}
         }
         self.events.push(ev);
+    }
+
+    pub fn update(&mut self, key: impl Into<String>, value: serde_json::Value) {
+        let run_id = self
+            .current_run()
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| "update".to_string());
+        self.push_event(SessionEvent::StateUpdated {
+            run_id,
+            key: key.into(),
+            value,
+            at: Utc::now(),
+        });
+    }
+
+    pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.data.get(key)
+    }
+
+    pub fn data(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.data
+    }
+
+    pub fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord> {
+        let mut open: Vec<_> = self
+            .tasks
+            .values()
+            .filter(|t| t.status == crate::tasks::TaskStatus::Running)
+            .cloned()
+            .collect();
+        open.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
+        open
+    }
+
+    pub fn persist_sink(&self) -> Option<PersistSink> {
+        self.persist_tx.clone()
+    }
+
+    pub fn events_sender(&self) -> Option<broadcast::Sender<SessionEvent>> {
+        self.events_tx.clone()
     }
 
     pub fn messages_for_provider(&self) -> &[Message] {
@@ -325,6 +428,8 @@ mod tests {
             system_prompt: "sys".into(),
             reason: "compaction".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
         state.push_event(message("after", false));

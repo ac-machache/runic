@@ -113,6 +113,8 @@ mod tests {
                     system_prompt: "sp".into(),
                     reason: "compaction".into(),
                     stats: None,
+                    open_tasks: None,
+                    data: None,
                     at: Utc::now(),
                 },
             )

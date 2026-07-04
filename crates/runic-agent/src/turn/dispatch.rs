@@ -282,9 +282,18 @@ impl Agent {
 
     /// A tool context for this run, carrying identity + the per-run config map.
     fn tool_context(&self, run_id: &str) -> ToolContext {
-        ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)
+        let mut ctx = ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)
             .with_config(self.state.config.clone())
-            .with_human(self.human.clone())
+            .with_human(self.human.clone());
+        ctx.insert(crate::ExternalEvents::new(
+            self.state.persist_sink(),
+            self.state.events_sender(),
+            self.pending_external.clone(),
+        ));
+        ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
+            self.state.tasks.clone(),
+        )));
+        ctx
     }
 
     /// Resolve a tool by name: the static registry first, then the on-demand

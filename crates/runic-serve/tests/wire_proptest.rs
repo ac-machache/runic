@@ -64,6 +64,8 @@ fn session_event() -> impl Strategy<Value = SessionEvent> {
             system_prompt: String::new(),
             reason: "c".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at,
         }),
     ]

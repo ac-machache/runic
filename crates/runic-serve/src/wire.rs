@@ -76,6 +76,23 @@ pub enum WireEvent {
         at: DateTime<Utc>,
     },
 
+    TaskSpawned {
+        run_id: String,
+        task_id: String,
+        agent: String,
+    },
+
+    TaskFinished {
+        run_id: String,
+        task_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preview: Option<String>,
+    },
+
+    /// A durable key was written via `state.update`.
+    StateUpdated { run_id: String, key: String },
+
     /// Token usage — emitted at run end.
     Usage {
         input_tokens: u64,
@@ -150,6 +167,9 @@ impl WireEvent {
             Self::RunError { .. } => "run_error",
             Self::Done { .. } => "done",
             Self::HookFired { .. } => "hook_fired",
+            Self::TaskSpawned { .. } => "task_spawned",
+            Self::TaskFinished { .. } => "task_finished",
+            Self::StateUpdated { .. } => "state_updated",
         }
     }
 }
@@ -257,6 +277,36 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             outcome,
             note,
         }),
+        SessionEvent::TaskSpawned {
+            run_id,
+            task_id,
+            agent,
+            ..
+        } => Some(WireEvent::TaskSpawned {
+            run_id,
+            task_id,
+            agent,
+        }),
+        SessionEvent::TaskFinished {
+            run_id,
+            task_id,
+            status,
+            result,
+            ..
+        } => Some(WireEvent::TaskFinished {
+            run_id,
+            task_id,
+            status: match status {
+                runic_state::TaskStatus::Running => "running".to_string(),
+                runic_state::TaskStatus::Completed => "completed".to_string(),
+                runic_state::TaskStatus::Failed => "failed".to_string(),
+                runic_state::TaskStatus::Cancelled => "cancelled".to_string(),
+            },
+            preview: result.map(|r| truncate(&r, 300)),
+        }),
+        SessionEvent::StateUpdated { run_id, key, .. } => {
+            Some(WireEvent::StateUpdated { run_id, key })
+        }
         SessionEvent::TurnBoundary { .. } | SessionEvent::StateSnapshot { .. } => None,
     }
 }

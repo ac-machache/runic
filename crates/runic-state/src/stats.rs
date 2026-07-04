@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::SessionEvent;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThreadStats {
     pub runs: u64,
     pub turns: u64,
@@ -13,6 +14,9 @@ pub struct ThreadStats {
     pub output_tokens: u64,
     pub total_tool_calls: u64,
     pub tool_calls: HashMap<String, u64>,
+    pub tasks_spawned: u64,
+    pub tasks_finished: u64,
+    pub tasks_failed: u64,
 }
 
 impl ThreadStats {
@@ -35,6 +39,14 @@ impl ThreadStats {
                     }
                 }
             }
+            SessionEvent::TaskSpawned { .. } => self.tasks_spawned += 1,
+            SessionEvent::TaskFinished { status, .. } => match status {
+                crate::tasks::TaskStatus::Completed => self.tasks_finished += 1,
+                crate::tasks::TaskStatus::Failed | crate::tasks::TaskStatus::Cancelled => {
+                    self.tasks_failed += 1
+                }
+                crate::tasks::TaskStatus::Running => {}
+            },
             SessionEvent::StateSnapshot {
                 stats: Some(stats), ..
             } => {
@@ -115,6 +127,8 @@ mod tests {
             system_prompt: "sys".into(),
             reason: "compaction".into(),
             stats: Some(rolled.clone()),
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
         assert_eq!(stats, rolled);
@@ -131,6 +145,8 @@ mod tests {
             system_prompt: "sys".into(),
             reason: "old row".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
         assert_eq!(stats.total_tool_calls, 1);

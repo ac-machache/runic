@@ -73,6 +73,34 @@ pub enum SessionEvent {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stats: Option<crate::stats::ThreadStats>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_tasks: Option<Vec<crate::tasks::TaskRecord>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Map<String, serde_json::Value>>,
+        at: DateTime<Utc>,
+    },
+
+    TaskSpawned {
+        run_id: String,
+        task_id: String,
+        agent: String,
+        prompt: String,
+        at: DateTime<Utc>,
+    },
+
+    TaskFinished {
+        run_id: String,
+        task_id: String,
+        status: crate::tasks::TaskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<String>,
+        at: DateTime<Utc>,
+    },
+
+    StateUpdated {
+        run_id: String,
+        key: String,
+        value: serde_json::Value,
         at: DateTime<Utc>,
     },
 }
@@ -85,7 +113,10 @@ impl SessionEvent {
             | SessionEvent::Message { run_id, .. }
             | SessionEvent::TurnBoundary { run_id, .. }
             | SessionEvent::HookRan { run_id, .. }
-            | SessionEvent::StateSnapshot { run_id, .. } => run_id,
+            | SessionEvent::StateSnapshot { run_id, .. }
+            | SessionEvent::TaskSpawned { run_id, .. }
+            | SessionEvent::TaskFinished { run_id, .. }
+            | SessionEvent::StateUpdated { run_id, .. } => run_id,
         }
     }
 }

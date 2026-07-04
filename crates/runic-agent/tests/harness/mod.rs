@@ -773,6 +773,9 @@ pub fn session_kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
             SessionEvent::TurnBoundary { .. } => "TurnBoundary",
             SessionEvent::HookRan { .. } => "HookRan",
             SessionEvent::StateSnapshot { .. } => "StateSnapshot",
+            SessionEvent::TaskSpawned { .. } => "TaskSpawned",
+            SessionEvent::TaskFinished { .. } => "TaskFinished",
+            SessionEvent::StateUpdated { .. } => "StateUpdated",
         })
         .collect()
 }

@@ -19,6 +19,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 runic-agent = { path = "../runic-agent" }
+runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }
 
 [dev-dependencies]

@@ -16,7 +16,10 @@ pub(crate) fn event_at(e: &SessionEvent) -> DateTime<Utc> {
         | SessionEvent::Message { at, .. }
         | SessionEvent::TurnBoundary { at, .. }
         | SessionEvent::HookRan { at, .. }
-        | SessionEvent::StateSnapshot { at, .. } => *at,
+        | SessionEvent::StateSnapshot { at, .. }
+        | SessionEvent::TaskSpawned { at, .. }
+        | SessionEvent::TaskFinished { at, .. }
+        | SessionEvent::StateUpdated { at, .. } => *at,
     }
 }
 

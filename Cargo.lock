@@ -1873,6 +1873,7 @@ dependencies = [
  "futures",
  "runic-agent",
  "runic-provider",
+ "runic-state",
  "runic-tool",
  "runic-types",
  "serde",

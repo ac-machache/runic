@@ -123,6 +123,21 @@ impl Agent {
                 break Ok("cancelled".to_string());
             }
 
+            // Externally emitted events (background task completions) are
+            // already persisted — fold them into the warm state only.
+            {
+                let pending: Vec<_> = {
+                    let mut queue = self
+                        .pending_external
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    queue.drain(..).collect()
+                };
+                for ev in pending {
+                    self.state.fold_event(ev);
+                }
+            }
+
             // Steering — inject any pending nudges as user messages.
             if let Some(rx) = steering.as_deref_mut() {
                 while let Ok(text) = rx.try_recv() {

@@ -139,6 +139,8 @@ impl WriteHook for CompactionHook {
             .unwrap_or_else(|| "compaction".to_string());
         let folded = split;
         let stats = state.stats.clone();
+        let open_tasks = state.open_tasks();
+        let data = state.data().clone();
         state.push_event(SessionEvent::StateSnapshot {
             run_id,
             messages,
@@ -148,6 +150,8 @@ impl WriteHook for CompactionHook {
                 self.max_context_tokens
             ),
             stats: Some(stats),
+            open_tasks: Some(open_tasks),
+            data: Some(data),
             at: Utc::now(),
         });
         tracing::info!(

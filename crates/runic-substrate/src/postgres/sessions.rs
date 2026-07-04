@@ -46,6 +46,9 @@ fn event_kind(e: &SessionEvent) -> &'static str {
         SessionEvent::TurnBoundary { .. } => "TurnBoundary",
         SessionEvent::HookRan { .. } => "HookRan",
         SessionEvent::StateSnapshot { .. } => "StateSnapshot",
+        SessionEvent::TaskSpawned { .. } => "TaskSpawned",
+        SessionEvent::TaskFinished { .. } => "TaskFinished",
+        SessionEvent::StateUpdated { .. } => "StateUpdated",
     }
 }
 

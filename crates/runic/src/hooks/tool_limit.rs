@@ -261,6 +261,8 @@ mod tests {
             system_prompt: "sys".into(),
             reason: "test compaction".into(),
             stats: None,
+            open_tasks: None,
+            data: None,
             at: Utc::now(),
         });
         assert_eq!(s.messages_for_provider().len(), 1);

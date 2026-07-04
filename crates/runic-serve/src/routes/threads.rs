@@ -77,6 +77,9 @@ pub struct ThreadStatsView {
     pub output_tokens: u64,
     pub total_tool_calls: u64,
     pub tool_calls: std::collections::HashMap<String, u64>,
+    pub tasks_spawned: u64,
+    pub tasks_finished: u64,
+    pub tasks_failed: u64,
 }
 
 impl From<&runic_state::ThreadStats> for ThreadStatsView {
@@ -88,6 +91,9 @@ impl From<&runic_state::ThreadStats> for ThreadStatsView {
             output_tokens: s.output_tokens,
             total_tool_calls: s.total_tool_calls,
             tool_calls: s.tool_calls.clone(),
+            tasks_spawned: s.tasks_spawned,
+            tasks_finished: s.tasks_finished,
+            tasks_failed: s.tasks_failed,
         }
     }
 }

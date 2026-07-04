@@ -235,6 +235,8 @@ impl ThreadPool {
                         SessionEvent::Message { .. }
                             | SessionEvent::StateSnapshot { .. }
                             | SessionEvent::RunEnd { .. }
+                            | SessionEvent::TaskSpawned { .. }
+                            | SessionEvent::TaskFinished { .. }
                     ) {
                         agent.state_mut().push_event(entry.event);
                         replayed += 1;
@@ -636,6 +638,8 @@ mod tests {
                         system_prompt: "sys".into(),
                         reason: "compaction".into(),
                         stats: Some(snapshot_stats),
+                        open_tasks: None,
+                        data: None,
                         at: chrono::Utc::now(),
                     },
                     message_event(0),

@@ -23,12 +23,14 @@ use runic_state::{AgentState, HookLifecycle};
 use runic_tool::{ActivatedToolSet, HumanInterface, Tool};
 use tokio::sync::mpsc;
 
+mod external;
 mod run;
 mod turn;
 
 pub mod loop_guard;
 pub mod retry;
 
+pub use external::{ExternalEvents, ReminderQueue, TasksSnapshot};
 pub use runic_state::RunOutcome;
 
 /// Default hard cap on model turns per run — a backstop against runaway loops
@@ -284,6 +286,7 @@ pub struct Agent {
     /// Full tool outputs (keyed by tool_use_id) whose persisted form was
     /// summarized — re-applied to the *next* request only, then cleared.
     pub(crate) transient_tool_outputs: Mutex<HashMap<String, String>>,
+    pub(crate) pending_external: Arc<Mutex<Vec<runic_state::SessionEvent>>>,
 }
 
 impl Agent {
@@ -453,6 +456,7 @@ impl AgentBuilder {
             human: None,
             activated: self.activated,
             transient_tool_outputs: Mutex::new(HashMap::new()),
+            pending_external: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

@@ -143,14 +143,17 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
     }
     if let Some(m) = &a.memory
         && let Some(store) = &store
-        && m.review_interval() > 0
+        && m.curation_interval_turns() > 0
     {
-        let hook = MemoryCurator::new(
-            m.review_interval(),
+        let mut hook = MemoryCurator::new(
+            m.curation_interval_turns(),
             a.provider.clone(),
             &a.model,
             store.clone(),
         );
+        if let Some(guidance) = m.curation_guidance_override() {
+            hook = hook.with_guidance(guidance);
+        }
         b = b.write_hook(Arc::new(hook));
     }
     for hook in &a.write_hooks {

@@ -14,10 +14,7 @@ use serde_json::Value;
 use crate::error::MemoryError;
 use crate::store::{MemoryStore, Target};
 
-/// Tool description — folds in hermes's MEMORY_GUIDANCE so an LLM authored
-/// against hermes uses this identically: *when* to save, declarative-not-
-/// imperative phrasing, and what NOT to store.
-const DESCRIPTION: &str = "Persistent curated memory you control, injected into your prompt every session. Two stores:\n\
+pub const DEFAULT_MEMORY_TOOL_DESCRIPTION: &str = "Persistent curated memory you control, injected into your prompt every session. Two stores:\n\
 - target='memory' (MEMORY.md): your own notes — environment facts, project conventions, tool quirks, lessons learned. Cap 2200 chars.\n\
 - target='user' (USER.md): who the user is — preferences, role, communication style, pet peeves, workflow habits. Cap 1375 chars.\n\
 \n\
@@ -37,11 +34,20 @@ Style: one short self-contained line per entry. No paragraphs, no timestamps/dat
 
 pub struct MemoryTool {
     store: Arc<MemoryStore>,
+    description: String,
 }
 
 impl MemoryTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            description: DEFAULT_MEMORY_TOOL_DESCRIPTION.to_string(),
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
     }
 }
 
@@ -52,7 +58,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        DESCRIPTION
+        &self.description
     }
 
     fn parameters_schema(&self) -> Value {
@@ -203,6 +209,14 @@ mod tests {
 
     async fn run(tool: &MemoryTool, v: Value) -> ToolResult {
         tool.execute(v, &ctx()).await.unwrap()
+    }
+
+    #[test]
+    fn description_defaults_and_is_overridable() {
+        let (tool, _) = make();
+        assert_eq!(tool.description(), DEFAULT_MEMORY_TOOL_DESCRIPTION);
+        let custom = tool.with_description("notes for a support bot");
+        assert_eq!(custom.description(), "notes for a support bot");
     }
 
     #[tokio::test]

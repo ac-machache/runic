@@ -8,14 +8,12 @@ use runic_provider::Provider;
 use runic_state::AgentState;
 use runic_types::Role;
 
-/// Every N turns, spawn an off-loop curator that reviews the transcript and
-/// curates the shared memory store. (Lives here, not in `runic-memory`, because
-/// it spawns an `Agent` — `runic-memory` must not depend on `runic-agent`.)
 pub struct MemoryCurator {
     scheduler: ReviewScheduler,
     provider: Arc<dyn Provider>,
     model: String,
     store: Arc<MemoryStore>,
+    guidance: String,
 }
 
 impl MemoryCurator {
@@ -30,7 +28,13 @@ impl MemoryCurator {
             provider,
             model: model.into(),
             store,
+            guidance: MEMORY_REVIEW_GUIDANCE.to_string(),
         }
+    }
+
+    pub fn with_guidance(mut self, guidance: impl Into<String>) -> Self {
+        self.guidance = guidance.into();
+        self
     }
 }
 
@@ -54,10 +58,11 @@ impl WriteHook for MemoryCurator {
         let provider = self.provider.clone();
         let model = self.model.clone();
         let store = self.store.clone();
+        let guidance = self.guidance.clone();
         tokio::spawn(async move {
             let mut curator = Agent::builder(provider, "memory-review", "review")
                 .model(model)
-                .system_prompt(MEMORY_REVIEW_GUIDANCE)
+                .system_prompt(guidance)
                 .tool(Arc::new(MemoryTool::new(store)))
                 .max_turns(8)
                 .graceful_max_turns(true)

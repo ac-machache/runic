@@ -32,5 +32,5 @@ for _ in $(seq 1 30); do
   echo -n "."; sleep 1
 done
 
-cargo test -p runic-substrate --features postgres --test postgres_contract -- --nocapture "$@"
+cargo nextest run -p runic-substrate --features postgres --test postgres_contract --profile full -- "$@"
 echo "postgres contract: OK"

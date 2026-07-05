@@ -29,4 +29,4 @@ pub use store::{
     MemoryStore, Target, USER_KEY, render_block,
 };
 pub use threats::ThreatHit;
-pub use tool::MemoryTool;
+pub use tool::{DEFAULT_MEMORY_TOOL_DESCRIPTION, MemoryTool};

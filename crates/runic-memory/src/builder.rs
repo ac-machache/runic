@@ -1,8 +1,3 @@
-//! The `memory(...)` builder — resolve a per-tenant [`MemoryStore`] and
-//! the `memory` tool. The background-review hook lives in the wiring layer (it
-//! needs the agent loop, which this crate must not depend on); this builder
-//! just records the review interval via [`Memory::review_interval`].
-
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,18 +10,22 @@ pub fn memory(path: impl Into<PathBuf>) -> Memory {
     Memory {
         path: path.into(),
         scoped: false,
-        mem_tools: false,
+        tool: false,
+        tool_description: None,
         create: false,
-        review: 0,
+        curate_every_turns: 0,
+        curation_guidance: None,
     }
 }
 
 pub struct Memory {
     path: PathBuf,
     scoped: bool,
-    mem_tools: bool,
+    tool: bool,
+    tool_description: Option<String>,
     create: bool,
-    review: u32,
+    curate_every_turns: u32,
+    curation_guidance: Option<String>,
 }
 
 impl Memory {
@@ -38,30 +37,39 @@ impl Memory {
         self.scoped = true;
         self
     }
-    pub fn include_mem_tools(mut self) -> Self {
-        self.mem_tools = true;
+    pub fn include_memory_tool(mut self) -> Self {
+        self.tool = true;
         self
     }
-    /// Run a background memory-review curator every `every_n_turns` user turns
-    /// (hermes-style reflection). `0` (default) disables it. The wiring layer
-    /// reads this via [`Memory::review_interval`].
-    pub fn review(mut self, every_n_turns: u32) -> Self {
-        self.review = every_n_turns;
+    pub fn memory_tool_description(mut self, description: impl Into<String>) -> Self {
+        self.tool_description = Some(description.into());
+        self
+    }
+    pub fn curate_every_turns(mut self, turns: u32) -> Self {
+        self.curate_every_turns = turns;
         self
     }
 
-    /// The configured review interval (`0` = disabled).
-    pub fn review_interval(&self) -> u32 {
-        self.review
+    pub fn curation_guidance(mut self, guidance: impl Into<String>) -> Self {
+        self.curation_guidance = Some(guidance.into());
+        self
+    }
+
+    pub fn curation_interval_turns(&self) -> u32 {
+        self.curate_every_turns
+    }
+
+    pub fn curation_guidance_override(&self) -> Option<&str> {
+        self.curation_guidance.as_deref()
     }
 
     pub async fn store(&self, tenant: &str) -> Arc<MemoryStore> {
         tracing::info!(
             root = %self.path.display(),
             scoped = self.scoped,
-            mem_tools = self.mem_tools,
+            tool = self.tool,
             init = self.create,
-            review = self.review,
+            curate_every_turns = self.curate_every_turns,
             "configuring memory"
         );
 
@@ -84,16 +92,18 @@ impl Memory {
             tracing::error!(dir = %dir.display(), error = %e, "failed to create memory dir");
         }
 
-        // Cross-process flock is enabled: the sidecar `.lock` files land under
-        // the same real directory as the data.
         let storage = Arc::new(LocalStorage::new(&dir));
         Arc::new(MemoryStore::new(storage).with_lock_dir(dir))
     }
 
     pub fn tools(&self, store: Arc<MemoryStore>) -> Option<Arc<dyn Tool>> {
-        if self.mem_tools {
+        if self.tool {
             tracing::debug!("memory tool enabled");
-            Some(Arc::new(MemoryTool::new(store)) as Arc<dyn Tool>)
+            let mut tool = MemoryTool::new(store);
+            if let Some(description) = &self.tool_description {
+                tool = tool.with_description(description.clone());
+            }
+            Some(Arc::new(tool) as Arc<dyn Tool>)
         } else {
             None
         }

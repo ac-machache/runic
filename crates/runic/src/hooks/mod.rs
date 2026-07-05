@@ -4,8 +4,8 @@ mod reminders;
 mod task_reminder;
 mod tool_limit;
 
-pub use compaction::Compaction;
 pub(crate) use compaction::CompactionHook;
+pub use compaction::{Compaction, DEFAULT_SUMMARY_GUIDANCE};
 pub use memory_curator::MemoryCurator;
 pub use reminders::ReminderHook;
 pub use runic_agent::ReminderQueue;

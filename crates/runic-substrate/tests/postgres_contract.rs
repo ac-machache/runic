@@ -91,7 +91,7 @@ fn msg(text: &str, at: DateTime<Utc>) -> SessionEvent {
 /// back to a different backend. (Runs without a test DB: the URL is bogus.)
 #[tokio::test]
 async fn production_builders_fail_closed_on_bad_url() {
-    let bad = "postgres://nobody:nobody@127.0.0.1:1/none";
+    let bad = "postgres://";
     assert!(runic_substrate::sessions_postgres(bad).await.is_err());
     assert!(
         runic_substrate::blobs_postgres(bad, std::env::temp_dir().join("runic-fail-closed"))

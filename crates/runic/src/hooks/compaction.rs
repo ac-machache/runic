@@ -7,7 +7,7 @@ use runic_provider::{CompletionRequest, Provider};
 use runic_state::{AgentState, SessionEvent};
 use runic_types::{ContentBlock, Message, MessageContent, Role};
 
-const SUMMARY_SYSTEM_PROMPT: &str = "You compress conversation history. Summarize the transcript \
+pub const DEFAULT_SUMMARY_GUIDANCE: &str = "You compress conversation history. Summarize the transcript \
 faithfully and densely: goals, decisions, facts, tool results worth keeping, open threads, and \
 the user's constraints or preferences. Third person, no preamble, no commentary — output only \
 the summary.";
@@ -22,6 +22,7 @@ pub struct Compaction {
     pub keep_recent: usize,
     pub provider: Option<Arc<dyn Provider>>,
     pub model: Option<String>,
+    pub summary_guidance: Option<String>,
 }
 
 impl Default for Compaction {
@@ -31,6 +32,7 @@ impl Default for Compaction {
             keep_recent: 10,
             provider: None,
             model: None,
+            summary_guidance: None,
         }
     }
 }
@@ -52,6 +54,10 @@ impl Compaction {
         self.model = Some(model.into());
         self
     }
+    pub fn summary_guidance(mut self, guidance: impl Into<String>) -> Self {
+        self.summary_guidance = Some(guidance.into());
+        self
+    }
 }
 
 pub(crate) struct CompactionHook {
@@ -59,6 +65,7 @@ pub(crate) struct CompactionHook {
     keep_recent: usize,
     provider: Arc<dyn Provider>,
     model: String,
+    guidance: String,
 }
 
 impl CompactionHook {
@@ -72,6 +79,10 @@ impl CompactionHook {
             keep_recent: cfg.keep_recent,
             provider: cfg.provider.clone().unwrap_or(agent_provider),
             model: cfg.model.clone().unwrap_or_else(|| agent_model.to_string()),
+            guidance: cfg
+                .summary_guidance
+                .clone()
+                .unwrap_or_else(|| DEFAULT_SUMMARY_GUIDANCE.to_string()),
         }
     }
 }
@@ -114,7 +125,7 @@ impl WriteHook for CompactionHook {
             tools: vec![],
             max_tokens: 2048,
             temperature: 0.2,
-            system: Some(SUMMARY_SYSTEM_PROMPT.to_string()),
+            system: Some(self.guidance.clone()),
             thinking: None,
         };
         let summary = match self.provider.complete(request).await {

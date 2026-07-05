@@ -396,7 +396,7 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
             run_id: "r1".into(),
             at: ts(5),
         },
-        SessionEvent::HookRan {
+        SessionEvent::HookFired {
             run_id: "r1".into(),
             hook: "guard".into(),
             lifecycle: HookLifecycle::BeforeTool,

@@ -103,7 +103,7 @@ impl WriteHook for CompactionHook {
             let total_chars: usize = msgs.iter().map(|m| m.content.text_length()).sum();
             let est = total_chars / CHARS_PER_TOKEN;
             if est <= self.max_context_tokens || msgs.len() <= self.keep_recent {
-                return HookOutcome::Continue;
+                return HookOutcome::Noop;
             }
             est
         };
@@ -115,7 +115,7 @@ impl WriteHook for CompactionHook {
                 est_tokens,
                 "compaction due but no clean tail boundary found — skipped"
             );
-            return HookOutcome::Continue;
+            return HookOutcome::Noop;
         };
 
         let transcript = render(&msgs[..split]);
@@ -132,12 +132,12 @@ impl WriteHook for CompactionHook {
             Ok(response) => response.text(),
             Err(e) => {
                 tracing::warn!(error = %e, "compaction summarizer failed — skipped");
-                return HookOutcome::Continue;
+                return HookOutcome::Noop;
             }
         };
         if summary.trim().is_empty() {
             tracing::warn!("compaction summarizer returned nothing — skipped");
-            return HookOutcome::Continue;
+            return HookOutcome::Noop;
         }
 
         let mut messages = Vec::with_capacity(msgs.len() - split + 1);

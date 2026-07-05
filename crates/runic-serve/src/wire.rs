@@ -263,7 +263,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             at,
         }),
         SessionEvent::Message { run_id, msg, at } => Some(WireEvent::Message { run_id, msg, at }),
-        SessionEvent::HookRan {
+        SessionEvent::HookFired {
             hook,
             lifecycle,
             hook_kind,
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn hook_ran_is_visible_on_replay() {
-        let evt = SessionEvent::HookRan {
+        let evt = SessionEvent::HookFired {
             run_id: "r1".into(),
             hook: "guard".into(),
             lifecycle: HookLifecycle::AfterTool,

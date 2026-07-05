@@ -453,7 +453,7 @@ mod tests {
     fn push_event_records_hook_ran_without_touching_messages() {
         let mut state = AgentState::new("u", "s", "sys");
         state.push_event(message("hello", true));
-        state.push_event(SessionEvent::HookRan {
+        state.push_event(SessionEvent::HookFired {
             run_id: "r".into(),
             hook: "guard".into(),
             lifecycle: HookLifecycle::BeforeTool,
@@ -465,7 +465,7 @@ mod tests {
 
         assert_eq!(state.messages_for_provider().len(), 1);
         assert_eq!(state.events().len(), 2);
-        assert!(matches!(state.events()[1], SessionEvent::HookRan { .. }));
+        assert!(matches!(state.events()[1], SessionEvent::HookFired { .. }));
     }
 
     #[test]

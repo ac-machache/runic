@@ -102,7 +102,7 @@ proptest! {
             None => prop_assert!(
                 matches!(
                     e,
-                    SessionEvent::TurnBoundary { .. } | SessionEvent::HookRan { .. } | SessionEvent::StateSnapshot { .. }
+                    SessionEvent::TurnBoundary { .. } | SessionEvent::HookFired { .. } | SessionEvent::StateSnapshot { .. }
                 ),
                 "None filtered a client-visible kind"
             ),

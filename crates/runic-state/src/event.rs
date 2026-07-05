@@ -53,7 +53,8 @@ pub enum SessionEvent {
         at: DateTime<Utc>,
     },
 
-    HookRan {
+    #[serde(alias = "HookRan")]
+    HookFired {
         run_id: String,
         hook: String,
         lifecycle: HookLifecycle,
@@ -112,7 +113,7 @@ impl SessionEvent {
             | SessionEvent::RunEnd { run_id, .. }
             | SessionEvent::Message { run_id, .. }
             | SessionEvent::TurnBoundary { run_id, .. }
-            | SessionEvent::HookRan { run_id, .. }
+            | SessionEvent::HookFired { run_id, .. }
             | SessionEvent::StateSnapshot { run_id, .. }
             | SessionEvent::TaskSpawned { run_id, .. }
             | SessionEvent::TaskFinished { run_id, .. }

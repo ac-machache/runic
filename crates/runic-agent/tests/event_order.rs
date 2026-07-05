@@ -17,7 +17,7 @@ use runic_tool::ToolResult;
 use runic_types::ToolCall;
 
 #[tokio::test]
-async fn every_hook_firing_leaves_a_hookran_entry() {
+async fn every_hook_execution_leaves_a_hookfired_entry() {
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
@@ -39,22 +39,68 @@ async fn every_hook_firing_leaves_a_hookran_entry() {
         vec![
             "RunStart",
             "Message",      // user
-            "HookRan",      // before_agent (continue)
-            "HookRan",      // before_model (continue)
+            "HookFired",    // before_agent (continue)
+            "HookFired",    // before_model (continue)
             "Message",      // assistant (tool_use)
-            "HookRan",      // after_model (continue)
+            "HookFired",    // after_model (continue)
             "TurnBoundary", // turn 1
-            "HookRan",      // before_tool (substitute)
-            "HookRan",      // after_tool (continue)
+            "HookFired",    // before_tool (substitute)
+            "HookFired",    // after_tool (continue)
             "Message",      // substituted tool result
-            "HookRan",      // before_model (continue)
+            "HookFired",    // before_model (continue)
             "Message",      // assistant (final text)
-            "HookRan",      // after_model (continue)
+            "HookFired",    // after_model (continue)
             "TurnBoundary", // turn 2
-            "HookRan",      // after_agent (continue)
+            "HookFired",    // after_agent (continue)
             "RunEnd",
         ]
     );
+}
+
+struct UnscopedOneMethod;
+
+#[async_trait]
+impl WriteHook for UnscopedOneMethod {
+    fn name(&self) -> &str {
+        "unscoped-one-method"
+    }
+    async fn before_tool(&self, _state: &mut AgentState, _call: &mut ToolCall) -> HookOutcome {
+        HookOutcome::SubstituteToolResult(ToolResult::ok("hooked"))
+    }
+}
+
+#[tokio::test]
+async fn default_bodies_fire_without_leaving_audit_entries() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "REAL")))
+        .write_hook(Arc::new(UnscopedOneMethod))
+        .build();
+    let mut events = capture_session_events(&mut agent);
+
+    agent.run("go").await.unwrap();
+
+    let hook_events: Vec<SessionEvent> = drain_session(&mut events)
+        .into_iter()
+        .filter(|e| matches!(e, SessionEvent::HookFired { .. }))
+        .collect();
+    assert_eq!(
+        hook_events.len(),
+        1,
+        "an unscoped hook fires at all six points but only its overridden method leaves an entry"
+    );
+    let SessionEvent::HookFired {
+        lifecycle, outcome, ..
+    } = &hook_events[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(*lifecycle, HookLifecycle::BeforeTool);
+    assert_eq!(outcome, "substitute");
 }
 
 struct BeforeToolOnly;
@@ -94,7 +140,7 @@ async fn scoped_hook_fires_only_at_its_declared_points() {
             "Message",      // user
             "Message",      // assistant (tool_use)
             "TurnBoundary", // turn 1
-            "HookRan",      // before_tool (substitute) — the only firing
+            "HookFired",    // before_tool (substitute) — the only firing
             "Message",      // substituted tool result
             "Message",      // assistant (final text)
             "TurnBoundary", // turn 2
@@ -140,10 +186,10 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
 
     let hook_events: Vec<SessionEvent> = drain_session(&mut events)
         .into_iter()
-        .filter(|e| matches!(e, SessionEvent::HookRan { .. }))
+        .filter(|e| matches!(e, SessionEvent::HookFired { .. }))
         .collect();
     assert_eq!(hook_events.len(), 1);
-    let SessionEvent::HookRan {
+    let SessionEvent::HookFired {
         hook,
         lifecycle,
         hook_kind,

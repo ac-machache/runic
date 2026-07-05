@@ -495,6 +495,170 @@ pub async fn wait_run(
     }
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BackgroundRunResponse {
+    pub run_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RunStatusResponse {
+    pub run_id: String,
+    pub agent: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `POST /threads/{thread_id}/runs`
+///
+/// Fire-and-forget: accept the turn, return `202` with the `run_id`
+/// immediately, and execute detached. Attach to the live/replayed events via
+/// `GET .../runs/{run_id}/stream` or poll `GET .../runs/{run_id}`.
+#[utoipa::path(
+    post,
+    path = "/threads/{thread_id}/runs",
+    tag = "runs",
+    request_body = RunMessageRequest,
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 202, description = "Run accepted and executing in the background", body = BackgroundRunResponse),
+        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 429, description = "This instance is at its concurrent run limit", body = ErrorBody)
+    )
+)]
+pub async fn background_run(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+    Json(req): Json<RunMessageRequest>,
+) -> Result<(StatusCode, Json<BackgroundRunResponse>), ServeError> {
+    let agent_name = state.agents.resolve_agent(req.agent.as_deref())?;
+    state
+        .runs
+        .check_persist_capacity(&tenant, &thread_id)
+        .await?;
+    let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
+    let user_msg = req.into_message()?;
+    let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
+
+    let mut run_ctx = state
+        .agents
+        .factory(&agent_name)?
+        .build_run_context(&tenant, &thread_id, &ctx_json)
+        .await;
+
+    let run_id = runic_state::new_run_id();
+    state
+        .session_store
+        .create_run(&tenant, &thread_id, &run_id, &agent_name)
+        .await?;
+    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
+    let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    run_ctx = run_ctx
+        .with_cancel(begun.cancel.clone())
+        .with_steering(steering_rx)
+        .with_agent(&agent_name)
+        .with_run_id(&run_id);
+
+    tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run accepted");
+
+    let registry = state.runs.clone();
+    let store = state.session_store.clone();
+    let factory = state.agents.factory(&agent_name)?.clone();
+    let response_run_id = run_id.clone();
+    tokio::spawn(async move {
+        let lock = registry.thread_lock(&tenant, &thread_id).await;
+        let _guard = lock.lock().await;
+        let claim =
+            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if matches!(claim, crate::registry::Claim::Lost) {
+            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return;
+        }
+        let mut agent =
+            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
+        let outcome = agent.run_message_with(user_msg, run_ctx).await;
+        claim.release();
+        let (status, error) = match &outcome {
+            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(_) => (RunStatus::Success, None),
+            Err(e) => (RunStatus::Error, Some(e.to_string())),
+        };
+        if let Err(e) = store
+            .set_run_status(&run_id, status, error.as_deref())
+            .await
+        {
+            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+        }
+        if let Err(e) = &outcome {
+            tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
+        }
+        flush_persist(&begun.persist).await;
+        registry
+            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+            .await;
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(BackgroundRunResponse {
+            run_id: response_run_id,
+            status: RunStatus::Pending.as_str().to_string(),
+        }),
+    ))
+}
+
+/// `GET /threads/{thread_id}/runs/{run_id}`
+///
+/// The run row: status (`pending`/`running`/`success`/`error`/`cancelled`),
+/// error detail, and timestamps — the polling counterpart to the SSE attach.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/runs/{run_id}",
+    tag = "runs",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("run_id" = String, Path, description = "Run id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "The run row", body = RunStatusResponse),
+        (status = 404, description = "Unknown run", body = ErrorBody)
+    )
+)]
+pub async fn run_status(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path((thread_id, run_id)): Path<(String, String)>,
+) -> Result<Json<RunStatusResponse>, ServeError> {
+    let record = state
+        .session_store
+        .get_run(&tenant, &run_id)
+        .await?
+        .filter(|r| r.session_id == thread_id)
+        .ok_or(ServeError::RunNotFound {
+            id: run_id,
+            thread: thread_id,
+        })?;
+    Ok(Json(RunStatusResponse {
+        run_id: record.run_id,
+        agent: record.agent,
+        status: record.status.as_str().to_string(),
+        error: record.error,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }))
+}
+
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
 async fn flush_persist(persist: &crate::registry::PersistHandle) {

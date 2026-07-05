@@ -16,21 +16,18 @@ pub const ALL_POINTS: &[HookLifecycle] = &[
     HookLifecycle::AfterAgent,
 ];
 
-/// What a read-only [`ReadHook`] may ask the loop to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSignal {
+    Noop,
     Continue,
     Stop,
 }
 
-/// What a read-edit [`WriteHook`] may ask the loop to do.
 #[derive(Debug, Clone)]
 pub enum HookOutcome {
+    Noop,
     Continue,
-    /// Skip the tool entirely and use this result instead. Honored only when
-    /// returned from [`WriteHook::before_tool`]; ignored elsewhere.
     SubstituteToolResult(ToolResult),
-    /// Abort this step with a reason.
     Cancel(String),
     Stop,
 }
@@ -53,19 +50,19 @@ pub trait ReadHook: Send + Sync {
     }
 
     async fn before_agent(&self, _state: &AgentState) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 
     async fn before_model(&self, _state: &AgentState) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 
     async fn before_tool(&self, _state: &AgentState, _call: &ToolCall) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 
     async fn after_model(&self, _state: &AgentState) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 
     async fn after_tool(
@@ -74,11 +71,11 @@ pub trait ReadHook: Send + Sync {
         _call: &ToolCall,
         _result: &ToolResult,
     ) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 
     async fn after_agent(&self, _state: &AgentState) -> HookSignal {
-        HookSignal::Continue
+        HookSignal::Noop
     }
 }
 
@@ -97,21 +94,19 @@ pub trait WriteHook: Send + Sync {
     }
 
     async fn before_agent(&self, _state: &mut AgentState) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
     async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
-    /// Before a tool runs: rewrite the call in place via `&mut ToolCall`, or
-    /// short-circuit with `SubstituteToolResult` / `Cancel` / `Stop`.
     async fn before_tool(&self, _state: &mut AgentState, _call: &mut ToolCall) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
     async fn after_model(&self, _state: &mut AgentState) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
     async fn after_tool(
@@ -120,11 +115,11 @@ pub trait WriteHook: Send + Sync {
         _call: &ToolCall,
         _result: &ToolResult,
     ) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
     async fn after_agent(&self, _state: &mut AgentState) -> HookOutcome {
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 }
 
@@ -219,9 +214,10 @@ mod tests {
             }
         }
         let mut s = state();
+        assert!(matches!(Noop.before_model(&mut s).await, HookOutcome::Noop));
         assert!(matches!(
-            Noop.before_model(&mut s).await,
-            HookOutcome::Continue
+            Noop.before_tool(&mut s, &mut call("x")).await,
+            HookOutcome::Noop
         ));
     }
 }

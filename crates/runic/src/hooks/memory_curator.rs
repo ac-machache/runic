@@ -50,7 +50,7 @@ impl WriteHook for MemoryCurator {
 
     async fn after_agent(&self, state: &mut AgentState) -> HookOutcome {
         if !self.scheduler.record_turn() {
-            return HookOutcome::Continue;
+            return HookOutcome::Noop;
         }
         let transcript = render_transcript(state);
         tracing::info!("memory review due — spawning background curator");

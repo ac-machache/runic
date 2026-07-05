@@ -42,6 +42,7 @@ impl Point {
 
 pub(super) fn outcome_kind(outcome: &HookOutcome) -> &'static str {
     match outcome {
+        HookOutcome::Noop => "noop",
         HookOutcome::Continue => "continue",
         HookOutcome::SubstituteToolResult(_) => "substitute",
         HookOutcome::Cancel(_) => "cancel",
@@ -51,6 +52,7 @@ pub(super) fn outcome_kind(outcome: &HookOutcome) -> &'static str {
 
 fn signal_kind(signal: &HookSignal) -> &'static str {
     match signal {
+        HookSignal::Noop => "noop",
         HookSignal::Continue => "continue",
         HookSignal::Stop => "stop",
     }
@@ -64,12 +66,15 @@ impl Agent {
         lifecycle: HookLifecycle,
         outcome: &HookOutcome,
     ) {
+        if matches!(outcome, HookOutcome::Noop) {
+            return;
+        }
         let kind = outcome_kind(outcome);
         let note = match outcome {
             HookOutcome::Cancel(reason) => Some(reason.clone()),
             _ => None,
         };
-        self.state.push_event(SessionEvent::HookRan {
+        self.state.push_event(SessionEvent::HookFired {
             run_id: run_id.to_string(),
             hook: hook_name.to_string(),
             lifecycle,
@@ -94,8 +99,11 @@ impl Agent {
         lifecycle: HookLifecycle,
         signal: &HookSignal,
     ) {
+        if matches!(signal, HookSignal::Noop) {
+            return;
+        }
         let kind = signal_kind(signal);
-        self.state.push_event(SessionEvent::HookRan {
+        self.state.push_event(SessionEvent::HookFired {
             run_id: run_id.to_string(),
             hook: hook_name.to_string(),
             lifecycle,
@@ -138,7 +146,9 @@ impl Agent {
             );
             self.record_write_hook(run_id, h.name(), point.lifecycle(), &outcome);
             match outcome {
-                HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
+                HookOutcome::Noop
+                | HookOutcome::Continue
+                | HookOutcome::SubstituteToolResult(_) => {}
                 HookOutcome::Cancel(_) | HookOutcome::Stop => return Err(AgentError::HookStop),
             }
         }

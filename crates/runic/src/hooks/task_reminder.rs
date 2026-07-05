@@ -33,7 +33,7 @@ impl WriteHook for TaskReminder {
             .cloned()
             .collect();
         if due.is_empty() {
-            return HookOutcome::Continue;
+            return HookOutcome::Noop;
         }
         due.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
 

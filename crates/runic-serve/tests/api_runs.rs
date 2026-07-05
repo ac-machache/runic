@@ -1214,6 +1214,166 @@ async fn steer_with_empty_text_is_400() {
 }
 
 #[tokio::test]
+async fn background_run_returns_202_and_completes_detached() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/t1/runs",
+            TENANT,
+            json!({ "message": "go" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = body_json(resp).await;
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    assert_eq!(body["status"], "pending");
+
+    let mut record = None;
+    for _ in 0..100 {
+        let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+        if rec.status.is_terminal() {
+            record = Some(rec);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let record = record.expect("background run reached a terminal status");
+    assert_eq!(record.status, runic_substrate::RunStatus::Success);
+
+    let resp = app
+        .clone()
+        .oneshot(get_with(&format!("/threads/t1/runs/{run_id}"), TENANT, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let status = body_json(resp).await;
+    assert_eq!(status["status"], "success");
+    assert_eq!(status["agent"], "main");
+
+    let resp = app
+        .oneshot(get_with(
+            &format!("/threads/t1/runs/{run_id}/stream"),
+            TENANT,
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let kinds = sse_kinds(&body);
+    assert!(kinds.iter().any(|k| k == "run_start"));
+    assert!(kinds.last().is_some_and(|k| k == "done"));
+}
+
+#[tokio::test]
+async fn background_run_rejects_bad_input_before_accepting() {
+    let app = scripted_router();
+    let resp = app
+        .clone()
+        .oneshot(post_json("/threads/t1/runs", TENANT, json!({}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs",
+            TENANT,
+            json!({ "message": "go", "agent": "ghost" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn background_run_failure_lands_in_the_run_row() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(FailingFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/t1/runs",
+            TENANT,
+            json!({ "message": "boom" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let run_id = body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    for _ in 0..100 {
+        let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+        if rec.status.is_terminal() {
+            assert_eq!(rec.status, runic_substrate::RunStatus::Error);
+            assert!(rec.error.is_some());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("background run never reached a terminal status");
+}
+
+#[tokio::test]
+async fn run_status_for_an_unknown_or_foreign_run_is_404() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+    });
+    store
+        .create_run(TENANT, "t1", "r-real", "main")
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(get_with("/threads/t1/runs/r-missing", TENANT, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(get_with("/threads/other/runs/r-real", TENANT, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .oneshot(get_with("/threads/t1/runs/r-real", "mallory", &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
     let entered = Arc::new(Notify::new());
     let gate = Arc::new(Notify::new());

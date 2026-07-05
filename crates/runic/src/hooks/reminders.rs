@@ -28,7 +28,7 @@ impl WriteHook for ReminderHook {
     async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
         let pending = self.queue.drain();
         if pending.is_empty() {
-            return HookOutcome::Continue;
+            return HookOutcome::Noop;
         }
         let text = pending
             .iter()

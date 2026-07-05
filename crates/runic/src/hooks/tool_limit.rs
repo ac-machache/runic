@@ -90,7 +90,7 @@ impl WriteHook for ToolCallLimit {
             thread_tool: state.stats().tool_calls.clone(),
             thread_total: state.stats().total_tool_calls,
         };
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 
     async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
@@ -142,7 +142,7 @@ impl WriteHook for ToolCallLimit {
         counts.run_total += 1;
         *counts.thread_tool.entry(call.name.clone()).or_insert(0) += 1;
         counts.thread_total += 1;
-        HookOutcome::Continue
+        HookOutcome::Noop
     }
 }
 
@@ -185,7 +185,7 @@ mod tests {
     async fn allowed(hook: &ToolCallLimit, s: &mut AgentState, name: &str) -> bool {
         matches!(
             hook.before_tool(s, &mut call(name)).await,
-            HookOutcome::Continue
+            HookOutcome::Noop
         )
     }
 

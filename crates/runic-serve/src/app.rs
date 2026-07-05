@@ -104,6 +104,7 @@ pub fn bare_router(config: ServeConfig) -> Router {
             "/transcribe",
             post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
+        .route("/threads/{thread_id}/runs", post(runs::background_run))
         .route(
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),
@@ -111,6 +112,7 @@ pub fn bare_router(config: ServeConfig) -> Router {
         .route("/threads/{thread_id}/runs/wait", post(runs::wait_run))
         .route("/threads/{thread_id}/runs/cancel", post(runs::cancel_run))
         .route("/threads/{thread_id}/runs/steer", post(runs::steer_run))
+        .route("/threads/{thread_id}/runs/{run_id}", get(runs::run_status))
         .route(
             "/threads/{thread_id}/runs/{run_id}/stream",
             get(runs::replay_run),

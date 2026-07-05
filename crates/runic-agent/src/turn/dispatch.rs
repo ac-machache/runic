@@ -87,7 +87,7 @@ impl Agent {
                 );
                 self.record_write_hook(run_id, h.name(), HookLifecycle::BeforeTool, &outcome);
                 match outcome {
-                    HookOutcome::Continue => {}
+                    HookOutcome::Noop | HookOutcome::Continue => {}
                     HookOutcome::SubstituteToolResult(r) => {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook substituted tool result");
                         substituted = Some(r);
@@ -260,7 +260,9 @@ impl Agent {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");
                         return Err(AgentError::HookStop);
                     }
-                    HookOutcome::Continue | HookOutcome::SubstituteToolResult(_) => {}
+                    HookOutcome::Noop
+                    | HookOutcome::Continue
+                    | HookOutcome::SubstituteToolResult(_) => {}
                 }
             }
             self.fire_read_after_tool(run_id, call, &result).await?;

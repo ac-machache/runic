@@ -261,9 +261,14 @@ pub async fn create_and_stream_run(
     let err_tx = ask_tx.clone();
 
     let run_id = runic_state::new_run_id();
+    let run_input = runic_substrate::RunInput {
+        input: serde_json::to_value(&user_msg).ok(),
+        context: (!ctx_json.is_null()).then(|| ctx_json.clone()),
+        queued: false,
+    };
     state
         .session_store
-        .create_run(&tenant, &thread_id, &run_id, &agent_name)
+        .create_run(&tenant, &thread_id, &run_id, &agent_name, &run_input)
         .await?;
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let persist = begun.persist.clone();
@@ -423,9 +428,14 @@ pub async fn wait_run(
         .await;
 
     let run_id = runic_state::new_run_id();
+    let run_input = runic_substrate::RunInput {
+        input: serde_json::to_value(&user_msg).ok(),
+        context: (!ctx_json.is_null()).then(|| ctx_json.clone()),
+        queued: false,
+    };
     state
         .session_store
-        .create_run(&tenant, &thread_id, &run_id, &agent_name)
+        .create_run(&tenant, &thread_id, &run_id, &agent_name, &run_input)
         .await?;
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
@@ -547,17 +557,33 @@ pub async fn background_run(
     let user_msg = req.into_message()?;
     let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
 
+    let run_id = runic_state::new_run_id();
+    let run_input = runic_substrate::RunInput {
+        input: serde_json::to_value(&user_msg).ok(),
+        context: (!ctx_json.is_null()).then(|| ctx_json.clone()),
+        queued: state.queue_runs,
+    };
+    state
+        .session_store
+        .create_run(&tenant, &thread_id, &run_id, &agent_name, &run_input)
+        .await?;
+
+    if state.queue_runs {
+        tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run queued");
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(BackgroundRunResponse {
+                run_id,
+                status: RunStatus::Queued.as_str().to_string(),
+            }),
+        ));
+    }
+
     let mut run_ctx = state
         .agents
         .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
-
-    let run_id = runic_state::new_run_id();
-    state
-        .session_store
-        .create_run(&tenant, &thread_id, &run_id, &agent_name)
-        .await?;
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     run_ctx = run_ctx
@@ -661,7 +687,7 @@ pub async fn run_status(
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
-async fn flush_persist(persist: &crate::registry::PersistHandle) {
+pub(crate) async fn flush_persist(persist: &crate::registry::PersistHandle) {
     if tokio::time::timeout(FLUSH_TIMEOUT, persist.flush())
         .await
         .is_err()

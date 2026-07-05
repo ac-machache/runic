@@ -28,6 +28,7 @@ fn app() -> Router {
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 

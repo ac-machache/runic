@@ -64,6 +64,7 @@ fn crud_router() -> Router {
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 
@@ -75,6 +76,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 

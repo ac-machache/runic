@@ -845,7 +845,10 @@ pub async fn reconstruct_tool_call_and_result_messages(store: &dyn SessionStore)
 
 pub async fn run_rows_lifecycle(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    store.create_run(&t, &s, "r-1", "coral").await.unwrap();
+    store
+        .create_run(&t, &s, "r-1", "coral", &Default::default())
+        .await
+        .unwrap();
 
     let rec = store.get_run(&t, "r-1").await.unwrap().unwrap();
     assert_eq!(rec.status, RunStatus::Pending);
@@ -873,12 +876,18 @@ pub async fn run_rows_lifecycle(store: &dyn SessionStore) {
 
 pub async fn latest_run_picks_the_newest(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    store.create_run(&t, &s, "r-old", "coral").await.unwrap();
+    store
+        .create_run(&t, &s, "r-old", "coral", &Default::default())
+        .await
+        .unwrap();
     store
         .set_run_status("r-old", RunStatus::Success, None)
         .await
         .unwrap();
-    store.create_run(&t, &s, "r-new", "scout").await.unwrap();
+    store
+        .create_run(&t, &s, "r-new", "scout", &Default::default())
+        .await
+        .unwrap();
 
     let latest = store.latest_run(&t, &s).await.unwrap().unwrap();
     assert_eq!(latest.run_id, "r-new");
@@ -887,7 +896,10 @@ pub async fn latest_run_picks_the_newest(store: &dyn SessionStore) {
 
 pub async fn runs_are_tenant_scoped(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    store.create_run(&t, &s, "r-mine", "coral").await.unwrap();
+    store
+        .create_run(&t, &s, "r-mine", "coral", &Default::default())
+        .await
+        .unwrap();
     assert!(
         store
             .get_run("someone-else", "r-mine")
@@ -908,7 +920,10 @@ pub async fn runs_are_tenant_scoped(store: &dyn SessionStore) {
 pub async fn claiming_a_pending_run_takes_the_lease_once(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     let r = uid("r");
-    store.create_run(&t, &s, &r, "coral").await.unwrap();
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
 
     let lease = chrono::Duration::seconds(30);
     assert!(store.claim_run(&r, "instance-a", lease).await.unwrap());
@@ -932,7 +947,10 @@ pub async fn claiming_a_pending_run_takes_the_lease_once(store: &dyn SessionStor
 pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     let r = uid("r");
-    store.create_run(&t, &s, &r, "coral").await.unwrap();
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
     store
         .claim_run(&r, "instance-a", chrono::Duration::seconds(1))
         .await
@@ -967,9 +985,18 @@ pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionS
 pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     let (dead, alive, idle) = (uid("r-dead"), uid("r-alive"), uid("r-idle"));
-    store.create_run(&t, &s, &dead, "coral").await.unwrap();
-    store.create_run(&t, &s, &alive, "coral").await.unwrap();
-    store.create_run(&t, &s, &idle, "coral").await.unwrap();
+    store
+        .create_run(&t, &s, &dead, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .create_run(&t, &s, &alive, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .create_run(&t, &s, &idle, "coral", &Default::default())
+        .await
+        .unwrap();
     store
         .claim_run(&dead, "instance-a", chrono::Duration::seconds(-1))
         .await
@@ -1002,9 +1029,111 @@ pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
 
 pub async fn deleting_a_session_deletes_its_runs(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    store.create_run(&t, &s, "r-1", "coral").await.unwrap();
+    store
+        .create_run(&t, &s, "r-1", "coral", &Default::default())
+        .await
+        .unwrap();
     store.delete_session(&t, &s).await.unwrap();
     assert!(store.get_run(&t, "r-1").await.unwrap().is_none());
+}
+
+pub async fn queued_runs_dequeue_oldest_first_and_release_requeues(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let (a, b) = (uid("q-a"), uid("q-b"));
+    store
+        .create_run(
+            &t,
+            &s,
+            &a,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("first")),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    store
+        .create_run(
+            &t,
+            &s,
+            &b,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("second")),
+                context: Some(serde_json::json!({"k": "v"})),
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let rec = store.get_run(&t, &b).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert_eq!(rec.input, Some(serde_json::json!("second")));
+    assert_eq!(rec.context, Some(serde_json::json!({"k": "v"})));
+
+    let lease = chrono::Duration::seconds(60);
+    let mut mine = Vec::new();
+    for _ in 0..50 {
+        match store
+            .claim_next_queued_run("inst-test", lease)
+            .await
+            .unwrap()
+        {
+            Some(r) if r.run_id == a || r.run_id == b => {
+                mine.push(r.run_id.clone());
+                if mine.len() == 2 {
+                    break;
+                }
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert_eq!(mine, vec![a.clone(), b.clone()], "oldest queued run first");
+    assert_eq!(
+        store.get_run(&t, &a).await.unwrap().unwrap().status,
+        RunStatus::Running
+    );
+
+    store.release_run(&a, "inst-test").await.unwrap();
+    let rec = store.get_run(&t, &a).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert!(rec.claimed_by.is_none());
+
+    store.release_run(&b, "inst-other").await.unwrap();
+    assert_eq!(
+        store.get_run(&t, &b).await.unwrap().unwrap().status,
+        RunStatus::Running,
+        "release by a non-owner is a no-op"
+    );
+}
+
+pub async fn pending_runs_are_never_dequeued(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r-local");
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+
+    for _ in 0..50 {
+        match store
+            .claim_next_queued_run("inst-test", chrono::Duration::seconds(60))
+            .await
+            .unwrap()
+        {
+            Some(rec) => assert_ne!(rec.run_id, r, "a pending (local) run was dequeued"),
+            None => break,
+        }
+    }
+    assert_eq!(
+        store.get_run(&t, &r).await.unwrap().unwrap().status,
+        RunStatus::Pending
+    );
 }
 
 pub async fn read_tail_starts_at_the_last_snapshot(store: &dyn SessionStore) {

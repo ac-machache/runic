@@ -223,6 +223,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 
@@ -235,6 +236,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
     (app, artifacts)
 }
@@ -247,6 +249,7 @@ fn failing_run_router() -> Router {
         agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 
@@ -258,6 +261,7 @@ fn asking_router() -> Router {
         agents: single_agent("main", Arc::new(AskingFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 
@@ -277,6 +281,7 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         ),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
     (app, entered, gate)
 }
@@ -947,9 +952,10 @@ impl SessionStore for SlowStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
+        input: &runic_substrate::RunInput,
     ) -> runic_substrate::Result<()> {
         self.inner
-            .create_run(tenant, session_id, run_id, agent)
+            .create_run(tenant, session_id, run_id, agent, input)
             .await
     }
 
@@ -1014,6 +1020,7 @@ async fn wait_response_implies_the_run_is_durable() {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app
@@ -1044,6 +1051,7 @@ async fn stream_done_implies_the_run_is_durable() {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app
@@ -1149,6 +1157,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
         ),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let run_app = app.clone();
@@ -1223,6 +1232,7 @@ async fn background_run_returns_202_and_completes_detached() {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app
@@ -1307,6 +1317,7 @@ async fn background_run_failure_lands_in_the_run_row() {
         agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app
@@ -1336,6 +1347,118 @@ async fn background_run_failure_lands_in_the_run_row() {
     panic!("background run never reached a terminal status");
 }
 
+fn queued_router(store: Arc<dyn SessionStore>) -> Router {
+    router(ServeConfig {
+        session_store: store,
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        workers: Some(runic_serve::WorkerConfig {
+            max_concurrent_runs: 4,
+            poll_every: Duration::from_millis(20),
+        }),
+    })
+}
+
+async fn wait_terminal(
+    store: &Arc<MemorySessionStore>,
+    run_id: &str,
+) -> runic_substrate::RunRecord {
+    for _ in 0..200 {
+        let rec = store.get_run(TENANT, run_id).await.unwrap().unwrap();
+        if rec.status.is_terminal() {
+            return rec;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("queued run never reached a terminal status");
+}
+
+#[tokio::test]
+async fn queued_mode_executes_background_runs_via_workers() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = queued_router(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/t1/runs",
+            TENANT,
+            json!({ "message": "go" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "queued");
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+
+    let rec = wait_terminal(&store, &run_id).await;
+    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
+    assert!(rec.claimed_by.unwrap().starts_with("inst-"));
+
+    let events = store.read(TENANT, "t1").await.unwrap();
+    assert!(events.iter().any(|e| matches!(
+        &e.event,
+        runic_state::SessionEvent::RunEnd { run_id: r, .. } if r == &run_id
+    )));
+
+    let resp = app
+        .oneshot(wait_request("t2", TENANT, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "wait runs still execute locally in queue mode"
+    );
+}
+
+#[tokio::test]
+async fn a_queued_run_with_bad_input_is_failed_by_the_worker() {
+    let store = Arc::new(MemorySessionStore::new());
+    let _app = queued_router(store.clone());
+
+    store
+        .create_run(
+            TENANT,
+            "t1",
+            "r-no-input",
+            "main",
+            &runic_substrate::RunInput {
+                input: None,
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .create_run(
+            TENANT,
+            "t1",
+            "r-ghost-agent",
+            "ghost",
+            &runic_substrate::RunInput {
+                input: serde_json::to_value(runic_types::Message::user("go")).ok(),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let rec = wait_terminal(&store, "r-no-input").await;
+    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
+    assert!(rec.error.unwrap().contains("no stored input"));
+
+    let rec = wait_terminal(&store, "r-ghost-agent").await;
+    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
+    assert!(rec.error.unwrap().contains("unknown agent"));
+}
+
 #[tokio::test]
 async fn run_status_for_an_unknown_or_foreign_run_is_404() {
     let store = Arc::new(MemorySessionStore::new());
@@ -1346,9 +1469,10 @@ async fn run_status_for_an_unknown_or_foreign_run_is_404() {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
     store
-        .create_run(TENANT, "t1", "r-real", "main")
+        .create_run(TENANT, "t1", "r-real", "main", &Default::default())
         .await
         .unwrap();
 
@@ -1389,6 +1513,7 @@ async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
             }),
         ),
         human_hub: Arc::new(HumanHub::new()),
+        workers: None,
         limits: RunLimits {
             max_concurrent_runs: 1,
             ..Default::default()
@@ -1461,6 +1586,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app
@@ -1488,6 +1614,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
     let resp = failing
         .oneshot(wait_request("t2", TENANT, "boom"))

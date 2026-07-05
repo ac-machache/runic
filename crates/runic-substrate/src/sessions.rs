@@ -35,6 +35,7 @@ pub struct StoredEvent {
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Pending,
+    Queued,
     Running,
     Success,
     Error,
@@ -45,6 +46,7 @@ impl RunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             RunStatus::Pending => "pending",
+            RunStatus::Queued => "queued",
             RunStatus::Running => "running",
             RunStatus::Success => "success",
             RunStatus::Error => "error",
@@ -55,6 +57,7 @@ impl RunStatus {
     pub fn parse(s: &str) -> Option<RunStatus> {
         match s {
             "pending" => Some(RunStatus::Pending),
+            "queued" => Some(RunStatus::Queued),
             "running" => Some(RunStatus::Running),
             "success" => Some(RunStatus::Success),
             "error" => Some(RunStatus::Error),
@@ -84,8 +87,19 @@ pub struct RunRecord {
     pub claimed_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunInput {
+    pub input: Option<serde_json::Value>,
+    pub context: Option<serde_json::Value>,
+    pub queued: bool,
 }
 
 /// Per-session metadata, for listing without scanning the log.
@@ -217,6 +231,7 @@ pub trait SessionStore: Send + Sync {
         _session_id: &str,
         _run_id: &str,
         _agent: &str,
+        _input: &RunInput,
     ) -> Result<()> {
         Err(Error::Unsupported("create_run".into()))
     }
@@ -250,6 +265,18 @@ pub trait SessionStore: Send + Sync {
 
     async fn reap_expired_runs(&self) -> Result<Vec<RunRecord>> {
         Err(Error::Unsupported("reap_expired_runs".into()))
+    }
+
+    async fn claim_next_queued_run(
+        &self,
+        _claimed_by: &str,
+        _lease: chrono::Duration,
+    ) -> Result<Option<RunRecord>> {
+        Err(Error::Unsupported("claim_next_queued_run".into()))
+    }
+
+    async fn release_run(&self, _run_id: &str, _claimed_by: &str) -> Result<()> {
+        Err(Error::Unsupported("release_run".into()))
     }
 
     async fn get_run(&self, _tenant: &str, _run_id: &str) -> Result<Option<RunRecord>> {

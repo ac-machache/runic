@@ -22,6 +22,7 @@ const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 #[cfg(feature = "docs-ui")]
 use utoipa::OpenApi;
 
+use crate::executor::{WorkerConfig, spawn_run_workers};
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
 use crate::registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};
@@ -39,6 +40,7 @@ pub struct AppState {
     pub runs: Arc<RunRegistry>,
     /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
     pub human_hub: Arc<HumanHub>,
+    pub queue_runs: bool,
 }
 
 /// Construction parameters — the binary fills these in and hands them to
@@ -55,6 +57,10 @@ pub struct ServeConfig {
     /// resolves via the HTTP answer endpoint.
     pub human_hub: Arc<HumanHub>,
     pub limits: RunLimits,
+    /// `Some` switches background runs to queued execution: `POST .../runs`
+    /// only records the run; polling workers (this instance's and any other
+    /// instance's) claim and execute. `None` (default) executes in-process.
+    pub workers: Option<WorkerConfig>,
 }
 
 pub fn single_agent(
@@ -64,7 +70,7 @@ pub fn single_agent(
     HashMap::from([(name.into(), factory)])
 }
 
-pub fn bare_router(config: ServeConfig) -> Router {
+fn app_state(config: ServeConfig) -> (AppState, Option<WorkerConfig>) {
     let state = AppState {
         session_store: config.session_store,
         artifact_store: config.artifact_store,
@@ -72,8 +78,17 @@ pub fn bare_router(config: ServeConfig) -> Router {
         agents: Arc::new(AgentRegistry::new(config.agents)),
         runs: Arc::new(RunRegistry::with_limits(config.limits)),
         human_hub: config.human_hub,
+        queue_runs: config.workers.is_some(),
     };
+    (state, config.workers)
+}
 
+pub fn bare_router(config: ServeConfig) -> Router {
+    let (state, _) = app_state(config);
+    routes(state)
+}
+
+fn routes(state: AppState) -> Router {
     let router = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/openapi.json", get(crate::openapi::openapi_json))
@@ -139,14 +154,22 @@ pub fn bare_router(config: ServeConfig) -> Router {
 }
 
 pub fn router(config: ServeConfig) -> Router {
-    let store = config.session_store.clone();
     let reap_every = config.limits.reap_every;
+    let (state, workers) = app_state(config);
     if tokio::runtime::Handle::try_current().is_ok() {
-        spawn_lease_reaper(store, reap_every);
+        spawn_lease_reaper(state.session_store.clone(), reap_every);
+        if let Some(worker_config) = workers {
+            spawn_run_workers(
+                state.session_store.clone(),
+                state.agents.clone(),
+                state.runs.clone(),
+                worker_config,
+            );
+        }
     } else {
-        tracing::warn!("router built outside a tokio runtime — lease reaper not started");
+        tracing::warn!("router built outside a tokio runtime — background loops not started");
     }
-    bare_router(config).layer(CorsLayer::permissive()).layer(
+    routes(state).layer(CorsLayer::permissive()).layer(
         ServiceBuilder::new()
             .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
             .layer(

@@ -44,7 +44,7 @@ impl Default for RunLimits {
     }
 }
 
-fn as_chrono(d: Duration) -> chrono::Duration {
+pub(crate) fn as_chrono(d: Duration) -> chrono::Duration {
     chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::seconds(30))
 }
 
@@ -422,7 +422,7 @@ pub async fn claim_lease(
     }
 }
 
-fn spawn_heartbeat(
+pub(crate) fn spawn_heartbeat(
     store: Arc<dyn SessionStore>,
     run_id: String,
     instance_id: String,
@@ -970,14 +970,20 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
         let registry = RunRegistry::new();
 
-        store.create_run("t", "s", "r-mine", "main").await.unwrap();
+        store
+            .create_run("t", "s", "r-mine", "main", &Default::default())
+            .await
+            .unwrap();
         let claim = claim_lease(&store, &registry, "r-mine", CancelToken::new()).await;
         assert!(matches!(claim, Claim::Held(_)));
         claim.release();
         let rec = store.get_run("t", "r-mine").await.unwrap().unwrap();
         assert_eq!(rec.claimed_by.as_deref(), Some(registry.instance_id()));
 
-        store.create_run("t", "s", "r-taken", "main").await.unwrap();
+        store
+            .create_run("t", "s", "r-taken", "main", &Default::default())
+            .await
+            .unwrap();
         store
             .claim_run("r-taken", "someone-else", chrono::Duration::seconds(30))
             .await
@@ -993,7 +999,10 @@ mod tests {
     #[tokio::test]
     async fn a_lost_lease_cancels_the_run() {
         let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-        store.create_run("t", "s", "r-1", "main").await.unwrap();
+        store
+            .create_run("t", "s", "r-1", "main", &Default::default())
+            .await
+            .unwrap();
         let registry = RunRegistry::with_limits(RunLimits {
             heartbeat_every: Duration::from_millis(10),
             ..Default::default()
@@ -1020,7 +1029,10 @@ mod tests {
     #[tokio::test]
     async fn the_reaper_marks_expired_runs() {
         let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-        store.create_run("t", "s", "r-dead", "main").await.unwrap();
+        store
+            .create_run("t", "s", "r-dead", "main", &Default::default())
+            .await
+            .unwrap();
         store
             .claim_run("r-dead", "inst-gone", chrono::Duration::seconds(-1))
             .await

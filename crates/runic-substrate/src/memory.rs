@@ -274,6 +274,7 @@ impl SessionStore for MemorySessionStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
+        input: &crate::RunInput,
     ) -> Result<()> {
         let now = Utc::now();
         self.runs.lock().unwrap().insert(
@@ -283,10 +284,16 @@ impl SessionStore for MemorySessionStore {
                 tenant: tenant.to_string(),
                 session_id: session_id.to_string(),
                 agent: agent.to_string(),
-                status: crate::RunStatus::Pending,
+                status: if input.queued {
+                    crate::RunStatus::Queued
+                } else {
+                    crate::RunStatus::Pending
+                },
                 error: None,
                 claimed_by: None,
                 lease_expires_at: None,
+                input: input.input.clone(),
+                context: input.context.clone(),
                 created_at: now,
                 updated_at: now,
             },
@@ -366,6 +373,42 @@ impl SessionStore for MemorySessionStore {
             }
         }
         Ok(reaped)
+    }
+
+    async fn claim_next_queued_run(
+        &self,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<Option<crate::RunRecord>> {
+        let now = Utc::now();
+        let mut runs = self.runs.lock().unwrap();
+        let next = runs
+            .values()
+            .filter(|r| r.status == crate::RunStatus::Queued && r.claimed_by.is_none())
+            .min_by_key(|r| r.created_at)
+            .map(|r| r.run_id.clone());
+        let Some(run_id) = next else {
+            return Ok(None);
+        };
+        let rec = runs.get_mut(&run_id).unwrap();
+        rec.status = crate::RunStatus::Running;
+        rec.claimed_by = Some(claimed_by.to_string());
+        rec.lease_expires_at = Some(now + lease);
+        rec.updated_at = now;
+        Ok(Some(rec.clone()))
+    }
+
+    async fn release_run(&self, run_id: &str, claimed_by: &str) -> Result<()> {
+        let mut runs = self.runs.lock().unwrap();
+        if let Some(rec) = runs.get_mut(run_id)
+            && rec.claimed_by.as_deref() == Some(claimed_by)
+        {
+            rec.status = crate::RunStatus::Queued;
+            rec.claimed_by = None;
+            rec.lease_expires_at = None;
+            rec.updated_at = Utc::now();
+        }
+        Ok(())
     }
 
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {

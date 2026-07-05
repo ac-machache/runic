@@ -35,7 +35,9 @@ pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
 pub use replay::{replay_into_state, replay_messages};
-pub use sessions::{ChatHit, RunRecord, RunStatus, SessionMeta, SessionStore, StoredEvent};
+pub use sessions::{
+    ChatHit, RunInput, RunRecord, RunStatus, SessionMeta, SessionStore, StoredEvent,
+};
 pub use tool::SearchChatsTool;
 
 #[cfg(feature = "postgres")]

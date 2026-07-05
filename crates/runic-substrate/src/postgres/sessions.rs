@@ -66,6 +66,9 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
     Ok(out)
 }
 
+const RUN_COLUMNS: &str = "run_id, tenant, session_id, agent, status, error, claimed_by, \
+     lease_expires_at, input, context, created_at, updated_at";
+
 fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
     let status: String = row.try_get("status").map_err(db)?;
     Ok(crate::RunRecord {
@@ -78,6 +81,8 @@ fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
         error: row.try_get("error").map_err(db)?,
         claimed_by: row.try_get("claimed_by").map_err(db)?,
         lease_expires_at: row.try_get("lease_expires_at").map_err(db)?,
+        input: row.try_get("input").map_err(db)?,
+        context: row.try_get("context").map_err(db)?,
         created_at: row.try_get("created_at").map_err(db)?,
         updated_at: row.try_get("updated_at").map_err(db)?,
     })
@@ -384,15 +389,19 @@ impl SessionStore for PostgresSessionStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
+        input: &crate::RunInput,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO runs (run_id, tenant, session_id, agent, status)
-             VALUES ($1, $2, $3, $4, 'pending')",
+            "INSERT INTO runs (run_id, tenant, session_id, agent, status, input, context)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(run_id)
         .bind(tenant)
         .bind(session_id)
         .bind(agent)
+        .bind(if input.queued { "queued" } else { "pending" })
+        .bind(&input.input)
+        .bind(&input.context)
         .execute(&self.pool)
         .await
         .map_err(db)?;
@@ -463,25 +472,64 @@ impl SessionStore for PostgresSessionStore {
     }
 
     async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             "UPDATE runs
              SET status = 'error', error = 'lease expired', updated_at = now()
              WHERE status = 'running' AND lease_expires_at < now()
-             RETURNING run_id, tenant, session_id, agent, status, error, claimed_by,
-                       lease_expires_at, created_at, updated_at",
-        )
+             RETURNING {RUN_COLUMNS}"
+        ))
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
         rows.into_iter().map(row_to_run).collect()
     }
 
-    async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
-        let row = sqlx::query(
-            "SELECT run_id, tenant, session_id, agent, status, error, claimed_by,
-                    lease_expires_at, created_at, updated_at
-             FROM runs WHERE tenant = $1 AND run_id = $2",
+    async fn claim_next_queued_run(
+        &self,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<Option<crate::RunRecord>> {
+        let row = sqlx::query(&format!(
+            "UPDATE runs
+             SET status = 'running', claimed_by = $1,
+                 lease_expires_at = now() + make_interval(secs => $2),
+                 updated_at = now()
+             WHERE run_id = (
+                 SELECT run_id FROM runs
+                 WHERE status = 'queued' AND claimed_by IS NULL
+                 ORDER BY created_at
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING {RUN_COLUMNS}"
+        ))
+        .bind(claimed_by)
+        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        row.map(row_to_run).transpose()
+    }
+
+    async fn release_run(&self, run_id: &str, claimed_by: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE runs
+             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
+                 updated_at = now()
+             WHERE run_id = $1 AND claimed_by = $2",
         )
+        .bind(run_id)
+        .bind(claimed_by)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
+    }
+
+    async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
+        let row = sqlx::query(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND run_id = $2"
+        ))
         .bind(tenant)
         .bind(run_id)
         .fetch_optional(&self.pool)
@@ -491,12 +539,10 @@ impl SessionStore for PostgresSessionStore {
     }
 
     async fn latest_run(&self, tenant: &str, session_id: &str) -> Result<Option<crate::RunRecord>> {
-        let row = sqlx::query(
-            "SELECT run_id, tenant, session_id, agent, status, error, claimed_by,
-                    lease_expires_at, created_at, updated_at
-             FROM runs WHERE tenant = $1 AND session_id = $2
-             ORDER BY created_at DESC LIMIT 1",
-        )
+        let row = sqlx::query(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND session_id = $2
+             ORDER BY created_at DESC LIMIT 1"
+        ))
         .bind(tenant)
         .bind(session_id)
         .fetch_optional(&self.pool)

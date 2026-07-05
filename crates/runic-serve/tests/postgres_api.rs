@@ -80,6 +80,7 @@ fn make_router(sessions: Arc<dyn SessionStore>, artifacts: Arc<dyn ArtifactStore
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 

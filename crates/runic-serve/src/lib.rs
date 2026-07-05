@@ -37,6 +37,7 @@
 
 pub mod app;
 pub mod error;
+pub mod executor;
 pub mod factory;
 pub mod human;
 pub mod openapi;
@@ -47,6 +48,7 @@ pub mod wire;
 
 pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
 pub use error::ServeError;
+pub use executor::{WorkerConfig, spawn_run_workers};
 pub use factory::{AgentFactory, BoxedAgentFactory};
 pub use human::{HumanChannel, HumanHub};
 pub use registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};

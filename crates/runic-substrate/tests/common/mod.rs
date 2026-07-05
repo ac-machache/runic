@@ -139,6 +139,8 @@ macro_rules! session_store_contract_suite {
             claiming_a_pending_run_takes_the_lease_once,
             heartbeat_extends_the_lease_for_the_owner_only,
             reaping_marks_only_expired_running_runs,
+            queued_runs_dequeue_oldest_first_and_release_requeues,
+            pending_runs_are_never_dequeued,
             deleting_a_session_deletes_its_runs,
             read_tail_without_a_snapshot_reads_everything,
         );

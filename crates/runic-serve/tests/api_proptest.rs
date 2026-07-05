@@ -64,6 +64,7 @@ fn crud_router() -> Router {
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     })
 }
 
@@ -77,6 +78,7 @@ fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
     (app, sessions, artifacts)
 }

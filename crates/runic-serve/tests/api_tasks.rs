@@ -121,6 +121,7 @@ async fn a_background_task_is_durable_without_another_run() {
         agents: single_agent("main", Arc::new(DelegatingFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        workers: None,
     });
 
     let resp = app

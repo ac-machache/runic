@@ -217,8 +217,6 @@ impl Agent {
                 .unwrap_or_else(|| result.output.clone());
             if result.persisted_output.is_some() {
                 self.transient_tool_outputs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
                     .insert(call.id.clone(), result.output.clone());
             }
 
@@ -290,7 +288,7 @@ impl Agent {
         ctx.insert(runic_state::ExternalEvents::new(
             self.state.persist_sink(),
             self.state.events_sender(),
-            self.pending_external.clone(),
+            self.pending_external_tx.clone(),
         ));
         ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
             self.state.tasks().clone(),

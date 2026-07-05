@@ -54,14 +54,17 @@ impl HumanHub {
     fn register(&self, tenant: &str, thread_id: &str) -> (String, oneshot::Receiver<String>) {
         let ask_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(
-            ask_id.clone(),
-            PendingAsk {
-                tenant: tenant.to_string(),
-                thread_id: thread_id.to_string(),
-                tx,
-            },
-        );
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                ask_id.clone(),
+                PendingAsk {
+                    tenant: tenant.to_string(),
+                    thread_id: thread_id.to_string(),
+                    tx,
+                },
+            );
         (ask_id, rx)
     }
 
@@ -69,7 +72,7 @@ impl HumanHub {
     /// match the ask's scope. Returns false otherwise, or if nothing is pending
     /// under `ask_id` (already answered, timed out, never existed).
     pub fn resolve(&self, tenant: &str, thread_id: &str, ask_id: &str, answer: String) -> bool {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         let scoped = matches!(
             pending.get(ask_id),
             Some(p) if p.tenant == tenant && p.thread_id == thread_id
@@ -84,7 +87,10 @@ impl HumanHub {
     }
 
     fn cancel(&self, ask_id: &str) {
-        self.pending.lock().unwrap().remove(ask_id);
+        self.pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(ask_id);
     }
 }
 

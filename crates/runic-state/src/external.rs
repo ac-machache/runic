@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::event::SessionEvent;
 use crate::state::PersistSink;
@@ -9,14 +9,14 @@ use crate::state::PersistSink;
 pub struct ExternalEvents {
     persist: Option<PersistSink>,
     broadcast: Option<broadcast::Sender<Arc<SessionEvent>>>,
-    pending: Arc<Mutex<Vec<SessionEvent>>>,
+    pending: mpsc::UnboundedSender<SessionEvent>,
 }
 
 impl ExternalEvents {
     pub fn new(
         persist: Option<PersistSink>,
         broadcast: Option<broadcast::Sender<Arc<SessionEvent>>>,
-        pending: Arc<Mutex<Vec<SessionEvent>>>,
+        pending: mpsc::UnboundedSender<SessionEvent>,
     ) -> Self {
         Self {
             persist,
@@ -36,6 +36,6 @@ impl ExternalEvents {
                 let _ = tx.send(shared);
             }
         }
-        self.pending.lock().unwrap().push(ev);
+        let _ = self.pending.send(ev);
     }
 }

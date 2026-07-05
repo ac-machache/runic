@@ -81,11 +81,8 @@ impl Agent {
         result
     }
 
-    pub(crate) fn clear_transient_tool_outputs(&self) {
-        self.transient_tool_outputs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
+    pub(crate) fn clear_transient_tool_outputs(&mut self) {
+        self.transient_tool_outputs.clear();
     }
 
     /// The turn loop proper.
@@ -133,17 +130,8 @@ impl Agent {
 
             // Externally emitted events (background task completions) are
             // already persisted — fold them into the warm state only.
-            {
-                let pending: Vec<_> = {
-                    let mut queue = self
-                        .pending_external
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    queue.drain(..).collect()
-                };
-                for ev in pending {
-                    self.state.fold_event(ev);
-                }
+            while let Ok(ev) = self.pending_external_rx.try_recv() {
+                self.state.fold_event(ev);
             }
 
             // Steering — inject any pending nudges as user messages.

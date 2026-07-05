@@ -265,17 +265,24 @@ mod tests {
         )
     }
 
-    fn ctx_with_rail() -> (ToolContext, Arc<std::sync::Mutex<Vec<SessionEvent>>>) {
-        let pending = Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn ctx_with_rail() -> (
+        ToolContext,
+        tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ctx = ToolContext::new("u", "s", "r");
-        ctx.insert(ExternalEvents::new(None, None, pending.clone()));
-        (ctx, pending)
+        ctx.insert(ExternalEvents::new(None, None, tx));
+        (ctx, rx)
     }
 
-    fn activated_keys(pending: &std::sync::Mutex<Vec<SessionEvent>>) -> Vec<String> {
-        pending
-            .lock()
-            .unwrap()
+    fn activated_keys(
+        pending: &mut tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    ) -> Vec<String> {
+        let mut events = Vec::new();
+        while let Ok(e) = pending.try_recv() {
+            events.push(e);
+        }
+        events
             .iter()
             .filter_map(|e| match e {
                 SessionEvent::StateUpdated { key, value, .. } if value.as_bool() == Some(true) => {
@@ -306,7 +313,7 @@ mod tests {
             "read_file",
             "Read a file from disk",
         )])));
-        let (ctx, pending) = ctx_with_rail();
+        let (ctx, mut pending) = ctx_with_rail();
         let r = t
             .execute(serde_json::json!({ "query": "read file" }), &ctx)
             .await
@@ -314,13 +321,13 @@ mod tests {
         assert!(r.success);
         assert!(r.output.contains("<function>"));
         assert!(r.output.contains("mcp__fs__read_file"));
-        assert_eq!(activated_keys(&pending), ["mcp__fs__read_file"]);
+        assert_eq!(activated_keys(&mut pending), ["mcp__fs__read_file"]);
     }
 
     #[tokio::test]
     async fn select_activates_exact_and_reports_not_found() {
         let t = ToolSearchTool::new(Arc::new(deferred(vec![("tool_a", "A"), ("tool_b", "B")])));
-        let (ctx, pending) = ctx_with_rail();
+        let (ctx, mut pending) = ctx_with_rail();
         let r = t
             .execute(
                 serde_json::json!({ "query": "select:mcp__fs__tool_a,mcp__fs__missing" }),
@@ -331,13 +338,13 @@ mod tests {
         assert!(r.success);
         assert!(r.output.contains("mcp__fs__tool_a"));
         assert!(r.output.contains("Not found"));
-        assert_eq!(activated_keys(&pending), ["mcp__fs__tool_a"]);
+        assert_eq!(activated_keys(&mut pending), ["mcp__fs__tool_a"]);
     }
 
     #[tokio::test]
     async fn already_active_names_are_not_re_emitted() {
         let t = ToolSearchTool::new(Arc::new(deferred(vec![("t", "a tool")])));
-        let (mut ctx, pending) = ctx_with_rail();
+        let (mut ctx, mut pending) = ctx_with_rail();
         ctx.insert(ActivatedToolNames(Arc::new(
             [String::from("mcp__fs__t")].into(),
         )));
@@ -347,7 +354,7 @@ mod tests {
             .unwrap();
         assert!(r.success);
         assert!(r.output.contains("mcp__fs__t"), "schema is still returned");
-        assert!(activated_keys(&pending).is_empty());
+        assert!(activated_keys(&mut pending).is_empty());
     }
 
     #[tokio::test]
@@ -374,13 +381,13 @@ mod tests {
             allowed: None,
             denied: Some(vec!["mcp__fs__blocked".into()]),
         });
-        let (ctx, pending) = ctx_with_rail();
+        let (ctx, mut pending) = ctx_with_rail();
         let r = t
             .execute(serde_json::json!({ "query": "tool" }), &ctx)
             .await
             .unwrap();
         assert!(r.output.contains("mcp__fs__allowed"));
         assert!(!r.output.contains("mcp__fs__blocked"));
-        assert_eq!(activated_keys(&pending), ["mcp__fs__allowed"]);
+        assert_eq!(activated_keys(&mut pending), ["mcp__fs__allowed"]);
     }
 }

@@ -14,7 +14,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
@@ -33,5 +33,5 @@ postgres = ["dep:sqlx"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 proptest = { workspace = true }

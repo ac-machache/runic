@@ -18,15 +18,12 @@ fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
 }
 
 impl Agent {
-    pub(crate) fn prepare_request(&self) -> CompletionRequest {
+    pub(crate) fn prepare_request(&mut self) -> CompletionRequest {
         let mut messages = self.state.messages_for_provider().to_vec();
 
         // Swap summarized tool results for their full output, for this call
-        // only; the overlay is consumed (cleared) here.
-        let mut overlay = self
-            .transient_tool_outputs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        // only; the overlay is consumed here.
+        let overlay = std::mem::take(&mut self.transient_tool_outputs);
         if !overlay.is_empty() {
             for msg in &mut messages {
                 let runic_types::MessageContent::Blocks(blocks) = &mut msg.content else {
@@ -44,9 +41,7 @@ impl Agent {
                     }
                 }
             }
-            overlay.clear();
         }
-        drop(overlay);
 
         let mut tools: Vec<ToolDefinition> = self
             .tools

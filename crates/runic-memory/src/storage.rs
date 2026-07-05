@@ -10,10 +10,9 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryRevision(String);
@@ -136,7 +135,7 @@ impl MemoryStorage for LocalStorage {
 /// memory should not survive the process).
 #[derive(Default)]
 pub struct MemStorage {
-    files: Mutex<BTreeMap<String, String>>,
+    files: RwLock<BTreeMap<String, String>>,
 }
 
 impl MemStorage {
@@ -148,7 +147,7 @@ impl MemStorage {
 #[async_trait]
 impl MemoryStorage for MemStorage {
     async fn read(&self, key: &str) -> Result<Option<MemoryObject>, MemoryStorageError> {
-        Ok(self.files.lock().unwrap().get(key).map(|content| {
+        Ok(self.files.read().await.get(key).map(|content| {
             let revision = revision_for(content);
             MemoryObject {
                 content: content.clone(),
@@ -163,7 +162,7 @@ impl MemoryStorage for MemStorage {
         content: &str,
         expected: Option<&MemoryRevision>,
     ) -> Result<MemoryRevision, MemoryStorageError> {
-        let mut files = self.files.lock().unwrap();
+        let mut files = self.files.write().await;
         match files.get(key) {
             Some(current) => {
                 let current_revision = revision_for(current);

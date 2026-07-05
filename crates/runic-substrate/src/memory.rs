@@ -3,13 +3,14 @@
 //! session event log. Nothing here survives a restart.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
 use runic_state::SessionEvent;
 use runic_types::Role;
+
+use tokio::sync::RwLock;
 
 use crate::artifacts::{Artifact, ArtifactSource, ArtifactStore, new_artifact_id};
 use crate::sessions::event_at;
@@ -18,8 +19,8 @@ use crate::{ChatHit, Error, Result, SessionMeta, SessionStore, StoredEvent};
 /// Bytes live in a map; nothing persists.
 #[derive(Default)]
 pub struct MemoryArtifactStore {
-    blobs: Mutex<HashMap<String, (Artifact, Vec<u8>)>>,
-    index: Mutex<HashMap<(String, String), Vec<String>>>,
+    blobs: RwLock<HashMap<String, (Artifact, Vec<u8>)>>,
+    index: RwLock<HashMap<(String, String), Vec<String>>>,
 }
 
 impl MemoryArtifactStore {
@@ -46,12 +47,12 @@ impl ArtifactStore for MemoryArtifactStore {
             created_at: Utc::now(),
         };
         self.blobs
-            .lock()
-            .unwrap()
+            .write()
+            .await
             .insert(artifact.id.clone(), (artifact.clone(), bytes.to_vec()));
         self.index
-            .lock()
-            .unwrap()
+            .write()
+            .await
             .entry((tenant.to_string(), session_id.to_string()))
             .or_default()
             .push(artifact.id.clone());
@@ -60,8 +61,8 @@ impl ArtifactStore for MemoryArtifactStore {
 
     async fn get(&self, id: &str) -> Result<Vec<u8>> {
         self.blobs
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(id)
             .map(|(_, b)| b.clone())
             .ok_or_else(|| Error::NotFound(id.to_string()))
@@ -69,16 +70,16 @@ impl ArtifactStore for MemoryArtifactStore {
 
     async fn head(&self, id: &str) -> Result<Artifact> {
         self.blobs
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(id)
             .map(|(m, _)| m.clone())
             .ok_or_else(|| Error::NotFound(id.to_string()))
     }
 
     async fn list(&self, tenant: &str, session_id: &str) -> Result<Vec<Artifact>> {
-        let index = self.index.lock().unwrap();
-        let blobs = self.blobs.lock().unwrap();
+        let index = self.index.read().await;
+        let blobs = self.blobs.read().await;
         let ids = index
             .get(&(tenant.to_string(), session_id.to_string()))
             .cloned()
@@ -90,7 +91,7 @@ impl ArtifactStore for MemoryArtifactStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        self.blobs.lock().unwrap().remove(id);
+        self.blobs.write().await.remove(id);
         Ok(())
     }
 }
@@ -108,8 +109,8 @@ struct SessionRec {
 /// nothing survives a restart.
 #[derive(Default)]
 pub struct MemorySessionStore {
-    sessions: Mutex<HashMap<(String, String), SessionRec>>,
-    runs: Mutex<HashMap<String, crate::RunRecord>>,
+    sessions: RwLock<HashMap<(String, String), SessionRec>>,
+    runs: RwLock<HashMap<String, crate::RunRecord>>,
 }
 
 impl MemorySessionStore {
@@ -131,7 +132,7 @@ fn snippet(text: &str) -> String {
 #[async_trait]
 impl SessionStore for MemorySessionStore {
     async fn append(&self, tenant: &str, session_id: &str, event: &SessionEvent) -> Result<u64> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
             .or_insert_with(|| SessionRec {
@@ -158,7 +159,7 @@ impl SessionStore for MemorySessionStore {
         let Some(first) = events.first() else {
             return Ok(());
         };
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
             .or_insert_with(|| SessionRec {
@@ -181,8 +182,8 @@ impl SessionStore for MemorySessionStore {
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
         Ok(self
             .sessions
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(&(tenant.to_string(), session_id.to_string()))
             .map(|r| r.events.clone())
             .unwrap_or_default())
@@ -196,8 +197,8 @@ impl SessionStore for MemorySessionStore {
     ) -> Result<Vec<StoredEvent>> {
         Ok(self
             .sessions
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(&(tenant.to_string(), session_id.to_string()))
             .map(|r| {
                 r.events
@@ -210,7 +211,7 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.read().await;
         let mut out: Vec<SessionMeta> = sessions
             .iter()
             .filter(|((t, _), _)| t == tenant)
@@ -229,8 +230,8 @@ impl SessionStore for MemorySessionStore {
     async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>> {
         Ok(self
             .sessions
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(&(tenant.to_string(), session_id.to_string()))
             .map(|rec| SessionMeta {
                 session_id: session_id.to_string(),
@@ -243,7 +244,7 @@ impl SessionStore for MemorySessionStore {
 
     async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()> {
         let now = Utc::now();
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
             .or_insert_with(|| SessionRec {
@@ -258,12 +259,12 @@ impl SessionStore for MemorySessionStore {
 
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()> {
         self.sessions
-            .lock()
-            .unwrap()
+            .write()
+            .await
             .remove(&(tenant.to_string(), session_id.to_string()));
         self.runs
-            .lock()
-            .unwrap()
+            .write()
+            .await
             .retain(|_, r| !(r.tenant == tenant && r.session_id == session_id));
         Ok(())
     }
@@ -277,7 +278,7 @@ impl SessionStore for MemorySessionStore {
         input: &crate::RunInput,
     ) -> Result<()> {
         let now = Utc::now();
-        self.runs.lock().unwrap().insert(
+        self.runs.write().await.insert(
             run_id.to_string(),
             crate::RunRecord {
                 run_id: run_id.to_string(),
@@ -307,7 +308,7 @@ impl SessionStore for MemorySessionStore {
         status: crate::RunStatus,
         error: Option<&str>,
     ) -> Result<()> {
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         let Some(rec) = runs.get_mut(run_id) else {
             return Err(Error::NotFound(format!("run {run_id}")));
         };
@@ -323,7 +324,7 @@ impl SessionStore for MemorySessionStore {
         claimed_by: &str,
         lease: chrono::Duration,
     ) -> Result<bool> {
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         let Some(rec) = runs.get_mut(run_id) else {
             return Ok(false);
         };
@@ -344,7 +345,7 @@ impl SessionStore for MemorySessionStore {
         claimed_by: &str,
         lease: chrono::Duration,
     ) -> Result<bool> {
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         let Some(rec) = runs.get_mut(run_id) else {
             return Ok(false);
         };
@@ -361,7 +362,7 @@ impl SessionStore for MemorySessionStore {
     async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
         let now = Utc::now();
         let mut reaped = Vec::new();
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         for rec in runs.values_mut() {
             if rec.status == crate::RunStatus::Running
                 && rec.lease_expires_at.is_some_and(|at| at < now)
@@ -381,7 +382,7 @@ impl SessionStore for MemorySessionStore {
         lease: chrono::Duration,
     ) -> Result<Option<crate::RunRecord>> {
         let now = Utc::now();
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         let next = runs
             .values()
             .filter(|r| r.status == crate::RunStatus::Queued && r.claimed_by.is_none())
@@ -399,7 +400,7 @@ impl SessionStore for MemorySessionStore {
     }
 
     async fn release_run(&self, run_id: &str, claimed_by: &str) -> Result<()> {
-        let mut runs = self.runs.lock().unwrap();
+        let mut runs = self.runs.write().await;
         if let Some(rec) = runs.get_mut(run_id)
             && rec.claimed_by.as_deref() == Some(claimed_by)
         {
@@ -414,8 +415,8 @@ impl SessionStore for MemorySessionStore {
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         Ok(self
             .runs
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .get(run_id)
             .filter(|r| r.tenant == tenant)
             .cloned())
@@ -424,8 +425,8 @@ impl SessionStore for MemorySessionStore {
     async fn latest_run(&self, tenant: &str, session_id: &str) -> Result<Option<crate::RunRecord>> {
         Ok(self
             .runs
-            .lock()
-            .unwrap()
+            .read()
+            .await
             .values()
             .filter(|r| r.tenant == tenant && r.session_id == session_id)
             .max_by_key(|r| r.created_at)
@@ -440,7 +441,7 @@ impl SessionStore for MemorySessionStore {
         exclude_session: Option<&str>,
     ) -> Result<Vec<ChatHit>> {
         let q = query.to_lowercase();
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.read().await;
         let mut hits = Vec::new();
         for ((t, sid), rec) in sessions.iter() {
             if t != tenant || Some(sid.as_str()) == exclude_session {
@@ -472,14 +473,14 @@ impl SessionStore for MemorySessionStore {
 
     async fn cleanup_stale(&self, ttl: Duration) -> Result<u64> {
         let cutoff = Utc::now() - ttl;
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.write().await;
         let before = sessions.len();
         sessions.retain(|_, rec| rec.last_activity >= cutoff);
         Ok((before - sessions.len()) as u64)
     }
 
     async fn list_tenants(&self) -> Result<Vec<String>> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.read().await;
         let mut tenants: Vec<String> = sessions.keys().map(|(t, _)| t.clone()).collect();
         tenants.sort();
         tenants.dedup();

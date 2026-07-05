@@ -252,7 +252,7 @@ impl DelegateTool {
 
         let task_id = format!("task-{}", uuid::Uuid::new_v4().simple());
         let cancel = CancelToken::new();
-        self.tasks.lock().unwrap().insert(
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner()).insert(
             task_id.clone(),
             BackgroundTask {
                 agent: agent.to_string(),
@@ -283,7 +283,7 @@ impl DelegateTool {
             let _guard = guard; // hold the concurrent slot until done
             let result = run_child(&builder, &def, &dctx, &prompt).await;
             let outcome = {
-                let mut tasks = tasks.lock().unwrap();
+                let mut tasks = tasks.lock().unwrap_or_else(|p| p.into_inner());
                 let Some(task) = tasks.get_mut(&tid) else {
                     return;
                 };
@@ -320,7 +320,12 @@ impl DelegateTool {
     }
 
     fn check_result(&self, task_id: &str, ctx: &ToolContext) -> ToolResult {
-        if let Some(task) = self.tasks.lock().unwrap().get(task_id) {
+        if let Some(task) = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(task_id)
+        {
             return match task.status {
                 TaskStatus::Running => ToolResult::ok(format!("task '{task_id}' is still running")),
                 TaskStatus::Completed => ToolResult::ok(task.output.clone().unwrap_or_default()),
@@ -365,7 +370,7 @@ impl DelegateTool {
                 );
             }
         }
-        for (id, task) in self.tasks.lock().unwrap().iter() {
+        for (id, task) in self.tasks.lock().unwrap_or_else(|p| p.into_inner()).iter() {
             lines.insert(
                 id.clone(),
                 format!("- {id}: {} [{:?}]", task.agent, task.status),
@@ -379,7 +384,12 @@ impl DelegateTool {
 
     fn cancel_task(&self, task_id: &str, ctx: &ToolContext) -> ToolResult {
         let transitioned = {
-            match self.tasks.lock().unwrap().get_mut(task_id) {
+            match self
+                .tasks
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_mut(task_id)
+            {
                 None => return ToolResult::error(format!("no such task '{task_id}'")),
                 Some(task) => {
                     if task.status == TaskStatus::Running {

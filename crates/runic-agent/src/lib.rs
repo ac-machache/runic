@@ -13,8 +13,8 @@
 //!   [`retry`] (backoff), per-tool timeouts — slotted in as discrete steps.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use runic_hook::{ReadHook, WriteHook};
@@ -291,10 +291,9 @@ pub struct Agent {
     /// activation keys; `activated` below is this agent's materialization.
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
-    /// Full tool outputs (keyed by tool_use_id) whose persisted form was
-    /// summarized — re-applied to the *next* request only, then cleared.
-    pub(crate) transient_tool_outputs: Mutex<HashMap<String, String>>,
-    pub(crate) pending_external: Arc<Mutex<Vec<runic_state::SessionEvent>>>,
+    pub(crate) transient_tool_outputs: HashMap<String, String>,
+    pub(crate) pending_external_tx: mpsc::UnboundedSender<runic_state::SessionEvent>,
+    pub(crate) pending_external_rx: mpsc::UnboundedReceiver<runic_state::SessionEvent>,
 }
 
 impl Agent {
@@ -469,6 +468,7 @@ impl AgentBuilder {
 
     /// Finish building. Hooks are sorted by `priority()` (lower runs first).
     pub fn build(mut self) -> Agent {
+        let (pending_tx, pending_rx) = mpsc::unbounded_channel();
         let state = AgentState::new(self.user_id, self.session_id, self.system_prompt);
         let tools = self
             .tools
@@ -491,8 +491,9 @@ impl AgentBuilder {
             human: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
-            transient_tool_outputs: Mutex::new(HashMap::new()),
-            pending_external: Arc::new(Mutex::new(Vec::new())),
+            transient_tool_outputs: HashMap::new(),
+            pending_external_tx: pending_tx,
+            pending_external_rx: pending_rx,
         }
     }
 }

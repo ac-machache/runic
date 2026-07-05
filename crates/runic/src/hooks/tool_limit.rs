@@ -87,8 +87,8 @@ impl WriteHook for ToolCallLimit {
         *self.counts.lock().unwrap() = Counts {
             run_tool: HashMap::new(),
             run_total: 0,
-            thread_tool: state.stats.tool_calls.clone(),
-            thread_total: state.stats.total_tool_calls,
+            thread_tool: state.stats().tool_calls.clone(),
+            thread_total: state.stats().total_tool_calls,
         };
         HookOutcome::Continue
     }

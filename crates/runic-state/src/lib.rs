@@ -17,7 +17,8 @@ pub mod tasks;
 pub use event::{HookLifecycle, RunOutcome, SessionEvent};
 pub use external::ExternalEvents;
 pub use state::{
-    AgentState, EVENT_BROADCAST_CAPACITY, PersistSink, RunTimeContext, RunView, new_run_id,
+    AgentState, EVENT_BROADCAST_CAPACITY, InvalidStateKey, MAX_STATE_KEY_BYTES, PersistSink,
+    RunTimeContext, RunView, new_run_id, validate_state_key,
 };
 pub use stats::ThreadStats;
 pub use tasks::{TaskRecord, TaskStatus};
@@ -42,7 +43,7 @@ mod tests {
         assert_eq!(s.user_id, "u1");
         assert_eq!(s.session_id, "sess-1");
         assert_eq!(s.system_prompt, "you are a bot");
-        assert!(s.events.is_empty());
+        assert!(s.events().is_empty());
     }
 
     #[test]
@@ -79,7 +80,7 @@ mod tests {
         assert_eq!(m[0].content.text_content(), "compacted");
         assert_eq!(m[1].content.text_content(), "c");
         // …and pre-snapshot events leave RAM (the store keeps the full log):
-        assert_eq!(s.events.len(), 2);
+        assert_eq!(s.events().len(), 2);
     }
 
     #[test]
@@ -139,11 +140,11 @@ mod tests {
 
         assert_eq!(s.current_run().unwrap().id, "live");
         assert!(
-            !s.events
+            !s.events()
                 .iter()
                 .any(|e| matches!(e, SessionEvent::RunEnd { run_id, .. } if run_id == "old"))
         );
-        assert_eq!(s.stats.runs, 1);
+        assert_eq!(s.stats().runs, 1);
     }
 
     #[test]

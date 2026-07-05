@@ -25,7 +25,7 @@ impl WriteHook for TaskReminder {
 
     async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
         let mut due: Vec<_> = state
-            .tasks
+            .tasks()
             .values()
             .filter(|t| {
                 t.status != TaskStatus::Running && state.get(&notified_key(&t.task_id)).is_none()
@@ -63,7 +63,7 @@ impl WriteHook for TaskReminder {
             .collect();
 
         for t in &due {
-            state.update(notified_key(&t.task_id), serde_json::json!(true));
+            let _ = state.update(notified_key(&t.task_id), serde_json::json!(true));
         }
 
         let run_id = state
@@ -79,39 +79,44 @@ impl WriteHook for TaskReminder {
     }
 }
 
+pub(crate) const NOTIFIED_KEY_PREFIX: &str = "task-reminder/notified/";
+
 fn notified_key(task_id: &str) -> String {
-    format!("task-reminder/notified/{task_id}")
+    format!("{NOTIFIED_KEY_PREFIX}{task_id}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runic_state::TaskRecord;
 
-    fn finished(id: &str, status: TaskStatus, result: Option<&str>) -> TaskRecord {
-        TaskRecord {
+    fn spawn(s: &mut AgentState, id: &str) {
+        s.fold_event(SessionEvent::TaskSpawned {
+            run_id: "r".into(),
             task_id: id.into(),
             agent: "scout".into(),
             prompt: "dig".into(),
+            at: Utc::now(),
+        });
+    }
+
+    fn finish(s: &mut AgentState, id: &str, status: TaskStatus, result: Option<&str>) {
+        s.fold_event(SessionEvent::TaskFinished {
+            run_id: "r".into(),
+            task_id: id.into(),
             status,
             result: result.map(str::to_string),
-            spawned_at: Utc::now(),
-            finished_at: Some(Utc::now()),
-        }
+            at: Utc::now(),
+        });
     }
 
     #[tokio::test]
     async fn reminds_once_per_finished_task() {
         let hook = TaskReminder::new();
         let mut s = AgentState::new("u1", "s1", "sys");
-        s.tasks.insert(
-            "t1".into(),
-            finished("t1", TaskStatus::Completed, Some("gold")),
-        );
-        s.tasks.insert(
-            "t2".into(),
-            finished("t2", TaskStatus::Failed, Some("timeout")),
-        );
+        spawn(&mut s, "t1");
+        finish(&mut s, "t1", TaskStatus::Completed, Some("gold"));
+        spawn(&mut s, "t2");
+        finish(&mut s, "t2", TaskStatus::Failed, Some("timeout"));
 
         hook.before_model(&mut s).await;
         let text = {
@@ -132,9 +137,7 @@ mod tests {
     async fn running_tasks_are_not_reminded() {
         let hook = TaskReminder::new();
         let mut s = AgentState::new("u1", "s1", "sys");
-        let mut record = finished("t1", TaskStatus::Running, None);
-        record.finished_at = None;
-        s.tasks.insert("t1".into(), record);
+        spawn(&mut s, "t1");
 
         hook.before_model(&mut s).await;
         assert!(s.messages_for_provider().is_empty());

@@ -291,7 +291,7 @@ impl Agent {
             self.pending_external.clone(),
         ));
         ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
-            self.state.tasks.clone(),
+            self.state.tasks().clone(),
         )));
         ctx.insert(runic_tool::ActivatedToolNames(std::sync::Arc::new(
             self.activated.names(),

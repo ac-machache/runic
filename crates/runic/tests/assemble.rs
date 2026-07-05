@@ -258,10 +258,69 @@ async fn compaction_folds_history_before_the_model_call() {
     assert!(
         agent
             .state()
-            .events
+            .events()
             .iter()
             .any(|e| matches!(e, runic_state::SessionEvent::StateSnapshot { .. }))
     );
+}
+
+#[tokio::test]
+async fn compaction_sweeps_notified_keys_of_departed_tasks() {
+    let provider = Arc::new(RecordingProvider::default());
+    let mut assembly = base_assembly(provider.clone());
+    assembly.compaction = Some(
+        runic::Compaction::new()
+            .max_context_tokens(12)
+            .keep_recent(2),
+    );
+    let mut agent = assemble(&assembly, "alice", "s1").await;
+
+    let state = agent.state_mut();
+    state.fold_event(runic_state::SessionEvent::TaskSpawned {
+        run_id: "r0".into(),
+        task_id: "t-done".into(),
+        agent: "scout".into(),
+        prompt: "dig".into(),
+        at: chrono::Utc::now(),
+    });
+    state.fold_event(runic_state::SessionEvent::TaskFinished {
+        run_id: "r0".into(),
+        task_id: "t-done".into(),
+        status: runic_state::TaskStatus::Completed,
+        result: Some("gold".into()),
+        at: chrono::Utc::now(),
+    });
+    state
+        .update("task-reminder/notified/t-done", serde_json::json!(true))
+        .unwrap();
+    state.update("keep/me", serde_json::json!(1)).unwrap();
+    for msg in [
+        runic_types::Message::user("x".repeat(40)),
+        runic_types::Message::assistant("y".repeat(40)),
+        runic_types::Message::user("recent question"),
+    ] {
+        state.push_event(runic_state::SessionEvent::Message {
+            run_id: "r0".into(),
+            msg,
+            at: chrono::Utc::now(),
+        });
+    }
+
+    agent.run("final question").await.unwrap();
+
+    assert!(
+        agent
+            .state()
+            .events()
+            .iter()
+            .any(|e| matches!(e, runic_state::SessionEvent::StateSnapshot { .. }))
+    );
+    assert!(
+        agent.state().get("task-reminder/notified/t-done").is_none(),
+        "notified key of a compacted-away task must not survive the snapshot"
+    );
+    assert_eq!(agent.state().get("keep/me"), Some(&serde_json::json!(1)));
+    assert!(agent.state().tasks().is_empty());
 }
 
 #[tokio::test]

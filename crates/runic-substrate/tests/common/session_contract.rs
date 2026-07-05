@@ -769,7 +769,7 @@ pub async fn reconstruct_terminal_run_preserves_stop_reason(store: &dyn SessionS
         state.current_run().is_none(),
         "a run with RunEnd is terminal"
     );
-    let stop = state.events.iter().find_map(|e| match e {
+    let stop = state.events().iter().find_map(|e| match e {
         SessionEvent::RunEnd { outcome, .. } => outcome.stop_reason.clone(),
         _ => None,
     });

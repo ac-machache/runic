@@ -138,9 +138,15 @@ impl WriteHook for CompactionHook {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "compaction".to_string());
         let folded = split;
-        let stats = state.stats.clone();
+        let stats = state.stats().clone();
         let open_tasks = state.open_tasks();
-        let data = state.data().clone();
+        let open_ids: std::collections::HashSet<&str> =
+            open_tasks.iter().map(|t| t.task_id.as_str()).collect();
+        let mut data = state.data().clone();
+        data.retain(|key, _| {
+            key.strip_prefix(super::task_reminder::NOTIFIED_KEY_PREFIX)
+                .is_none_or(|id| open_ids.contains(id))
+        });
         state.push_event(SessionEvent::StateSnapshot {
             run_id,
             messages,

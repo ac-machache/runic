@@ -145,7 +145,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
 
     let record = agent
         .state()
-        .tasks
+        .tasks()
         .values()
         .next()
         .expect("task record folded into state");
@@ -158,7 +158,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
         Some(&serde_json::json!(true))
     );
 
-    let stats: &ThreadStats = &agent.state().stats;
+    let stats: &ThreadStats = agent.state().stats();
     assert_eq!(stats.tasks_spawned, 1);
     assert_eq!(stats.tasks_finished, 1);
     assert_eq!(stats.tasks_failed, 0);
@@ -192,7 +192,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
         agent.run_message(Message::user("go")).await.unwrap();
         wait_for_finish(&mut rx).await;
         agent.run_message(Message::user("sync")).await.unwrap();
-        agent.state().tasks.clone()
+        agent.state().tasks().clone()
     };
     assert_eq!(rebuilt_view.len(), 1);
     let task_id = rebuilt_view.keys().next().unwrap().clone();

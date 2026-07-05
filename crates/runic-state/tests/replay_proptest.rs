@@ -198,8 +198,8 @@ proptest! {
         let replayed: Vec<SessionEvent> = serde_json::from_str(&json).unwrap();
         let refold = state_from(&replayed);
 
-        prop_assert_eq!(&live.stats, &refold.stats);
-        prop_assert_eq!(&live.tasks, &refold.tasks);
+        prop_assert_eq!(&live.stats(), &refold.stats());
+        prop_assert_eq!(&live.tasks(), &refold.tasks());
         prop_assert_eq!(live.data(), refold.data());
         prop_assert_eq!(live.messages_for_provider().len(), refold.messages_for_provider().len());
     }

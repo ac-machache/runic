@@ -18,6 +18,35 @@ pub fn new_run_id() -> String {
     format!("r-{}", uuid::Uuid::new_v4().simple())
 }
 
+pub const MAX_STATE_KEY_BYTES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidStateKey(pub &'static str);
+
+impl std::fmt::Display for InvalidStateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid state key: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidStateKey {}
+
+pub fn validate_state_key(key: &str) -> Result<(), InvalidStateKey> {
+    if key.is_empty() {
+        return Err(InvalidStateKey("must not be empty"));
+    }
+    if key.len() > MAX_STATE_KEY_BYTES {
+        return Err(InvalidStateKey("exceeds 256 bytes"));
+    }
+    if key.chars().any(char::is_control) {
+        return Err(InvalidStateKey("must not contain control characters"));
+    }
+    if key.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(InvalidStateKey("must not contain '..' segments"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct PersistSink {
     tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
@@ -87,15 +116,15 @@ pub struct AgentState {
     pub system_prompt: String,
 
     #[serde(default)]
-    pub stats: crate::stats::ThreadStats,
+    stats: crate::stats::ThreadStats,
 
     #[serde(default)]
-    pub tasks: HashMap<String, crate::tasks::TaskRecord>,
+    tasks: HashMap<String, crate::tasks::TaskRecord>,
 
     #[serde(default)]
     data: serde_json::Map<String, serde_json::Value>,
 
-    pub events: Vec<SessionEvent>,
+    events: Vec<SessionEvent>,
 
     #[serde(skip, default)]
     pub runtime: RunTimeContext,
@@ -241,17 +270,24 @@ impl AgentState {
         self.events.push(ev);
     }
 
-    pub fn update(&mut self, key: impl Into<String>, value: serde_json::Value) {
+    pub fn update(
+        &mut self,
+        key: impl Into<String>,
+        value: serde_json::Value,
+    ) -> Result<(), InvalidStateKey> {
+        let key = key.into();
+        validate_state_key(&key)?;
         let run_id = self
             .current_run()
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "update".to_string());
         self.push_event(SessionEvent::StateUpdated {
             run_id,
-            key: key.into(),
+            key,
             value,
             at: Utc::now(),
         });
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
@@ -260,6 +296,18 @@ impl AgentState {
 
     pub fn data(&self) -> &serde_json::Map<String, serde_json::Value> {
         &self.data
+    }
+
+    pub fn stats(&self) -> &crate::stats::ThreadStats {
+        &self.stats
+    }
+
+    pub fn tasks(&self) -> &HashMap<String, crate::tasks::TaskRecord> {
+        &self.tasks
+    }
+
+    pub fn events(&self) -> &[SessionEvent] {
+        &self.events
     }
 
     pub fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord> {
@@ -398,7 +446,7 @@ mod tests {
 
         let msgs = state.messages_for_provider();
         assert_eq!(msgs.len(), 2);
-        assert_eq!(state.events.len(), 3);
+        assert_eq!(state.events().len(), 3);
     }
 
     #[test]
@@ -416,8 +464,8 @@ mod tests {
         });
 
         assert_eq!(state.messages_for_provider().len(), 1);
-        assert_eq!(state.events.len(), 2);
-        assert!(matches!(state.events[1], SessionEvent::HookRan { .. }));
+        assert_eq!(state.events().len(), 2);
+        assert!(matches!(state.events()[1], SessionEvent::HookRan { .. }));
     }
 
     #[test]
@@ -472,6 +520,30 @@ mod tests {
             .map(|m| m.content.text_content())
             .collect();
         assert_eq!(view, folded);
+    }
+
+    #[test]
+    fn update_rejects_hostile_keys_and_emits_nothing_for_them() {
+        let mut state = AgentState::new("u", "s", "");
+        state.update("ok/key", serde_json::json!(1)).unwrap();
+        assert!(state.update("", serde_json::json!(1)).is_err());
+        assert!(state.update("a\nb", serde_json::json!(1)).is_err());
+        assert!(state.update("a\0b", serde_json::json!(1)).is_err());
+        assert!(state.update("../escape", serde_json::json!(1)).is_err());
+        assert!(
+            state
+                .update("deep/../escape", serde_json::json!(1))
+                .is_err()
+        );
+        assert!(
+            state
+                .update("x".repeat(MAX_STATE_KEY_BYTES + 1), serde_json::json!(1))
+                .is_err()
+        );
+
+        assert_eq!(state.get("ok/key"), Some(&serde_json::json!(1)));
+        assert_eq!(state.data().len(), 1);
+        assert_eq!(state.events().len(), 1);
     }
 
     #[test]

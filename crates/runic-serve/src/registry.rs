@@ -895,9 +895,9 @@ mod tests {
         let factory: BoxedAgentFactory = Arc::new(TestFactory);
         let agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
 
-        assert_eq!(agent.state().stats.runs, 8);
-        assert_eq!(agent.state().stats.total_tool_calls, 12);
-        assert_eq!(agent.state().stats.turns, 2);
+        assert_eq!(agent.state().stats().runs, 8);
+        assert_eq!(agent.state().stats().total_tool_calls, 12);
+        assert_eq!(agent.state().stats().turns, 2);
         assert_eq!(agent.state().messages_for_provider().len(), 2);
         assert!(agent.state().current_run().is_none());
     }

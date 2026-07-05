@@ -81,7 +81,7 @@ mod tests {
         let mut s = state();
         hook.before_model(&mut s).await;
         assert!(s.messages_for_provider().is_empty());
-        assert!(s.events.is_empty());
+        assert!(s.events().is_empty());
     }
 
     #[tokio::test]

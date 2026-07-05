@@ -20,7 +20,7 @@ use std::time::Duration;
 use runic_hook::{ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
 use runic_state::{AgentState, HookLifecycle};
-use runic_tool::{ActivatedToolSet, HumanInterface, Tool};
+use runic_tool::{ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, ToolCatalog};
 use tokio::sync::mpsc;
 
 mod external;
@@ -30,7 +30,7 @@ mod turn;
 pub mod loop_guard;
 pub mod retry;
 
-pub use external::{ExternalEvents, ReminderQueue, TasksSnapshot};
+pub use external::{ReminderQueue, TasksSnapshot};
 pub use runic_state::RunOutcome;
 
 /// Default hard cap on model turns per run — a backstop against runaway loops
@@ -286,10 +286,11 @@ pub struct Agent {
     /// Human channel, installed per-run from [`RunContext`] (None when no HITL
     /// surface is wired).
     pub(crate) human: Option<Arc<dyn HumanInterface>>,
-    /// Tools activated on demand this conversation (e.g. via an MCP
-    /// `tool_search`). The loop adds their specs to each request and resolves
-    /// calls against them. Shared with the activating tool.
-    pub(crate) activated: Option<Arc<Mutex<ActivatedToolSet>>>,
+    /// Boot-scoped resolver for on-demand tools (e.g. the deferred MCP
+    /// catalog). Which tools are switched on lives in `state.data` under
+    /// activation keys; `activated` below is this agent's materialization.
+    pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
+    pub(crate) activated: ActivatedToolSet,
     /// Full tool outputs (keyed by tool_use_id) whose persisted form was
     /// summarized — re-applied to the *next* request only, then cleared.
     pub(crate) transient_tool_outputs: Mutex<HashMap<String, String>>,
@@ -301,6 +302,32 @@ impl Agent {
     pub(crate) fn emit(&self, event: AgentEvent) {
         if let Some(sink) = &self.events {
             let _ = sink.send(event);
+        }
+    }
+
+    /// Materialize this conversation's activated tools from state: every
+    /// `tool-search/activated/<name>` key resolves against the catalog once,
+    /// so activations follow the thread through rebuilds and compaction.
+    pub(crate) fn refresh_activated_tools(&mut self) {
+        let Some(catalog) = &self.catalog else {
+            return;
+        };
+        let names: Vec<String> = self
+            .state
+            .data()
+            .iter()
+            .filter(|(_, v)| v.as_bool().unwrap_or(false))
+            .filter_map(|(k, _)| k.strip_prefix(ACTIVATED_KEY_PREFIX))
+            .filter(|name| !self.activated.is_activated(name))
+            .map(str::to_string)
+            .collect();
+        for name in names {
+            match catalog.resolve(&name) {
+                Some(tool) => self.activated.activate(name, tool),
+                None => {
+                    tracing::warn!(tool = %name, "activated tool missing from the catalog");
+                }
+            }
         }
     }
 
@@ -335,7 +362,7 @@ pub struct AgentBuilder {
     write_hooks: Vec<Arc<dyn WriteHook>>,
     fallbacks: Vec<FallbackProvider>,
     media_resolver: Option<Arc<dyn MediaResolver>>,
-    activated: Option<Arc<Mutex<ActivatedToolSet>>>,
+    catalog: Option<Arc<dyn ToolCatalog>>,
     config: AgentConfig,
 }
 
@@ -355,7 +382,7 @@ impl AgentBuilder {
             write_hooks: Vec::new(),
             fallbacks: Vec::new(),
             media_resolver: None,
-            activated: None,
+            catalog: None,
             config: AgentConfig::default(),
         }
     }
@@ -419,11 +446,12 @@ impl AgentBuilder {
         self
     }
 
-    /// Share an [`ActivatedToolSet`] for on-demand tool activation (e.g. an
-    /// MCP `tool_search` registered via [`AgentBuilder::tool`] writes into the
-    /// same set the loop reads). Enables deferred/lazy tools.
-    pub fn activated_tools(mut self, activated: Arc<Mutex<ActivatedToolSet>>) -> Self {
-        self.activated = Some(activated);
+    /// Wire the on-demand tool catalog (e.g. the deferred MCP set). An
+    /// activating tool like `tool_search` records activations as state keys;
+    /// the loop resolves them against this catalog each turn, so activations
+    /// are per-conversation and survive rebuilds via the event log.
+    pub fn tool_catalog(mut self, catalog: Arc<dyn ToolCatalog>) -> Self {
+        self.catalog = Some(catalog);
         self
     }
 
@@ -461,7 +489,8 @@ impl AgentBuilder {
             guard: loop_guard::LoopGuard::default(),
             events: None,
             human: None,
-            activated: self.activated,
+            catalog: self.catalog,
+            activated: ActivatedToolSet::default(),
             transient_tool_outputs: Mutex::new(HashMap::new()),
             pending_external: Arc::new(Mutex::new(Vec::new())),
         }

@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{Agent, CancelToken, ExternalEvents, RunContext, TasksSnapshot};
+use runic_agent::{Agent, CancelToken, RunContext, TasksSnapshot};
+use runic_state::ExternalEvents;
 use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult};
 

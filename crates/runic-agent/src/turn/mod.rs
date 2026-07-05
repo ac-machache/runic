@@ -19,6 +19,7 @@ impl Agent {
     /// Tool dispatch (when the turn requests tools) is driven by the outer
     /// loop via [`Agent::dispatch_tools`].
     pub(crate) async fn run_one_turn(&mut self, run_id: &str) -> Result<TurnRecord, AgentError> {
+        self.refresh_activated_tools();
         self.fire_write(run_id, Point::BeforeModel).await?; // hooks (sequential)
         self.fire_read(run_id, Point::BeforeModel).await?; //        (parallel)
 

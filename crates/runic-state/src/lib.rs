@@ -9,11 +9,13 @@
 //! - keyed by **`(user_id, session_id)`**.
 
 pub mod event;
+pub mod external;
 pub mod state;
 pub mod stats;
 pub mod tasks;
 
 pub use event::{HookLifecycle, RunOutcome, SessionEvent};
+pub use external::ExternalEvents;
 pub use state::{
     AgentState, EVENT_BROADCAST_CAPACITY, PersistSink, RunTimeContext, RunView, new_run_id,
 };

@@ -119,7 +119,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
         if let Some(tool) = m.tools() {
             b = b.tool(tool);
         }
-        b = b.activated_tools(m.activated());
+        b = b.tool_catalog(m.catalog());
     }
     for t in &a.custom_tools {
         b = b.tool(t.clone());

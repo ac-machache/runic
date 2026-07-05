@@ -9,9 +9,11 @@ publish.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 eventsource-stream = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
+runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -23,6 +23,7 @@ Cargo.lock.bak
 /runic_fs
 /codex
 /aegra
+/adk-rust
 
 # codegraph local index
 /.codegraph

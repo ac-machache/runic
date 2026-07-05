@@ -9,7 +9,7 @@ use runic_agent::{Agent, AgentEvent, CancelToken, RunContext};
 use runic_hook::{HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
-use runic_tool::{ActivatedToolSet, Tool, ToolContext, ToolResult};
+use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 
 /// A provider that returns a pre-scripted sequence of responses, one per call.
@@ -618,9 +618,15 @@ impl Tool for LateTool {
     }
 }
 
-struct Activator {
-    set: std::sync::Arc<std::sync::Mutex<ActivatedToolSet>>,
+struct LateCatalog;
+
+impl runic_tool::ToolCatalog for LateCatalog {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        (name == "late_tool").then(|| Arc::new(LateTool) as Arc<dyn Tool>)
+    }
 }
+
+struct Activator;
 
 #[async_trait]
 impl Tool for Activator {
@@ -636,36 +642,47 @@ impl Tool for Activator {
     async fn execute(
         &self,
         _args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        self.set
-            .lock()
-            .unwrap()
-            .activate("late_tool", Arc::new(LateTool));
+        let events = ctx
+            .get::<runic_state::ExternalEvents>()
+            .expect("event rail in context");
+        events.emit(runic_state::SessionEvent::StateUpdated {
+            run_id: ctx.run_id.clone(),
+            key: runic_tool::activated_key("late_tool"),
+            value: serde_json::Value::Bool(true),
+            at: chrono::Utc::now(),
+        });
         Ok(ToolResult::ok("activated late_tool"))
     }
 }
 
 #[tokio::test]
 async fn deferred_tool_activates_then_becomes_callable() {
-    // Turn 1: model calls `activate` (registered). Turn 2: model calls
-    // `late_tool` (NOT registered — only resolvable via the activated set).
-    // Turn 3: ends.
+    // Turn 1: model calls `activate` (registered), which records the
+    // activation as a state key. Turn 2: the key materializes from the
+    // catalog, so `late_tool` (NOT registered) resolves and runs. Turn 3: ends.
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("a1", "activate", serde_json::json!({})),
         tool_use_response("a2", "late_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let set = Arc::new(std::sync::Mutex::new(ActivatedToolSet::new()));
     let mut agent = Agent::builder(provider, "u1", "s1")
         .model("test")
-        .tool(Arc::new(Activator { set: set.clone() }))
-        .activated_tools(set.clone())
+        .tool(Arc::new(Activator))
+        .tool_catalog(Arc::new(LateCatalog))
         .build();
 
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(outcome.total_turns, 3);
-    assert!(set.lock().unwrap().is_activated("late_tool"));
+    assert_eq!(
+        agent
+            .state()
+            .get(&runic_tool::activated_key("late_tool"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "activation must land in state, not a shared set"
+    );
 
     // The activated tool resolved and ran — its result is in history.
     let ran_late = agent.state().messages_for_provider().iter().any(|m| {
@@ -674,6 +691,39 @@ async fn deferred_tool_activates_then_becomes_callable() {
                 ContentBlock::ToolResult { content, .. } if content.contains("late result"))))
     });
     assert!(ran_late, "a deferred-activated tool must resolve and run");
+}
+
+#[tokio::test]
+async fn activations_survive_a_rebuild_from_the_log() {
+    // A fresh agent (as after a stateless hydrate) folds the thread's
+    // StateUpdated activation event and can call the tool straight away.
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("a1", "late_tool", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .tool_catalog(Arc::new(LateCatalog))
+        .build();
+    agent
+        .state_mut()
+        .fold_event(runic_state::SessionEvent::StateUpdated {
+            run_id: "r-past".into(),
+            key: runic_tool::activated_key("late_tool"),
+            value: serde_json::Value::Bool(true),
+            at: chrono::Utc::now(),
+        });
+
+    agent.run("go").await.unwrap();
+    let ran_late = agent.state().messages_for_provider().iter().any(|m| {
+        matches!(&m.content, MessageContent::Blocks(b)
+            if b.iter().any(|blk| matches!(blk,
+                ContentBlock::ToolResult { content, .. } if content.contains("late result"))))
+    });
+    assert!(
+        ran_late,
+        "a folded activation key must resolve after rebuild"
+    );
 }
 
 #[tokio::test]

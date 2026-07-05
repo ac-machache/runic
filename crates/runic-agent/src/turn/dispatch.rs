@@ -285,13 +285,16 @@ impl Agent {
         let mut ctx = ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)
             .with_config(self.state.config.clone())
             .with_human(self.human.clone());
-        ctx.insert(crate::ExternalEvents::new(
+        ctx.insert(runic_state::ExternalEvents::new(
             self.state.persist_sink(),
             self.state.events_sender(),
             self.pending_external.clone(),
         ));
         ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
             self.state.tasks.clone(),
+        )));
+        ctx.insert(runic_tool::ActivatedToolNames(std::sync::Arc::new(
+            self.activated.names(),
         )));
         ctx
     }
@@ -302,12 +305,7 @@ impl Agent {
         if let Some(tool) = self.tools.get(name) {
             return Some(tool.clone());
         }
-        self.activated.as_ref().and_then(|activated| {
-            activated
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get_resolved(name)
-        })
+        self.activated.get_resolved(name)
     }
 }
 

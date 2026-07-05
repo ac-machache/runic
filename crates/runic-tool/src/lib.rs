@@ -167,6 +167,31 @@ pub trait Tool: Send + Sync {
     }
 }
 
+pub const ACTIVATED_KEY_PREFIX: &str = "tool-search/activated/";
+
+pub fn activated_key(name: &str) -> String {
+    format!("{ACTIVATED_KEY_PREFIX}{name}")
+}
+
+/// Resolves an on-demand tool by prefixed name (e.g. the deferred MCP
+/// catalog). Boot-scoped and shared; which tools are switched on for a
+/// conversation lives in that conversation's state, not here.
+pub trait ToolCatalog: Send + Sync {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>>;
+}
+
+/// Snapshot of the calling agent's activated tool names, inserted into each
+/// [`ToolContext`] so an activating tool can skip re-emitting for names that
+/// are already live.
+#[derive(Clone, Default)]
+pub struct ActivatedToolNames(pub Arc<std::collections::HashSet<String>>);
+
+impl ActivatedToolNames {
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+}
+
 /// Tools activated on demand during a conversation.
 #[derive(Default)]
 pub struct ActivatedToolSet {
@@ -212,6 +237,10 @@ impl ActivatedToolSet {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.values().map(|t| t.spec()).collect()
+    }
+
+    pub fn names(&self) -> std::collections::HashSet<String> {
+        self.tools.keys().cloned().collect()
     }
 
     pub fn len(&self) -> usize {

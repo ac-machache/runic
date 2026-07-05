@@ -5,34 +5,64 @@
 //! - `select:name1,name2` — activate exact tools by prefixed name.
 //! - free-text — keyword-search the deferred set and activate the matches.
 //!
-//! It activates into a shared [`ActivatedToolSet`]; the agent loop reads that
-//! set when assembling each request and resolving calls, so `tool_search`
-//! needs no loop special-casing — it's just a normal tool with a side effect.
+//! Activation is a state write: each match emits a
+//! `tool-search/activated/<name>` key through the run's [`ExternalEvents`],
+//! so it lands in the event log and the agent loop materializes the tool from
+//! its catalog at the next turn — per conversation, surviving rebuilds.
 
 use std::fmt::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
-use runic_tool::{ActivatedToolSet, Tool, ToolContext, ToolResult, ToolSpec};
+use runic_state::{ExternalEvents, SessionEvent};
+use runic_tool::{ActivatedToolNames, Tool, ToolContext, ToolResult, ToolSpec, activated_key};
 
 use crate::deferred::{DeferredMcpToolSet, ToolAccessPolicy};
 
 const DEFAULT_MAX_RESULTS: usize = 5;
 
-/// The `tool_search` tool. Holds the full deferred set + the shared activated
-/// set it writes into.
+/// The `tool_search` tool. Holds the full deferred set it searches and
+/// activates from.
 pub struct ToolSearchTool {
-    deferred: DeferredMcpToolSet,
-    activated: Arc<Mutex<ActivatedToolSet>>,
+    deferred: Arc<DeferredMcpToolSet>,
     policy: Option<ToolAccessPolicy>,
 }
 
+struct Activation<'a> {
+    events: Option<Arc<ExternalEvents>>,
+    already_active: Option<Arc<ActivatedToolNames>>,
+    run_id: &'a str,
+}
+
+impl Activation<'_> {
+    fn activate(&self, name: &str) {
+        if self
+            .already_active
+            .as_ref()
+            .is_some_and(|names| names.contains(name))
+        {
+            return;
+        }
+        match &self.events {
+            Some(events) => events.emit(SessionEvent::StateUpdated {
+                run_id: self.run_id.to_string(),
+                key: activated_key(name),
+                value: serde_json::Value::Bool(true),
+                at: Utc::now(),
+            }),
+            None => {
+                tracing::warn!(tool = %name, "no event rail in tool context — activation not recorded");
+            }
+        }
+    }
+}
+
 impl ToolSearchTool {
-    pub fn new(deferred: DeferredMcpToolSet, activated: Arc<Mutex<ActivatedToolSet>>) -> Self {
+    pub fn new(deferred: Arc<DeferredMcpToolSet>) -> Self {
         Self {
             deferred,
-            activated,
             policy: None,
         }
     }
@@ -46,24 +76,15 @@ impl ToolSearchTool {
         self.policy.as_ref().is_none_or(|p| p.is_tool_allowed(name))
     }
 
-    /// Recover a poisoned lock rather than panicking — a crashed activation
-    /// shouldn't wedge the whole conversation.
-    fn lock_activated(&self) -> std::sync::MutexGuard<'_, ActivatedToolSet> {
-        self.activated
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Append one tool's `<function>` line and activate it (idempotently).
-    fn emit_and_activate(&self, out: &mut String, spec: &ToolSpec, prefixed: &str) {
-        {
-            let mut guard = self.lock_activated();
-            if !guard.is_activated(prefixed)
-                && let Some(tool) = self.deferred.activate(prefixed)
-            {
-                guard.activate(prefixed.to_string(), Arc::new(tool));
-            }
-        }
+    /// Append one tool's `<function>` line and record its activation.
+    fn emit_and_activate(
+        &self,
+        out: &mut String,
+        spec: &ToolSpec,
+        prefixed: &str,
+        activation: &Activation<'_>,
+    ) {
+        activation.activate(prefixed);
         let _ = writeln!(
             out,
             "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
@@ -73,7 +94,7 @@ impl ToolSearchTool {
         );
     }
 
-    fn select(&self, names: &[&str]) -> ToolResult {
+    fn select(&self, names: &[&str], activation: &Activation<'_>) -> ToolResult {
         let mut out = String::from("<functions>\n");
         let mut not_found = Vec::new();
         for name in names {
@@ -85,7 +106,7 @@ impl ToolSearchTool {
                 continue;
             }
             match self.deferred.spec(name) {
-                Some(spec) => self.emit_and_activate(&mut out, &spec, name),
+                Some(spec) => self.emit_and_activate(&mut out, &spec, name, activation),
                 None => not_found.push(*name),
             }
         }
@@ -96,7 +117,7 @@ impl ToolSearchTool {
         ToolResult::ok(out)
     }
 
-    fn keyword(&self, query: &str, max_results: usize) -> ToolResult {
+    fn keyword(&self, query: &str, max_results: usize, activation: &Activation<'_>) -> ToolResult {
         // With a policy active, fetch all matches so denied tools don't consume
         // result slots; apply the cap after filtering.
         let search_limit = if self.policy.is_some() {
@@ -118,7 +139,7 @@ impl ToolSearchTool {
             if !self.is_allowed(stub.prefixed_name()) {
                 continue;
             }
-            self.emit_and_activate(&mut out, &stub.spec(), stub.prefixed_name());
+            self.emit_and_activate(&mut out, &stub.spec(), stub.prefixed_name(), activation);
             returned += 1;
         }
         out.push_str("</functions>\n");
@@ -157,7 +178,7 @@ impl Tool for ToolSearchTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let query = args
             .get("query")
@@ -173,12 +194,17 @@ impl Tool for ToolSearchTool {
             .map(|v| usize::try_from(v).unwrap_or(DEFAULT_MAX_RESULTS))
             .unwrap_or(DEFAULT_MAX_RESULTS);
 
+        let activation = Activation {
+            events: ctx.get::<ExternalEvents>(),
+            already_active: ctx.get::<ActivatedToolNames>(),
+            run_id: &ctx.run_id,
+        };
         let result = match query.strip_prefix("select:") {
             Some(names) => {
                 let names: Vec<&str> = names.split(',').map(str::trim).collect();
-                self.select(&names)
+                self.select(&names, &activation)
             }
-            None => self.keyword(query, max_results),
+            None => self.keyword(query, max_results, &activation),
         };
         Ok(result)
     }
@@ -239,18 +265,36 @@ mod tests {
         )
     }
 
-    fn ctx() -> ToolContext {
-        ToolContext::new("u", "s", "r")
+    fn ctx_with_rail() -> (ToolContext, Arc<std::sync::Mutex<Vec<SessionEvent>>>) {
+        let pending = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut ctx = ToolContext::new("u", "s", "r");
+        ctx.insert(ExternalEvents::new(None, None, pending.clone()));
+        (ctx, pending)
+    }
+
+    fn activated_keys(pending: &std::sync::Mutex<Vec<SessionEvent>>) -> Vec<String> {
+        pending
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::StateUpdated { key, value, .. } if value.as_bool() == Some(true) => {
+                    Some(
+                        key.strip_prefix(runic_tool::ACTIVATED_KEY_PREFIX)?
+                            .to_string(),
+                    )
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[tokio::test]
     async fn empty_query_errors() {
-        let t = ToolSearchTool::new(
-            deferred(vec![]),
-            Arc::new(Mutex::new(ActivatedToolSet::new())),
-        );
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![])));
+        let (ctx, _) = ctx_with_rail();
         let r = t
-            .execute(serde_json::json!({ "query": "" }), &ctx())
+            .execute(serde_json::json!({ "query": "" }), &ctx)
             .await
             .unwrap();
         assert!(!r.success);
@@ -258,72 +302,85 @@ mod tests {
 
     #[tokio::test]
     async fn keyword_search_finds_and_activates() {
-        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
-        let t = ToolSearchTool::new(
-            deferred(vec![("read_file", "Read a file from disk")]),
-            Arc::clone(&activated),
-        );
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![(
+            "read_file",
+            "Read a file from disk",
+        )])));
+        let (ctx, pending) = ctx_with_rail();
         let r = t
-            .execute(serde_json::json!({ "query": "read file" }), &ctx())
+            .execute(serde_json::json!({ "query": "read file" }), &ctx)
             .await
             .unwrap();
         assert!(r.success);
         assert!(r.output.contains("<function>"));
         assert!(r.output.contains("mcp__fs__read_file"));
-        assert!(activated.lock().unwrap().is_activated("mcp__fs__read_file"));
+        assert_eq!(activated_keys(&pending), ["mcp__fs__read_file"]);
     }
 
     #[tokio::test]
     async fn select_activates_exact_and_reports_not_found() {
-        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
-        let t = ToolSearchTool::new(
-            deferred(vec![("tool_a", "A"), ("tool_b", "B")]),
-            Arc::clone(&activated),
-        );
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![("tool_a", "A"), ("tool_b", "B")])));
+        let (ctx, pending) = ctx_with_rail();
         let r = t
             .execute(
                 serde_json::json!({ "query": "select:mcp__fs__tool_a,mcp__fs__missing" }),
-                &ctx(),
+                &ctx,
             )
             .await
             .unwrap();
         assert!(r.success);
         assert!(r.output.contains("mcp__fs__tool_a"));
         assert!(r.output.contains("Not found"));
-        assert!(activated.lock().unwrap().is_activated("mcp__fs__tool_a"));
-        assert!(!activated.lock().unwrap().is_activated("mcp__fs__missing"));
+        assert_eq!(activated_keys(&pending), ["mcp__fs__tool_a"]);
     }
 
     #[tokio::test]
-    async fn reactivation_is_idempotent() {
-        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
-        let t = ToolSearchTool::new(deferred(vec![("t", "a tool")]), Arc::clone(&activated));
-        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx())
+    async fn already_active_names_are_not_re_emitted() {
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![("t", "a tool")])));
+        let (mut ctx, pending) = ctx_with_rail();
+        ctx.insert(ActivatedToolNames(Arc::new(
+            [String::from("mcp__fs__t")].into(),
+        )));
+        let r = t
+            .execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx)
             .await
             .unwrap();
-        t.execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx())
+        assert!(r.success);
+        assert!(r.output.contains("mcp__fs__t"), "schema is still returned");
+        assert!(activated_keys(&pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_context_without_the_event_rail_still_returns_schemas() {
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![("t", "a tool")])));
+        let r = t
+            .execute(
+                serde_json::json!({ "query": "select:mcp__fs__t" }),
+                &ToolContext::new("u", "s", "r"),
+            )
             .await
             .unwrap();
-        assert_eq!(activated.lock().unwrap().len(), 1);
+        assert!(r.success);
+        assert!(r.output.contains("mcp__fs__t"));
     }
 
     #[tokio::test]
     async fn policy_filters_denied_tools() {
-        let activated = Arc::new(Mutex::new(ActivatedToolSet::new()));
-        let t = ToolSearchTool::new(
-            deferred(vec![("allowed", "a tool"), ("blocked", "a tool")]),
-            Arc::clone(&activated),
-        )
+        let t = ToolSearchTool::new(Arc::new(deferred(vec![
+            ("allowed", "a tool"),
+            ("blocked", "a tool"),
+        ])))
         .with_access_policy(ToolAccessPolicy {
             allowed: None,
             denied: Some(vec!["mcp__fs__blocked".into()]),
         });
+        let (ctx, pending) = ctx_with_rail();
         let r = t
-            .execute(serde_json::json!({ "query": "tool" }), &ctx())
+            .execute(serde_json::json!({ "query": "tool" }), &ctx)
             .await
             .unwrap();
         assert!(r.output.contains("mcp__fs__allowed"));
         assert!(!r.output.contains("mcp__fs__blocked"));
-        assert!(!activated.lock().unwrap().is_activated("mcp__fs__blocked"));
+        assert_eq!(activated_keys(&pending), ["mcp__fs__allowed"]);
     }
 }

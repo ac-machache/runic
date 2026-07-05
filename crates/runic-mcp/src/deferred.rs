@@ -4,11 +4,13 @@
 //! schema in every prompt is ruinous. Instead we register only a built-in
 //! [`ToolSearchTool`](crate::tool_search::ToolSearchTool): the system prompt
 //! lists tool *names*, and the model calls `tool_search` to fetch + activate
-//! the few it actually needs. Activated tools land in a shared
-//! [`ActivatedToolSet`], which the agent loop reads when assembling each
-//! request and resolving calls.
+//! the few it actually needs. Activation is recorded in the conversation's
+//! state; the agent loop resolves those keys against this set (its
+//! [`ToolCatalog`]) when assembling each request and resolving calls.
 
-use runic_tool::ToolSpec;
+use std::sync::Arc;
+
+use runic_tool::{Tool, ToolCatalog, ToolSpec};
 
 use crate::client::{McpClient, McpHandle};
 use crate::protocol::McpToolDef;
@@ -134,6 +136,12 @@ impl DeferredMcpToolSet {
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         scored.into_iter().take(max).map(|(_, s)| s).collect()
+    }
+}
+
+impl ToolCatalog for DeferredMcpToolSet {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.activate(name).map(|t| Arc::new(t) as Arc<dyn Tool>)
     }
 }
 

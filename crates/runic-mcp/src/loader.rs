@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use runic_tool::{ActivatedToolSet, Tool};
+use runic_tool::{Tool, ToolCatalog};
 
 use crate::{
     DeferredMcpToolSet, McpClient, McpConfig, McpServerConfig, ToolSearchTool,
@@ -102,15 +102,15 @@ impl Mcp {
         let names = deferred.names();
         let section = (!names.is_empty()).then(|| deferred_tools_prompt_section(&names));
 
-        let activated = Arc::new(Mutex::new(ActivatedToolSet::default()));
+        let deferred = Arc::new(deferred);
         let tool_search: Option<Arc<dyn Tool>> = if deferred.is_empty() {
             None
         } else {
-            Some(Arc::new(ToolSearchTool::new(deferred, activated.clone())))
+            Some(Arc::new(ToolSearchTool::new(deferred.clone())))
         };
 
         McpConnection {
-            activated,
+            deferred,
             tool_search,
             section,
         }
@@ -119,15 +119,16 @@ impl Mcp {
 
 /// The result of connecting MCP servers — what the assembler wires into the agent.
 pub struct McpConnection {
-    activated: Arc<Mutex<ActivatedToolSet>>,
+    deferred: Arc<DeferredMcpToolSet>,
     tool_search: Option<Arc<dyn Tool>>,
     section: Option<String>,
 }
 
 impl McpConnection {
-    /// The shared activated-tool set — wire via `AgentBuilder::activated_tools`.
-    pub fn activated(&self) -> Arc<Mutex<ActivatedToolSet>> {
-        self.activated.clone()
+    /// The boot-scoped tool catalog — wire via `AgentBuilder::tool_catalog`.
+    /// Per-conversation activation state lives in the agent's own state.
+    pub fn catalog(&self) -> Arc<dyn ToolCatalog> {
+        self.deferred.clone()
     }
 
     /// The `tool_search` tool (None when no servers connected).

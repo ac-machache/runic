@@ -54,14 +54,8 @@ impl Agent {
             .map(|tool| spec_to_def(tool.spec()))
             .collect();
 
-        // Rebuild on-demand-activated tool specs each turn so any tool the
-        // model just activated (via `tool_search`) appears in this request.
-        if let Some(activated) = &self.activated {
-            let guard = activated
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            tools.extend(guard.specs().into_iter().map(spec_to_def));
-        }
+        // On-demand activations (materialized from state at the turn top).
+        tools.extend(self.activated.specs().into_iter().map(spec_to_def));
 
         if let Some(schema) = &self.config.output_schema {
             tools.push(ToolDefinition {

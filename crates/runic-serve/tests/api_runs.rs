@@ -935,6 +935,43 @@ impl SessionStore for SlowStore {
     async fn delete_session(&self, tenant: &str, session_id: &str) -> runic_substrate::Result<()> {
         self.inner.delete_session(tenant, session_id).await
     }
+
+    async fn create_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        agent: &str,
+    ) -> runic_substrate::Result<()> {
+        self.inner
+            .create_run(tenant, session_id, run_id, agent)
+            .await
+    }
+
+    async fn set_run_status(
+        &self,
+        run_id: &str,
+        status: runic_substrate::RunStatus,
+        error: Option<&str>,
+    ) -> runic_substrate::Result<()> {
+        self.inner.set_run_status(run_id, status, error).await
+    }
+
+    async fn get_run(
+        &self,
+        tenant: &str,
+        run_id: &str,
+    ) -> runic_substrate::Result<Option<runic_substrate::RunRecord>> {
+        self.inner.get_run(tenant, run_id).await
+    }
+
+    async fn latest_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> runic_substrate::Result<Option<runic_substrate::RunRecord>> {
+        self.inner.latest_run(tenant, session_id).await
+    }
 }
 
 #[tokio::test]
@@ -1144,4 +1181,49 @@ async fn steer_with_empty_text_is_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn run_rows_track_the_lifecycle_over_http() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+
+    let resp = app
+        .clone()
+        .oneshot(wait_request("t1", TENANT, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_id = body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
+    assert_eq!(rec.agent, "main");
+    assert_eq!(rec.session_id, "t1");
+
+    let failing = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(FailingFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+    });
+    let resp = failing
+        .oneshot(wait_request("t2", TENANT, "boom"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let rec = store.latest_run(TENANT, "t2").await.unwrap().unwrap();
+    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
+    assert!(rec.error.is_some());
 }

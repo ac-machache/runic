@@ -139,6 +139,8 @@ pub struct RunContext {
     pub human: Option<Arc<dyn HumanInterface>>,
     /// Optional agent name recorded on the run's `RunStart` event.
     pub agent: Option<String>,
+    /// Optional pre-generated run id; the loop generates one when absent.
+    pub run_id: Option<String>,
 }
 
 impl RunContext {
@@ -183,6 +185,11 @@ impl RunContext {
     }
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
         self
     }
 }

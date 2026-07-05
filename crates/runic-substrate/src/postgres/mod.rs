@@ -40,6 +40,7 @@ pub(super) async fn migrate(pool: &PgPool) -> Result<()> {
         include_str!("../../migrations/0001_sessions.sql"),
         include_str!("../../migrations/0002_chat_search.sql"),
         include_str!("../../migrations/0003_artifacts.sql"),
+        include_str!("../../migrations/0004_runs.sql"),
     ] {
         sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(db)?;
     }

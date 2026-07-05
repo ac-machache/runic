@@ -1,0 +1,748 @@
+//! Stateless serving: agents are built per request, state is folded from the
+//! store's working set, and only what is alive right now is held in memory.
+//!
+//! - [`AgentRegistry`] — the named factories (one per agent signature).
+//! - [`RunRegistry`] — per-thread run locks + handles for in-flight runs
+//!   (cancel, steering, live event broadcast, persist backlog).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use runic_agent::{Agent, CancelToken};
+use runic_state::{EVENT_BROADCAST_CAPACITY, PersistSink, SessionEvent};
+use runic_substrate::SessionStore;
+use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
+
+use crate::error::ServeError;
+use crate::factory::BoxedAgentFactory;
+
+pub const DEFAULT_PERSIST_BACKLOG_MAX: u64 = 10_000;
+const RETRY_BASE: Duration = Duration::from_millis(100);
+const RETRY_CAP: Duration = Duration::from_secs(5);
+const RETRY_ESCALATE_AFTER: u32 = 5;
+
+pub struct AgentRegistry {
+    factories: HashMap<String, BoxedAgentFactory>,
+}
+
+impl AgentRegistry {
+    pub fn new(factories: HashMap<String, BoxedAgentFactory>) -> Self {
+        assert!(
+            !factories.is_empty(),
+            "runic-serve needs at least one agent registered"
+        );
+        Self { factories }
+    }
+
+    pub fn factory(&self, agent: &str) -> Result<&BoxedAgentFactory, ServeError> {
+        self.factories
+            .get(agent)
+            .ok_or_else(|| ServeError::AgentNotFound {
+                name: agent.to_string(),
+            })
+    }
+
+    pub fn resolve_agent(&self, requested: Option<&str>) -> Result<String, ServeError> {
+        match requested {
+            Some(name) => {
+                self.factory(name)?;
+                Ok(name.to_string())
+            }
+            None if self.factories.len() == 1 => Ok(self.factories.keys().next().unwrap().clone()),
+            None => {
+                let mut names: Vec<_> = self.factories.keys().map(String::as_str).collect();
+                names.sort_unstable();
+                Err(ServeError::BadRequest(format!(
+                    "this server hosts several agents; set \"agent\" to one of: {}",
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
+    pub fn agent_names(&self) -> Vec<(&str, Option<&str>)> {
+        let mut names: Vec<_> = self
+            .factories
+            .iter()
+            .map(|(name, f)| (name.as_str(), f.describe()))
+            .collect();
+        names.sort_by_key(|(name, _)| *name);
+        names
+    }
+}
+
+pub struct PersistHandle {
+    enqueued: Arc<AtomicU64>,
+    committed: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl PersistHandle {
+    pub fn backlog(&self) -> u64 {
+        self.enqueued
+            .load(Ordering::SeqCst)
+            .saturating_sub(self.committed.load(Ordering::SeqCst))
+    }
+
+    pub async fn flush(&self) {
+        let target = self.enqueued.load(Ordering::SeqCst);
+        loop {
+            let notified = self.notify.notified();
+            if self.committed.load(Ordering::SeqCst) >= target {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub struct BegunRun {
+    pub run_id: String,
+    pub cancel: CancelToken,
+    pub steering_rx: mpsc::UnboundedReceiver<String>,
+    pub events_tx: broadcast::Sender<Arc<SessionEvent>>,
+    pub persist_sink: PersistSink,
+    pub persist_rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
+    pub persist: Arc<PersistHandle>,
+}
+
+struct LiveRun {
+    run_id: String,
+    cancel: CancelToken,
+    steering: mpsc::UnboundedSender<String>,
+    events: broadcast::Sender<Arc<SessionEvent>>,
+}
+
+type ThreadKey = (String, String);
+
+#[derive(Default)]
+pub struct RunRegistry {
+    locks: Mutex<HashMap<ThreadKey, Arc<Mutex<()>>>>,
+    live: RwLock<HashMap<ThreadKey, LiveRun>>,
+    persist_watch: RwLock<HashMap<ThreadKey, Arc<PersistHandle>>>,
+    persist_backlog_max: u64,
+}
+
+impl RunRegistry {
+    pub fn new() -> Self {
+        Self {
+            locks: Mutex::new(HashMap::new()),
+            live: RwLock::new(HashMap::new()),
+            persist_watch: RwLock::new(HashMap::new()),
+            persist_backlog_max: DEFAULT_PERSIST_BACKLOG_MAX,
+        }
+    }
+
+    pub fn with_persist_backlog_max(mut self, max: u64) -> Self {
+        self.persist_backlog_max = max;
+        self
+    }
+
+    pub async fn thread_lock(&self, tenant: &str, thread_id: &str) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .await
+            .entry((tenant.to_string(), thread_id.to_string()))
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn begin(&self, tenant: &str, thread_id: &str, run_id: &str) -> BegunRun {
+        let cancel = CancelToken::new();
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        let (events_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        let (persist_tx, persist_rx) = mpsc::unbounded_channel();
+        let persist_sink = PersistSink::new(persist_tx);
+        let persist = Arc::new(PersistHandle {
+            enqueued: persist_sink.enqueued(),
+            committed: Arc::new(AtomicU64::new(0)),
+            notify: Arc::new(Notify::new()),
+        });
+
+        self.live.write().await.insert(
+            (tenant.to_string(), thread_id.to_string()),
+            LiveRun {
+                run_id: run_id.to_string(),
+                cancel: cancel.clone(),
+                steering: steer_tx,
+                events: events_tx.clone(),
+            },
+        );
+
+        BegunRun {
+            run_id: run_id.to_string(),
+            cancel,
+            steering_rx: steer_rx,
+            events_tx,
+            persist_sink,
+            persist_rx,
+            persist,
+        }
+    }
+
+    pub async fn end(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        run_id: &str,
+        persist: Arc<PersistHandle>,
+    ) {
+        let key = (tenant.to_string(), thread_id.to_string());
+        {
+            let mut live = self.live.write().await;
+            if live.get(&key).is_some_and(|l| l.run_id == run_id) {
+                live.remove(&key);
+            }
+        }
+        let mut watch = self.persist_watch.write().await;
+        watch.retain(|_, handle| handle.backlog() > 0);
+        if persist.backlog() > 0 {
+            watch.insert(key, persist);
+        }
+    }
+
+    pub async fn cancel_run(&self, tenant: &str, thread_id: &str) -> bool {
+        let key = (tenant.to_string(), thread_id.to_string());
+        let cancelled = match self.live.read().await.get(&key) {
+            Some(l) => {
+                l.cancel.cancel();
+                true
+            }
+            None => false,
+        };
+        tracing::info!(%tenant, %thread_id, cancelled, "run cancel requested");
+        cancelled
+    }
+
+    pub async fn steer_run(&self, tenant: &str, thread_id: &str, text: String) -> bool {
+        let key = (tenant.to_string(), thread_id.to_string());
+        let steered = match self.live.read().await.get(&key) {
+            Some(l) => l.steering.send(text).is_ok(),
+            None => false,
+        };
+        tracing::info!(%tenant, %thread_id, steered, "run steer requested");
+        steered
+    }
+
+    pub async fn is_busy(&self, tenant: &str, thread_id: &str) -> bool {
+        self.live
+            .read()
+            .await
+            .contains_key(&(tenant.to_string(), thread_id.to_string()))
+    }
+
+    pub async fn live_events(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Option<broadcast::Receiver<Arc<SessionEvent>>> {
+        let key = (tenant.to_string(), thread_id.to_string());
+        self.live
+            .read()
+            .await
+            .get(&key)
+            .filter(|l| l.run_id == run_id)
+            .map(|l| l.events.subscribe())
+    }
+
+    pub async fn check_persist_capacity(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+    ) -> Result<(), ServeError> {
+        let key = (tenant.to_string(), thread_id.to_string());
+        let worst = {
+            let watch = self.persist_watch.read().await;
+            watch.get(&key).map(|h| h.backlog()).unwrap_or(0)
+        };
+        if worst > self.persist_backlog_max {
+            return Err(ServeError::PersistenceDegraded {
+                thread: thread_id.to_string(),
+                backlog: worst,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn forget_thread(&self, tenant: &str, thread_id: &str) {
+        let key = (tenant.to_string(), thread_id.to_string());
+        self.locks.lock().await.remove(&key);
+        self.persist_watch.write().await.remove(&key);
+    }
+}
+
+/// Build a fresh agent for one request: factory build, label, working-set
+/// fold, live sinks, persister. This is the whole "warm agent" replaced.
+pub async fn hydrate_agent(
+    store: &Arc<dyn SessionStore>,
+    factory: &BoxedAgentFactory,
+    tenant: &str,
+    thread_id: &str,
+    begun: &mut BegunRun,
+) -> Agent {
+    let mut agent = factory.build(tenant, thread_id).await;
+
+    if factory.stateless() {
+        agent.state_mut().set_events_tx(begun.events_tx.clone());
+        return agent;
+    }
+
+    if let Ok(Some(meta)) = store.session_meta(tenant, thread_id).await {
+        agent.state_mut().label = meta.label;
+    }
+
+    // Replay the working set (last snapshot + tail) into the fresh state.
+    // RunEnd rebuilds stats; RunStart is skipped so an orphaned run can't
+    // look in-flight on a fresh agent.
+    match store.read_tail(tenant, thread_id).await {
+        Ok(stored) => {
+            for entry in stored {
+                if matches!(
+                    entry.event,
+                    SessionEvent::Message { .. }
+                        | SessionEvent::StateSnapshot { .. }
+                        | SessionEvent::RunEnd { .. }
+                        | SessionEvent::TaskSpawned { .. }
+                        | SessionEvent::TaskFinished { .. }
+                        | SessionEvent::StateUpdated { .. }
+                ) {
+                    agent.state_mut().fold_event(entry.event);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(%tenant, %thread_id, error = %e, "history fold failed — starting cold");
+        }
+    }
+
+    agent.state_mut().set_events_tx(begun.events_tx.clone());
+    agent.state_mut().set_persist_tx(begun.persist_sink.clone());
+    let rx = std::mem::replace(&mut begun.persist_rx, mpsc::unbounded_channel().1);
+    spawn_persister(
+        rx,
+        store.clone(),
+        tenant.to_string(),
+        thread_id.to_string(),
+        begun.persist.clone(),
+    );
+
+    agent
+}
+
+fn spawn_persister(
+    mut rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
+    store: Arc<dyn SessionStore>,
+    tenant: String,
+    session_id: String,
+    handle: Arc<PersistHandle>,
+) {
+    tokio::spawn(async move {
+        // append_batch is one transaction, so retrying a failed batch can't
+        // double-write.
+        while let Some(first) = rx.recv().await {
+            let mut shared = vec![first];
+            while let Ok(event) = rx.try_recv() {
+                shared.push(event);
+            }
+            let batch: Vec<SessionEvent> = shared.iter().map(|e| (**e).clone()).collect();
+            let batch_size = batch.len();
+            let mut attempt = 0u32;
+            loop {
+                match store.append_batch(&tenant, &session_id, &batch).await {
+                    Ok(()) => {
+                        handle
+                            .committed
+                            .fetch_add(batch_size as u64, Ordering::SeqCst);
+                        handle.notify.notify_waiters();
+                        tracing::debug!(%tenant, %session_id, batch_size, "persister batch append");
+                        break;
+                    }
+                    Err(e) => {
+                        attempt += 1;
+                        let delay = RETRY_BASE
+                            .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+                            .min(RETRY_CAP);
+                        if attempt >= RETRY_ESCALATE_AFTER {
+                            tracing::error!(
+                                %tenant, %session_id, batch_size, attempt,
+                                backlog = handle.backlog(),
+                                error = %e,
+                                "persist batch still failing — retrying"
+                            );
+                        } else {
+                            tracing::warn!(
+                                %tenant, %session_id, batch_size, attempt,
+                                error = %e,
+                                "persist batch failed — retrying"
+                            );
+                        }
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+    use runic_substrate::MemorySessionStore;
+    use runic_types::{ContentBlock, StopReason, TokenUsage};
+
+    use crate::factory::AgentFactory;
+
+    struct TestProvider;
+
+    #[async_trait]
+    impl Provider for TestProvider {
+        async fn complete(
+            &self,
+            _req: CompletionRequest,
+        ) -> Result<CompletionResponse, ProviderError> {
+            Ok(CompletionResponse {
+                content: vec![ContentBlock::Text {
+                    text: "ok".into(),
+                    provider_metadata: None,
+                }],
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    struct TestFactory;
+
+    #[async_trait]
+    impl AgentFactory for TestFactory {
+        async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+            Agent::builder(Arc::new(TestProvider), tenant, session_id)
+                .system_prompt("test")
+                .build()
+        }
+    }
+
+    struct StatelessTestFactory;
+
+    #[async_trait]
+    impl AgentFactory for StatelessTestFactory {
+        async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+            Agent::builder(Arc::new(TestProvider), tenant, session_id)
+                .system_prompt("test")
+                .build()
+        }
+
+        fn stateless(&self) -> bool {
+            true
+        }
+    }
+
+    fn solo_registry() -> AgentRegistry {
+        AgentRegistry::new(HashMap::from([(
+            "solo".to_string(),
+            Arc::new(TestFactory) as BoxedAgentFactory,
+        )]))
+    }
+
+    fn message_event(i: usize) -> SessionEvent {
+        SessionEvent::Message {
+            run_id: "r1".into(),
+            msg: runic_types::Message::user(format!("m{i}")),
+            at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_agent_picks_the_only_agent_or_demands_a_name() {
+        let reg = solo_registry();
+        assert_eq!(reg.resolve_agent(None).unwrap(), "solo");
+        assert_eq!(reg.resolve_agent(Some("solo")).unwrap(), "solo");
+        assert!(matches!(
+            reg.resolve_agent(Some("ghost")),
+            Err(ServeError::AgentNotFound { .. })
+        ));
+
+        let reg = AgentRegistry::new(HashMap::from([
+            (
+                "coral".to_string(),
+                Arc::new(TestFactory) as BoxedAgentFactory,
+            ),
+            (
+                "scout".to_string(),
+                Arc::new(TestFactory) as BoxedAgentFactory,
+            ),
+        ]));
+        match reg.resolve_agent(None) {
+            Err(ServeError::BadRequest(message)) => {
+                assert!(message.contains("coral") && message.contains("scout"));
+            }
+            other => panic!("expected bad request, got {other:?}"),
+        }
+    }
+
+    struct FlakyStore {
+        inner: MemorySessionStore,
+        failures_left: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl SessionStore for FlakyStore {
+        async fn append(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            event: &SessionEvent,
+        ) -> runic_substrate::Result<u64> {
+            self.inner.append(tenant, session_id, event).await
+        }
+
+        async fn append_batch(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            events: &[SessionEvent],
+        ) -> runic_substrate::Result<()> {
+            let left = self.failures_left.load(Ordering::SeqCst);
+            if left > 0 {
+                self.failures_left.store(left - 1, Ordering::SeqCst);
+                return Err(runic_substrate::Error::Unsupported("store is down".into()));
+            }
+            self.inner.append_batch(tenant, session_id, events).await
+        }
+
+        async fn read(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            self.inner.read(tenant, session_id).await
+        }
+
+        async fn read_after(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            after_seq: u64,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            self.inner.read_after(tenant, session_id, after_seq).await
+        }
+
+        async fn list_sessions(
+            &self,
+            tenant: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::SessionMeta>> {
+            self.inner.list_sessions(tenant).await
+        }
+
+        async fn session_meta(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<Option<runic_substrate::SessionMeta>> {
+            self.inner.session_meta(tenant, session_id).await
+        }
+
+        async fn set_label(
+            &self,
+            tenant: &str,
+            session_id: &str,
+            label: Option<&str>,
+        ) -> runic_substrate::Result<()> {
+            self.inner.set_label(tenant, session_id, label).await
+        }
+
+        async fn delete_session(
+            &self,
+            tenant: &str,
+            session_id: &str,
+        ) -> runic_substrate::Result<()> {
+            self.inner.delete_session(tenant, session_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn persister_retries_until_the_store_recovers() {
+        let store = Arc::new(FlakyStore {
+            inner: MemorySessionStore::new(),
+            failures_left: std::sync::atomic::AtomicU32::new(3),
+        });
+        let registry = RunRegistry::new();
+        let begun = registry.begin("t", "s", "r-1").await;
+        spawn_persister(
+            begun.persist_rx,
+            store.clone(),
+            "t".into(),
+            "s".into(),
+            begun.persist.clone(),
+        );
+
+        for i in 0..5 {
+            begun.persist_sink.send(Arc::new(message_event(i)));
+        }
+        begun.persist.flush().await;
+
+        let stored = store.inner.read("t", "s").await.unwrap();
+        let texts: Vec<String> = stored
+            .iter()
+            .filter_map(|s| match &s.event {
+                SessionEvent::Message { msg, .. } => Some(msg.content.text_content()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["m0", "m1", "m2", "m3", "m4"]);
+        assert_eq!(begun.persist.backlog(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_lingering_backlog_refuses_new_runs_until_it_drains() {
+        let store = Arc::new(FlakyStore {
+            inner: MemorySessionStore::new(),
+            failures_left: std::sync::atomic::AtomicU32::new(u32::MAX),
+        });
+        let registry = RunRegistry::new().with_persist_backlog_max(3);
+        let begun = registry.begin("t", "s", "r-1").await;
+        spawn_persister(
+            begun.persist_rx,
+            store.clone(),
+            "t".into(),
+            "s".into(),
+            begun.persist.clone(),
+        );
+        for i in 0..5 {
+            begun.persist_sink.send(Arc::new(message_event(i)));
+        }
+        registry.end("t", "s", "r-1", begun.persist.clone()).await;
+
+        assert!(matches!(
+            registry.check_persist_capacity("t", "s").await,
+            Err(ServeError::PersistenceDegraded { backlog: 5, .. })
+        ));
+        registry.check_persist_capacity("t", "other").await.unwrap();
+
+        store.failures_left.store(0, Ordering::SeqCst);
+        begun.persist.flush().await;
+        registry.end("t", "s2", "r-x", begun.persist.clone()).await;
+        registry.check_persist_capacity("t", "s").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hydrate_restores_the_working_set_and_stats() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        let snapshot_stats = runic_state::ThreadStats {
+            runs: 7,
+            total_tool_calls: 12,
+            ..Default::default()
+        };
+        store
+            .append_batch(
+                "t",
+                "s",
+                &[
+                    SessionEvent::StateSnapshot {
+                        run_id: "r7".into(),
+                        messages: vec![runic_types::Message::assistant("summary")],
+                        system_prompt: "sys".into(),
+                        reason: "compaction".into(),
+                        stats: Some(snapshot_stats),
+                        open_tasks: None,
+                        data: None,
+                        at: chrono::Utc::now(),
+                    },
+                    message_event(0),
+                    SessionEvent::RunEnd {
+                        run_id: "r8".into(),
+                        outcome: runic_state::RunOutcome {
+                            total_turns: 2,
+                            ..Default::default()
+                        },
+                        at: chrono::Utc::now(),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+
+        let registry = RunRegistry::new();
+        let mut begun = registry.begin("t", "s", "r-9").await;
+        let factory: BoxedAgentFactory = Arc::new(TestFactory);
+        let agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
+
+        assert_eq!(agent.state().stats.runs, 8);
+        assert_eq!(agent.state().stats.total_tool_calls, 12);
+        assert_eq!(agent.state().stats.turns, 2);
+        assert_eq!(agent.state().messages_for_provider().len(), 2);
+        assert!(agent.state().current_run().is_none());
+    }
+
+    #[tokio::test]
+    async fn stateless_factories_skip_replay_and_persistence() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        store.append("t", "s", &message_event(0)).await.unwrap();
+
+        let registry = RunRegistry::new();
+        let mut begun = registry.begin("t", "s", "r-1").await;
+        let factory: BoxedAgentFactory = Arc::new(StatelessTestFactory);
+        let mut agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
+
+        assert!(agent.state().messages_for_provider().is_empty());
+        agent.state_mut().push_event(message_event(9));
+        drop(agent);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(store.read("t", "s").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_thread_lock_serializes_runs() {
+        let registry = Arc::new(RunRegistry::new());
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let registry = registry.clone();
+            let order = order.clone();
+            handles.push(tokio::spawn(async move {
+                let lock = registry.thread_lock("t", "s").await;
+                let _guard = lock.lock().await;
+                order.lock().await.push(format!("start-{i}"));
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                order.lock().await.push(format!("end-{i}"));
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let order = order.lock().await;
+        for pair in order.chunks(2) {
+            assert_eq!(
+                pair[0].replace("start", ""),
+                pair[1].replace("end", ""),
+                "runs interleaved: {order:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn live_run_handles_answer_cancel_steer_and_attach() {
+        let registry = RunRegistry::new();
+        let begun = registry.begin("t", "s", "r-1").await;
+
+        assert!(registry.is_busy("t", "s").await);
+        assert!(registry.live_events("t", "s", "r-1").await.is_some());
+        assert!(registry.live_events("t", "s", "r-other").await.is_none());
+        assert!(registry.steer_run("t", "s", "hey".into()).await);
+        assert!(registry.cancel_run("t", "s").await);
+        assert!(begun.cancel.is_cancelled());
+
+        registry.end("t", "s", "r-1", begun.persist.clone()).await;
+        assert!(!registry.is_busy("t", "s").await);
+        assert!(!registry.cancel_run("t", "s").await);
+        assert!(!registry.steer_run("t", "s", "hey".into()).await);
+    }
+}

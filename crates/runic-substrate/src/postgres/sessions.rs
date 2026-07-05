@@ -66,6 +66,23 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
     Ok(out)
 }
 
+fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
+    let status: String = row.try_get("status").map_err(db)?;
+    Ok(crate::RunRecord {
+        run_id: row.try_get("run_id").map_err(db)?,
+        tenant: row.try_get("tenant").map_err(db)?,
+        session_id: row.try_get("session_id").map_err(db)?,
+        agent: row.try_get("agent").map_err(db)?,
+        status: crate::RunStatus::parse(&status)
+            .ok_or_else(|| crate::Error::Serde(format!("unknown run status {status:?}")))?,
+        error: row.try_get("error").map_err(db)?,
+        claimed_by: row.try_get("claimed_by").map_err(db)?,
+        lease_expires_at: row.try_get("lease_expires_at").map_err(db)?,
+        created_at: row.try_get("created_at").map_err(db)?,
+        updated_at: row.try_get("updated_at").map_err(db)?,
+    })
+}
+
 fn row_to_meta(row: sqlx::postgres::PgRow) -> Result<SessionMeta> {
     Ok(SessionMeta {
         session_id: row.try_get("session_id").map_err(db)?,
@@ -352,7 +369,84 @@ impl SessionStore for PostgresSessionStore {
             .execute(&self.pool)
             .await
             .map_err(db)?;
+        sqlx::query("DELETE FROM runs WHERE tenant = $1 AND session_id = $2")
+            .bind(tenant)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
         Ok(())
+    }
+
+    async fn create_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        agent: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO runs (run_id, tenant, session_id, agent, status)
+             VALUES ($1, $2, $3, $4, 'pending')",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .bind(session_id)
+        .bind(agent)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
+    }
+
+    async fn set_run_status(
+        &self,
+        run_id: &str,
+        status: crate::RunStatus,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE runs SET status = $2, error = $3, updated_at = now() WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .bind(status.as_str())
+        .bind(error)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if result.rows_affected() == 0 {
+            return Err(crate::Error::NotFound(format!("run {run_id}")));
+        }
+        Ok(())
+    }
+
+    async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
+        let row = sqlx::query(
+            "SELECT run_id, tenant, session_id, agent, status, error, claimed_by,
+                    lease_expires_at, created_at, updated_at
+             FROM runs WHERE tenant = $1 AND run_id = $2",
+        )
+        .bind(tenant)
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        row.map(row_to_run).transpose()
+    }
+
+    async fn latest_run(&self, tenant: &str, session_id: &str) -> Result<Option<crate::RunRecord>> {
+        let row = sqlx::query(
+            "SELECT run_id, tenant, session_id, agent, status, error, claimed_by,
+                    lease_expires_at, created_at, updated_at
+             FROM runs WHERE tenant = $1 AND session_id = $2
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        row.map(row_to_run).transpose()
     }
 
     async fn search(

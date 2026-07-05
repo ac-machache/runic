@@ -243,10 +243,7 @@ async fn missing_agent_on_a_single_agent_server_routes_to_it() {
 #[test]
 #[should_panic(expected = "at least one agent")]
 fn an_empty_roster_refuses_to_serve() {
-    runic_serve::ThreadPool::new(
-        HashMap::new(),
-        Arc::new(runic_substrate::MemorySessionStore::new()),
-    );
+    runic_serve::AgentRegistry::new(HashMap::new());
 }
 
 #[tokio::test]

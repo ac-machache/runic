@@ -28,7 +28,7 @@ pub struct AgentList {
 )]
 pub async fn list_agents(State(state): State<AppState>) -> Json<AgentList> {
     let agents = state
-        .pool
+        .agents
         .agent_names()
         .into_iter()
         .map(|(name, description)| AgentInfo {

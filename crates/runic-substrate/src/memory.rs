@@ -109,6 +109,7 @@ struct SessionRec {
 #[derive(Default)]
 pub struct MemorySessionStore {
     sessions: Mutex<HashMap<(String, String), SessionRec>>,
+    runs: Mutex<HashMap<String, crate::RunRecord>>,
 }
 
 impl MemorySessionStore {
@@ -260,7 +261,74 @@ impl SessionStore for MemorySessionStore {
             .lock()
             .unwrap()
             .remove(&(tenant.to_string(), session_id.to_string()));
+        self.runs
+            .lock()
+            .unwrap()
+            .retain(|_, r| !(r.tenant == tenant && r.session_id == session_id));
         Ok(())
+    }
+
+    async fn create_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        agent: &str,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.runs.lock().unwrap().insert(
+            run_id.to_string(),
+            crate::RunRecord {
+                run_id: run_id.to_string(),
+                tenant: tenant.to_string(),
+                session_id: session_id.to_string(),
+                agent: agent.to_string(),
+                status: crate::RunStatus::Pending,
+                error: None,
+                claimed_by: None,
+                lease_expires_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+        );
+        Ok(())
+    }
+
+    async fn set_run_status(
+        &self,
+        run_id: &str,
+        status: crate::RunStatus,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let mut runs = self.runs.lock().unwrap();
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Err(Error::NotFound(format!("run {run_id}")));
+        };
+        rec.status = status;
+        rec.error = error.map(str::to_string);
+        rec.updated_at = Utc::now();
+        Ok(())
+    }
+
+    async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
+        Ok(self
+            .runs
+            .lock()
+            .unwrap()
+            .get(run_id)
+            .filter(|r| r.tenant == tenant)
+            .cloned())
+    }
+
+    async fn latest_run(&self, tenant: &str, session_id: &str) -> Result<Option<crate::RunRecord>> {
+        Ok(self
+            .runs
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.tenant == tenant && r.session_id == session_id)
+            .max_by_key(|r| r.created_at)
+            .cloned())
     }
 
     async fn search(

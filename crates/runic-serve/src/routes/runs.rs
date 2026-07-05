@@ -26,7 +26,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use base64::Engine;
 use runic_agent::AgentEvent;
 use runic_state::SessionEvent;
-use runic_substrate::ArtifactSource;
+use runic_substrate::{ArtifactSource, RunStatus};
 use runic_types::{ContentBlock, Message, MessageContent};
 
 use crate::app::AppState;
@@ -233,9 +233,9 @@ pub async fn create_and_stream_run(
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, ServeError> {
     // Extract context before `into_message` consumes the request, and validate
     // the body BEFORE building/locking anything (clean 400 vs half-open SSE).
-    let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
+    let agent_name = state.agents.resolve_agent(req.agent.as_deref())?;
     state
-        .pool
+        .runs
         .check_persist_capacity(&tenant, &thread_id)
         .await?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
@@ -245,7 +245,7 @@ pub async fn create_and_stream_run(
 
     // App-resolved per-run context (provider override, identity keys, …).
     let mut run_ctx = state
-        .pool
+        .agents
         .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
@@ -258,12 +258,21 @@ pub async fn create_and_stream_run(
     // Clone the wire sender so the run task can report a failure on the same
     // channel the HITL asks use (no third channel needed).
     let err_tx = ask_tx.clone();
-    let (cancel, steering_rx) = state.pool.begin_run(&tenant, &thread_id).await;
+
+    let run_id = runic_state::new_run_id();
+    state
+        .session_store
+        .create_run(&tenant, &thread_id, &run_id, &agent_name)
+        .await?;
+    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await;
+    let persist = begun.persist.clone();
+    let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     run_ctx = run_ctx
         .with_events(evt_tx)
-        .with_cancel(cancel.clone())
+        .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
+        .with_run_id(&run_id)
         .with_human(Arc::new(HumanChannel::new(
             state.human_hub.clone(),
             ask_tx,
@@ -271,30 +280,44 @@ pub async fn create_and_stream_run(
             thread_id.clone(),
         )));
 
-    tracing::info!(%tenant, %thread_id, agent = %agent_name, "run stream accepted");
+    tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "run stream accepted");
 
-    let pool = state.pool.clone();
-    let agent_arc = state
-        .pool
-        .get_or_build(&tenant, &thread_id, &agent_name)
-        .await?;
-    let persist = state
-        .pool
-        .persist_handle(&tenant, &thread_id, &agent_name)
-        .await;
+    let registry = state.runs.clone();
+    let store = state.session_store.clone();
+    let factory = state.agents.factory(&agent_name)?.clone();
     tokio::spawn(async move {
-        let mut agent = agent_arc.lock().await;
-        if let Err(e) = agent.run_message_with(user_msg, run_ctx).await {
+        let lock = registry.thread_lock(&tenant, &thread_id).await;
+        let _guard = lock.lock().await;
+        let mut agent =
+            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
+        if let Err(e) = store
+            .set_run_status(&run_id, RunStatus::Running, None)
+            .await
+        {
+            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+        }
+        let outcome = agent.run_message_with(user_msg, run_ctx).await;
+        let (status, error) = match &outcome {
+            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(_) => (RunStatus::Success, None),
+            Err(e) => (RunStatus::Error, Some(e.to_string())),
+        };
+        if let Err(e) = store
+            .set_run_status(&run_id, status, error.as_deref())
+            .await
+        {
+            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+        }
+        if let Err(e) = outcome {
             tracing::error!(%tenant, %thread_id, error = %e, "run task failed");
-            // The failed run already recorded its RunEnd, so it's the last run,
-            // not the "current" (in-flight) one.
-            let run_id = agent.state().runs().last().map(|r| r.id.clone());
             let _ = err_tx.send(WireEvent::RunError {
-                run_id,
+                run_id: Some(run_id.clone()),
                 message: e.to_string(),
             });
         }
-        pool.end_run(&tenant, &thread_id, &cancel).await;
+        registry
+            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+            .await;
         // Guard drops → the next queued run on this thread proceeds. The agent
         // clears its event sender + human channel here, closing both rx ends.
     });
@@ -311,7 +334,7 @@ pub async fn create_and_stream_run(
                         for w in from_agent_event(e) {
                             if matches!(w, WireEvent::Done { .. }) {
                                 done_sent = true;
-                                flush_persist(persist.as_deref()).await;
+                                flush_persist(&persist).await;
                             }
                             yield Ok(to_sse(&w, None));
                         }
@@ -329,7 +352,7 @@ pub async fn create_and_stream_run(
             yield Ok(to_sse(&err, None));
         }
         if !done_sent {
-            flush_persist(persist.as_deref()).await;
+            flush_persist(&persist).await;
             yield Ok(to_sse(
                 &WireEvent::Done {
                     total_turns: None,
@@ -374,9 +397,9 @@ pub async fn wait_run(
     Path(thread_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
-    let agent_name = state.pool.resolve_agent(req.agent.as_deref())?;
+    let agent_name = state.agents.resolve_agent(req.agent.as_deref())?;
     state
-        .pool
+        .runs
         .check_persist_capacity(&tenant, &thread_id)
         .await?;
     let ctx_json = req.context.clone().unwrap_or(serde_json::Value::Null);
@@ -384,40 +407,58 @@ pub async fn wait_run(
     let user_msg = normalize_message(&state, &tenant, &thread_id, user_msg).await?;
 
     let mut run_ctx = state
-        .pool
+        .agents
         .factory(&agent_name)?
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
-    let (cancel, steering_rx) = state.pool.begin_run(&tenant, &thread_id).await;
-    run_ctx = run_ctx
-        .with_cancel(cancel.clone())
-        .with_steering(steering_rx)
-        .with_agent(&agent_name);
 
-    tracing::info!(%tenant, %thread_id, agent = %agent_name, "wait run accepted");
-
-    let pool = state.pool.clone();
-    let agent_arc = state
-        .pool
-        .get_or_build(&tenant, &thread_id, &agent_name)
+    let run_id = runic_state::new_run_id();
+    state
+        .session_store
+        .create_run(&tenant, &thread_id, &run_id, &agent_name)
         .await?;
-    let persist = state
-        .pool
-        .persist_handle(&tenant, &thread_id, &agent_name)
-        .await;
+    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await;
+    let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    run_ctx = run_ctx
+        .with_cancel(begun.cancel.clone())
+        .with_steering(steering_rx)
+        .with_agent(&agent_name)
+        .with_run_id(&run_id);
+
+    tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "wait run accepted");
+
+    let registry = state.runs.clone();
+    let store = state.session_store.clone();
+    let factory = state.agents.factory(&agent_name)?.clone();
     let task = tokio::spawn(async move {
-        let mut agent = agent_arc.lock().await;
+        let lock = registry.thread_lock(&tenant, &thread_id).await;
+        let _guard = lock.lock().await;
+        let mut agent =
+            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
+        if let Err(e) = store
+            .set_run_status(&run_id, RunStatus::Running, None)
+            .await
+        {
+            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+        }
         let result = agent.run_message_with(user_msg, run_ctx).await;
-        pool.end_run(&tenant, &thread_id, &cancel).await;
-        flush_persist(persist.as_deref()).await;
+        let (status, error) = match &result {
+            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(_) => (RunStatus::Success, None),
+            Err(e) => (RunStatus::Error, Some(e.to_string())),
+        };
+        if let Err(e) = store
+            .set_run_status(&run_id, status, error.as_deref())
+            .await
+        {
+            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+        }
+        flush_persist(&begun.persist).await;
+        registry
+            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+            .await;
         match result {
             Ok(outcome) => {
-                let run_id = agent
-                    .state()
-                    .runs()
-                    .last()
-                    .map(|r| r.id.clone())
-                    .unwrap_or_default();
                 let text = agent.state().last_assistant_text().unwrap_or_default();
                 Ok(WaitRunResponse {
                     run_id,
@@ -442,11 +483,10 @@ pub async fn wait_run(
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
-async fn flush_persist(persist: Option<&crate::pool::PersistHandle>) {
-    if let Some(persist) = persist
-        && tokio::time::timeout(FLUSH_TIMEOUT, persist.flush())
-            .await
-            .is_err()
+async fn flush_persist(persist: &crate::registry::PersistHandle) {
+    if tokio::time::timeout(FLUSH_TIMEOUT, persist.flush())
+        .await
+        .is_err()
     {
         tracing::error!(
             backlog = persist.backlog(),
@@ -478,7 +518,7 @@ pub async fn cancel_run(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
-    if state.pool.cancel_run(&tenant, &thread_id).await {
+    if state.runs.cancel_run(&tenant, &thread_id).await {
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ServeError::NoRunInFlight { thread_id })
@@ -520,7 +560,7 @@ pub async fn steer_run(
             "steer requires non-empty text".into(),
         ));
     }
-    if state.pool.steer_run(&tenant, &thread_id, req.text).await {
+    if state.runs.steer_run(&tenant, &thread_id, req.text).await {
         Ok(StatusCode::ACCEPTED)
     } else {
         Err(ServeError::NoRunInFlight { thread_id })
@@ -579,8 +619,8 @@ pub async fn replay_run(
         .read_run_after(&tenant, &thread_id, &run_id, 0)
         .await?;
 
-    let live_agent = state.pool.find_live_run(&tenant, &thread_id, &run_id).await;
-    let is_live = live_agent.is_some();
+    let live_rx = state.runs.live_events(&tenant, &thread_id, &run_id).await;
+    let is_live = live_rx.is_some();
 
     if all.is_empty() && !is_live {
         return Err(ServeError::RunNotFound {
@@ -612,17 +652,7 @@ pub async fn replay_run(
 
         // 2) attach to the live broadcast only if still in flight, following
         // until this run's RunEnd (capturing its real turn count).
-        let rx = match &live_agent {
-            Some(agent_arc) => {
-                let agent = agent_arc.lock().await;
-                if agent.state().current_run().is_some_and(|run| run.id == run_id) {
-                    agent.state().subscribe_events()
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
+        let rx = live_rx;
         let (mut total_turns, mut stop_reason) = match completed {
             Some((t, s)) => (Some(t), s),
             None => (None, None),

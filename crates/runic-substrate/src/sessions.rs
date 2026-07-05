@@ -31,6 +31,63 @@ pub struct StoredEvent {
     pub event: SessionEvent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Pending,
+    Running,
+    Success,
+    Error,
+    Cancelled,
+}
+
+impl RunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunStatus::Pending => "pending",
+            RunStatus::Running => "running",
+            RunStatus::Success => "success",
+            RunStatus::Error => "error",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<RunStatus> {
+        match s {
+            "pending" => Some(RunStatus::Pending),
+            "running" => Some(RunStatus::Running),
+            "success" => Some(RunStatus::Success),
+            "error" => Some(RunStatus::Error),
+            "cancelled" => Some(RunStatus::Cancelled),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RunStatus::Success | RunStatus::Error | RunStatus::Cancelled
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    pub run_id: String,
+    pub tenant: String,
+    pub session_id: String,
+    pub agent: String,
+    pub status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Per-session metadata, for listing without scanning the log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -153,6 +210,33 @@ pub trait SessionStore: Send + Sync {
 
     /// Delete a session and all its events.
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()>;
+
+    async fn create_run(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _run_id: &str,
+        _agent: &str,
+    ) -> Result<()> {
+        Err(Error::Unsupported("create_run".into()))
+    }
+
+    async fn set_run_status(
+        &self,
+        _run_id: &str,
+        _status: RunStatus,
+        _error: Option<&str>,
+    ) -> Result<()> {
+        Err(Error::Unsupported("set_run_status".into()))
+    }
+
+    async fn get_run(&self, _tenant: &str, _run_id: &str) -> Result<Option<RunRecord>> {
+        Err(Error::Unsupported("get_run".into()))
+    }
+
+    async fn latest_run(&self, _tenant: &str, _session_id: &str) -> Result<Option<RunRecord>> {
+        Err(Error::Unsupported("latest_run".into()))
+    }
 
     /// Textual (NOT semantic) full-text search over a tenant's conversations.
     /// Default: unsupported.

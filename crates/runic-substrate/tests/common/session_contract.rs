@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use runic_state::{HookLifecycle, RunOutcome, SessionEvent};
-use runic_substrate::{SessionStore, StoredEvent, replay_into_state, replay_messages};
+use runic_substrate::{RunStatus, SessionStore, StoredEvent, replay_into_state, replay_messages};
 use runic_types::{ContentBlock, Message, TokenUsage};
 
 use crate::common::ids::{tenant_session, uid};
@@ -841,6 +841,75 @@ pub async fn reconstruct_tool_call_and_result_messages(store: &dyn SessionStore)
         serde_json::to_value(&msgs[1]).unwrap(),
         serde_json::to_value(&result).unwrap()
     );
+}
+
+pub async fn run_rows_lifecycle(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store.create_run(&t, &s, "r-1", "coral").await.unwrap();
+
+    let rec = store.get_run(&t, "r-1").await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Pending);
+    assert_eq!(rec.agent, "coral");
+    assert_eq!(rec.session_id, s);
+
+    store
+        .set_run_status("r-1", RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_run(&t, "r-1").await.unwrap().unwrap().status,
+        RunStatus::Running
+    );
+
+    store
+        .set_run_status("r-1", RunStatus::Error, Some("provider died"))
+        .await
+        .unwrap();
+    let rec = store.get_run(&t, "r-1").await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Error);
+    assert_eq!(rec.error.as_deref(), Some("provider died"));
+    assert!(rec.status.is_terminal());
+}
+
+pub async fn latest_run_picks_the_newest(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store.create_run(&t, &s, "r-old", "coral").await.unwrap();
+    store
+        .set_run_status("r-old", RunStatus::Success, None)
+        .await
+        .unwrap();
+    store.create_run(&t, &s, "r-new", "scout").await.unwrap();
+
+    let latest = store.latest_run(&t, &s).await.unwrap().unwrap();
+    assert_eq!(latest.run_id, "r-new");
+    assert_eq!(latest.status, RunStatus::Pending);
+}
+
+pub async fn runs_are_tenant_scoped(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store.create_run(&t, &s, "r-mine", "coral").await.unwrap();
+    assert!(
+        store
+            .get_run("someone-else", "r-mine")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .latest_run("someone-else", &s)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.get_run(&t, "r-missing").await.unwrap().is_none());
+}
+
+pub async fn deleting_a_session_deletes_its_runs(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store.create_run(&t, &s, "r-1", "coral").await.unwrap();
+    store.delete_session(&t, &s).await.unwrap();
+    assert!(store.get_run(&t, "r-1").await.unwrap().is_none());
 }
 
 pub async fn read_tail_starts_at_the_last_snapshot(store: &dyn SessionStore) {

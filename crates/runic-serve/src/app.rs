@@ -24,7 +24,7 @@ use utoipa::OpenApi;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
-use crate::pool::ThreadPool;
+use crate::registry::{AgentRegistry, RunRegistry};
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
@@ -35,7 +35,8 @@ pub struct AppState {
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Optional speech-to-text backend powering `POST /transcribe`.
     pub transcriber: Option<Arc<dyn SpeechToText>>,
-    pub pool: Arc<ThreadPool>,
+    pub agents: Arc<AgentRegistry>,
+    pub runs: Arc<RunRegistry>,
     /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
     pub human_hub: Arc<HumanHub>,
 }
@@ -63,15 +64,12 @@ pub fn single_agent(
 }
 
 pub fn bare_router(config: ServeConfig) -> Router {
-    let pool = Arc::new(ThreadPool::new(config.agents, config.session_store.clone()));
-    if tokio::runtime::Handle::try_current().is_ok() {
-        pool.spawn_eviction_sweep();
-    }
     let state = AppState {
         session_store: config.session_store,
         artifact_store: config.artifact_store,
         transcriber: config.transcriber,
-        pool,
+        agents: Arc::new(AgentRegistry::new(config.agents)),
+        runs: Arc::new(RunRegistry::new()),
         human_hub: config.human_hub,
     };
 

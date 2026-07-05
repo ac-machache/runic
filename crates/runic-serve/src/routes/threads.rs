@@ -224,12 +224,6 @@ pub async fn create_thread(
             .set_label(&tenant, &thread_id, label.as_deref())
             .await?;
     }
-    if label.is_some() {
-        state
-            .pool
-            .set_warm_label(&tenant, &thread_id, label.clone())
-            .await;
-    }
 
     let meta = state
         .session_store
@@ -352,7 +346,6 @@ pub async fn update_thread(
             .session_store
             .set_label(&tenant, &thread_id, label.as_deref())
             .await?;
-        state.pool.set_warm_label(&tenant, &thread_id, label).await;
     }
 
     let meta = state
@@ -453,27 +446,6 @@ pub async fn thread_state(
     let label = meta.label;
     let event_count = meta.event_count;
 
-    let warm = state.pool.warm_agents(&tenant, &thread_id).await;
-    let any_warm = !warm.is_empty();
-    for agent_arc in warm {
-        if let Ok(agent) = agent_arc.try_lock() {
-            let st = agent.state();
-            return Ok(Json(ThreadStateResponse {
-                thread_id,
-                tenant,
-                busy: false,
-                label,
-                system_prompt: Some(st.system_prompt.clone()),
-                messages: st.messages_for_provider().to_vec(),
-                event_count,
-                stats: (&st.stats).into(),
-            }));
-        }
-    }
-
-    // Cold thread, or every warm agent is mid-run — reconstruct from the
-    // store; the system prompt isn't readable without a lock, so it's null
-    // (not a "" placeholder that looks like truth).
     let stored = state
         .session_store
         .read_tail(&tenant, &thread_id)
@@ -489,10 +461,11 @@ pub async fn thread_state(
             _ => {}
         }
     }
+    let busy = state.runs.is_busy(&tenant, &thread_id).await;
     Ok(Json(ThreadStateResponse {
         thread_id,
         tenant,
-        busy: any_warm,
+        busy,
         label,
         system_prompt: None,
         messages,
@@ -518,7 +491,7 @@ pub async fn delete_thread(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
-    state.pool.evict(&tenant, &thread_id).await;
+    state.runs.forget_thread(&tenant, &thread_id).await;
     let artifact_count = state
         .artifact_store
         .delete_session_artifacts(&tenant, &thread_id)

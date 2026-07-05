@@ -5,6 +5,9 @@ pub enum MemoryError {
     #[error("storage error: {0}")]
     Storage(String),
 
+    #[error("write conflict for {target}: retry limit exceeded")]
+    WriteConflict { target: String },
+
     #[error(
         "would exceed cap for {target}: {actual}/{limit} chars (remove or replace an entry first)"
     )]

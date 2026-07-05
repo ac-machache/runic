@@ -21,10 +21,12 @@ pub use error::MemoryError;
 pub use manager::MemoryManager;
 pub use provider::{BuiltinProvider, MemoryProvider, MemoryScope, MemoryWriteMeta};
 pub use review::{MEMORY_REVIEW_GUIDANCE, ReviewScheduler};
-pub use storage::{LocalStorage, MemStorage, MemoryStorage};
+pub use storage::{
+    LocalStorage, MemStorage, MemoryObject, MemoryRevision, MemoryStorage, MemoryStorageError,
+};
 pub use store::{
-    BoundedMemoryStore, DEFAULT_MEMORY_LIMIT, DEFAULT_USER_LIMIT, ENTRY_DELIMITER, MEMORY_KEY,
-    MemorySnapshot, Target, USER_KEY, render_block,
+    DEFAULT_MEMORY_LIMIT, DEFAULT_USER_LIMIT, ENTRY_DELIMITER, MEMORY_KEY, MemorySnapshot,
+    MemoryStore, Target, USER_KEY, render_block,
 };
 pub use threats::ThreatHit;
 pub use tool::MemoryTool;

@@ -1,9 +1,11 @@
-//! `BoundedMemoryStore` — char-capped, `\n§\n`-delimited markdown store
-//! over a [`StorageBackend`] with production hardening:
+//! `MemoryStore` — char-capped, `\n§\n`-delimited markdown store
+//! over a [`MemoryStorage`] with production hardening:
 //!
 //! - In-process `tokio::sync::Mutex` serializes RMW per store.
 //! - Optional cross-process `fcntl::flock` via [`crate::lock`]
 //!   (`with_lock_dir`) for multi-process safety.
+//! - Conditional writes against backend revisions prevent silent lost updates
+//!   when independent store instances share a backend.
 //! - Drift detection: re-reads the on-disk file before every write,
 //!   refuses to overwrite if its content wouldn't round-trip through
 //!   our parser (external editor / sister-session interleave / patch
@@ -22,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use crate::error::MemoryError;
-use crate::storage::MemoryStorage;
+use crate::storage::{MemoryObject, MemoryRevision, MemoryStorage, MemoryStorageError};
 use crate::threats;
 
 /// Section-sign delimiter between entries. Same byte the hermes file
@@ -40,6 +42,8 @@ pub const MEMORY_KEY: &str = "memory/MEMORY.md";
 
 /// Storage key for the user-facts store (relative to `RUNIC_HOME`).
 pub const USER_KEY: &str = "memory/USER.md";
+
+const WRITE_RETRIES: usize = 5;
 
 /// Which of the two stores a call targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +78,7 @@ impl Target {
     }
 }
 
-pub struct BoundedMemoryStore {
+pub struct MemoryStore {
     storage: Arc<dyn MemoryStorage>,
     memory_limit: usize,
     user_limit: usize,
@@ -88,7 +92,7 @@ pub struct BoundedMemoryStore {
     threat_scanning: bool,
 }
 
-impl BoundedMemoryStore {
+impl MemoryStore {
     pub fn new(storage: Arc<dyn MemoryStorage>) -> Self {
         Self {
             storage,
@@ -135,9 +139,9 @@ impl BoundedMemoryStore {
             .storage
             .read(target.key())
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?
+            .map_err(storage_error)?
         {
-            Some(content) => Ok(parse_entries(&content)),
+            Some(object) => Ok(parse_entries(&object.content)),
             None => Ok(Vec::new()),
         }
     }
@@ -164,23 +168,32 @@ impl BoundedMemoryStore {
         let _flock = self.cross_process_lock(target).await?;
         let _guard = self.write_lock.lock().await;
 
-        self.check_drift_or_backup(target).await?;
-
-        let mut entries = self.read(target).await?;
-        if entries.iter().any(|e| e == content) {
-            return Ok(entries.len());
+        for _ in 0..WRITE_RETRIES {
+            let (mut entries, revision) = self.read_checked(target).await?;
+            if entries.iter().any(|e| e == content) {
+                return Ok(entries.len());
+            }
+            entries.push(content.to_string());
+            let total = total_chars(&entries);
+            if total > limit {
+                return Err(MemoryError::OverLimit {
+                    target: target.label().to_string(),
+                    actual: total,
+                    limit,
+                });
+            }
+            match self
+                .write_unlocked(target, &entries, revision.as_ref())
+                .await
+            {
+                Ok(()) => return Ok(entries.len()),
+                Err(MemoryError::WriteConflict { .. }) => continue,
+                Err(e) => return Err(e),
+            }
         }
-        entries.push(content.to_string());
-        let total = total_chars(&entries);
-        if total > limit {
-            return Err(MemoryError::OverLimit {
-                target: target.label().to_string(),
-                actual: total,
-                limit,
-            });
-        }
-        self.write_unlocked(target, &entries).await?;
-        Ok(entries.len())
+        Err(MemoryError::WriteConflict {
+            target: target.label().to_string(),
+        })
     }
 
     /// Remove the single entry that contains `search`. Errors on 0 or
@@ -192,13 +205,22 @@ impl BoundedMemoryStore {
         let _flock = self.cross_process_lock(target).await?;
         let _guard = self.write_lock.lock().await;
 
-        self.check_drift_or_backup(target).await?;
-
-        let mut entries = self.read(target).await?;
-        let idx = unique_match(&entries, search)?;
-        let removed = entries.remove(idx);
-        self.write_unlocked(target, &entries).await?;
-        Ok(removed)
+        for _ in 0..WRITE_RETRIES {
+            let (mut entries, revision) = self.read_checked(target).await?;
+            let idx = unique_match(&entries, search)?;
+            let removed = entries.remove(idx);
+            match self
+                .write_unlocked(target, &entries, revision.as_ref())
+                .await
+            {
+                Ok(()) => return Ok(removed),
+                Err(MemoryError::WriteConflict { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(MemoryError::WriteConflict {
+            target: target.label().to_string(),
+        })
     }
 
     /// Replace the single entry that contains `search` with `replacement`.
@@ -233,21 +255,30 @@ impl BoundedMemoryStore {
         let _flock = self.cross_process_lock(target).await?;
         let _guard = self.write_lock.lock().await;
 
-        self.check_drift_or_backup(target).await?;
-
-        let mut entries = self.read(target).await?;
-        let idx = unique_match(&entries, search)?;
-        entries[idx] = replacement.to_string();
-        let total = total_chars(&entries);
-        if total > limit {
-            return Err(MemoryError::OverLimit {
-                target: target.label().to_string(),
-                actual: total,
-                limit,
-            });
+        for _ in 0..WRITE_RETRIES {
+            let (mut entries, revision) = self.read_checked(target).await?;
+            let idx = unique_match(&entries, search)?;
+            entries[idx] = replacement.to_string();
+            let total = total_chars(&entries);
+            if total > limit {
+                return Err(MemoryError::OverLimit {
+                    target: target.label().to_string(),
+                    actual: total,
+                    limit,
+                });
+            }
+            match self
+                .write_unlocked(target, &entries, revision.as_ref())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(MemoryError::WriteConflict { .. }) => continue,
+                Err(e) => return Err(e),
+            }
         }
-        self.write_unlocked(target, &entries).await?;
-        Ok(())
+        Err(MemoryError::WriteConflict {
+            target: target.label().to_string(),
+        })
     }
 
     /// Total character count of the joined-on-disk representation.
@@ -272,23 +303,34 @@ impl BoundedMemoryStore {
             })
     }
 
-    /// Read the on-disk file and verify it round-trips through our parser.
-    /// If it doesn't (external editor, partially-written patch, etc.), copy
-    /// the raw bytes to `{key}.bak.<unix-ts>` and return `DriftDetected`.
-    /// MUST be called with `write_lock` held.
-    async fn check_drift_or_backup(&self, target: Target) -> Result<(), MemoryError> {
-        let raw = match self
+    async fn read_checked(
+        &self,
+        target: Target,
+    ) -> Result<(Vec<String>, Option<MemoryRevision>), MemoryError> {
+        match self
             .storage
             .read(target.key())
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?
+            .map_err(storage_error)?
         {
-            Some(content) => content,
-            None => return Ok(()),
-        };
+            Some(object) => self.check_drift_or_backup(target, object).await,
+            None => Ok((Vec::new(), None)),
+        }
+    }
+
+    /// Verify a stored object round-trips through our parser. If it doesn't
+    /// (external editor, partially-written patch, etc.), copy the raw bytes to
+    /// `{key}.bak.<unix-ts>` and return `DriftDetected`.
+    /// MUST be called with `write_lock` held.
+    async fn check_drift_or_backup(
+        &self,
+        target: Target,
+        object: MemoryObject,
+    ) -> Result<(Vec<String>, Option<MemoryRevision>), MemoryError> {
+        let raw = object.content;
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Ok(());
+            return Ok((Vec::new(), Some(object.revision)));
         }
         let parsed = parse_entries(&raw);
         let roundtrip = render_entries(&parsed);
@@ -298,15 +340,15 @@ impl BoundedMemoryStore {
             .any(|e| e.chars().count() > self.limit_for(target));
 
         if !nonroundtrip && !any_over_cap {
-            return Ok(());
+            return Ok((parsed, Some(object.revision)));
         }
 
         // Drift detected — preserve the original bytes and refuse the write.
         let backup_key = format!("{}.bak.{}", target.key(), unix_ts());
         self.storage
-            .write(&backup_key, &raw)
+            .write(&backup_key, &raw, None)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            .map_err(storage_error)?;
         Err(MemoryError::DriftDetected {
             target: target.label().to_string(),
             backup_key,
@@ -314,13 +356,18 @@ impl BoundedMemoryStore {
     }
 
     /// MUST be called with `write_lock` held — does NOT re-acquire it.
-    async fn write_unlocked(&self, target: Target, entries: &[String]) -> Result<(), MemoryError> {
+    async fn write_unlocked(
+        &self,
+        target: Target,
+        entries: &[String],
+        revision: Option<&MemoryRevision>,
+    ) -> Result<(), MemoryError> {
         let content = render_entries(entries);
-        // Whole-file overwrite, serialized by the in-process mutex + optional flock.
         self.storage
-            .write(target.key(), &content)
+            .write(target.key(), &content, revision)
             .await
-            .map_err(|e| MemoryError::Storage(e.to_string()))
+            .map(|_| ())
+            .map_err(storage_error)
     }
 
     /// Render one store as a system-prompt block (hermes `_render_block`):
@@ -406,10 +453,17 @@ fn scan_or_err(content: &str) -> Result<(), MemoryError> {
     }
 }
 
-fn unix_ts() -> u64 {
+fn storage_error(error: MemoryStorageError) -> MemoryError {
+    match error {
+        MemoryStorageError::Io(e) => MemoryError::Storage(e.to_string()),
+        MemoryStorageError::Conflict { key } => MemoryError::WriteConflict { target: key },
+    }
+}
+
+fn unix_ts() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
 
@@ -456,8 +510,8 @@ mod tests {
     use super::*;
     use crate::storage::{MemStorage, MemoryStorage};
 
-    fn store() -> BoundedMemoryStore {
-        BoundedMemoryStore::new(Arc::new(MemStorage::new()))
+    fn store() -> MemoryStore {
+        MemoryStore::new(Arc::new(MemStorage::new()))
     }
 
     #[tokio::test]
@@ -579,8 +633,8 @@ mod tests {
     #[tokio::test]
     async fn separate_instances_share_backend() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let s1 = BoundedMemoryStore::new(backend.clone());
-        let s2 = BoundedMemoryStore::new(backend);
+        let s1 = MemoryStore::new(backend.clone());
+        let s2 = MemoryStore::new(backend);
         s1.add(Target::User, "written by s1").await.unwrap();
         assert_eq!(s2.read(Target::User).await.unwrap(), vec!["written by s1"]);
     }
@@ -681,13 +735,13 @@ mod tests {
     #[tokio::test]
     async fn drift_detected_when_external_edit_breaks_roundtrip() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let s = BoundedMemoryStore::new(backend.clone());
+        let s = MemoryStore::new(backend.clone());
 
         // External editor wrote per-entry trailing whitespace that our
         // parser would strip — so a future write would silently drop it.
         // That's drift.
         backend
-            .write(USER_KEY, "first entry   \n§\nsecond entry")
+            .write(USER_KEY, "first entry   \n§\nsecond entry", None)
             .await
             .unwrap();
 
@@ -696,7 +750,7 @@ mod tests {
             MemoryError::DriftDetected { target, backup_key } => {
                 assert_eq!(target, "user");
                 assert!(backup_key.starts_with("memory/USER.md.bak."));
-                let saved = backend.read(&backup_key).await.unwrap().unwrap();
+                let saved = backend.read(&backup_key).await.unwrap().unwrap().content;
                 assert!(saved.contains("first entry   "));
                 assert!(saved.contains("second entry"));
             }
@@ -707,10 +761,10 @@ mod tests {
     #[tokio::test]
     async fn entry_over_cap_on_disk_is_treated_as_drift() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let s = BoundedMemoryStore::new(backend.clone()).with_limits(20, 20);
+        let s = MemoryStore::new(backend.clone()).with_limits(20, 20);
         // External writer slammed in a huge entry that exceeds our cap.
         let huge = "x".repeat(40);
-        backend.write(MEMORY_KEY, &huge).await.unwrap();
+        backend.write(MEMORY_KEY, &huge, None).await.unwrap();
         let err = s.add(Target::Memory, "short").await.unwrap_err();
         assert!(matches!(err, MemoryError::DriftDetected { .. }));
     }

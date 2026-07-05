@@ -1,4 +1,4 @@
-//! The `memory(...)` builder — resolve a per-tenant [`BoundedMemoryStore`] and
+//! The `memory(...)` builder — resolve a per-tenant [`MemoryStore`] and
 //! the `memory` tool. The background-review hook lives in the wiring layer (it
 //! needs the agent loop, which this crate must not depend on); this builder
 //! just records the review interval via [`Memory::review_interval`].
@@ -9,7 +9,7 @@ use std::sync::Arc;
 use runic_tool::Tool;
 
 use crate::storage::LocalStorage;
-use crate::{BoundedMemoryStore, MemoryTool};
+use crate::{MemoryStore, MemoryTool};
 
 pub fn memory(path: impl Into<PathBuf>) -> Memory {
     Memory {
@@ -55,7 +55,7 @@ impl Memory {
         self.review
     }
 
-    pub async fn store(&self, tenant: &str) -> Arc<BoundedMemoryStore> {
+    pub async fn store(&self, tenant: &str) -> Arc<MemoryStore> {
         tracing::info!(
             root = %self.path.display(),
             scoped = self.scoped,
@@ -87,10 +87,10 @@ impl Memory {
         // Cross-process flock is enabled: the sidecar `.lock` files land under
         // the same real directory as the data.
         let storage = Arc::new(LocalStorage::new(&dir));
-        Arc::new(BoundedMemoryStore::new(storage).with_lock_dir(dir))
+        Arc::new(MemoryStore::new(storage).with_lock_dir(dir))
     }
 
-    pub fn tools(&self, store: Arc<BoundedMemoryStore>) -> Option<Arc<dyn Tool>> {
+    pub fn tools(&self, store: Arc<MemoryStore>) -> Option<Arc<dyn Tool>> {
         if self.mem_tools {
             tracing::debug!("memory tool enabled");
             Some(Arc::new(MemoryTool::new(store)) as Arc<dyn Tool>)

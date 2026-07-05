@@ -1,4 +1,4 @@
-use runic_memory::BoundedMemoryStore;
+use runic_memory::MemoryStore;
 use runic_skills::SkillSet;
 use runic_subagent::{AgentRoster, roster_prompt_section};
 
@@ -38,7 +38,7 @@ impl Context {
         self
     }
 
-    pub async fn memory(&mut self, store: &BoundedMemoryStore, mem: bool, user: bool) -> &mut Self {
+    pub async fn memory(&mut self, store: &MemoryStore, mem: bool, user: bool) -> &mut Self {
         if let Ok(snap) = store.snapshot().await {
             // The snapshot is captured once per session — frozen, so the prefix
             // stays stable across the session's turns.

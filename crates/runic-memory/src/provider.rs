@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_tool::Tool;
 
-use crate::store::{BoundedMemoryStore, Target};
+use crate::store::{MemoryStore, Target};
 use crate::tool::MemoryTool;
 
 /// Per-run identity used to scope a provider's storage to a user / session.
@@ -95,13 +95,13 @@ pub trait MemoryProvider: Send + Sync {
 /// The built-in provider: the bounded file store behind the `memory` tool, with
 /// its MEMORY/USER blocks injected into the system prompt.
 pub struct BuiltinProvider {
-    store: Arc<BoundedMemoryStore>,
+    store: Arc<MemoryStore>,
     memory_enabled: bool,
     user_enabled: bool,
 }
 
 impl BuiltinProvider {
-    pub fn new(store: Arc<BoundedMemoryStore>) -> Self {
+    pub fn new(store: Arc<MemoryStore>) -> Self {
         Self {
             store,
             memory_enabled: true,
@@ -122,7 +122,7 @@ impl BuiltinProvider {
     }
 
     /// The underlying store (the background-review curator shares this).
-    pub fn store(&self) -> Arc<BoundedMemoryStore> {
+    pub fn store(&self) -> Arc<MemoryStore> {
         self.store.clone()
     }
 }
@@ -166,7 +166,7 @@ mod tests {
 
     fn builtin() -> BuiltinProvider {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(backend)))
+        BuiltinProvider::new(Arc::new(MemoryStore::new(backend)))
     }
 
     #[tokio::test]
@@ -190,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn builtin_block_respects_target_gates() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let store = Arc::new(BoundedMemoryStore::new(backend));
+        let store = Arc::new(MemoryStore::new(backend));
         store.add(Target::Memory, "uses zsh").await.unwrap();
         store.add(Target::User, "lives in Paris").await.unwrap();
         let p = BuiltinProvider::new(store).with_user_enabled(false);

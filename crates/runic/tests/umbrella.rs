@@ -5,7 +5,7 @@
 use runic::agent::{Agent, AgentBuilder};
 use runic::hook::{ReadHook, WriteHook};
 use runic::mcp::McpClient;
-use runic::memory::BoundedMemoryStore;
+use runic::memory::MemoryStore;
 use runic::provider::Provider;
 use runic::skills::SkillSet;
 use runic::state::AgentState;
@@ -21,7 +21,7 @@ fn assert_types_reachable() {
     fn _read_hook(_: &dyn ReadHook) {}
     fn _write_hook(_: &dyn WriteHook) {}
     fn _mcp_client(_: McpClient) {}
-    fn _memory_store(_: BoundedMemoryStore) {}
+    fn _memory_store(_: MemoryStore) {}
     fn _provider(_: &dyn Provider) {}
     fn _skill_set(_: SkillSet) {}
     fn _agent_state(_: AgentState) {}

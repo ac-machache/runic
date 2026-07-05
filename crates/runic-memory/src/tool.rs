@@ -1,5 +1,5 @@
 //! `MemoryTool` — the `memory` tool the agent calls to update its own
-//! notes. Wraps [`BoundedMemoryStore`] in the [`Tool`] trait.
+//! notes. Wraps [`MemoryStore`] in the [`Tool`] trait.
 //!
 //! Single tool, multi-action: the JSON schema dispatches on `action` +
 //! `target`. Matches the hermes shape exactly so prompts/skills authored
@@ -12,7 +12,7 @@ use runic_tool::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
 use crate::error::MemoryError;
-use crate::store::{BoundedMemoryStore, Target};
+use crate::store::{MemoryStore, Target};
 
 /// Tool description — folds in hermes's MEMORY_GUIDANCE so an LLM authored
 /// against hermes uses this identically: *when* to save, declarative-not-
@@ -36,11 +36,11 @@ Actions:\n\
 Style: one short self-contained line per entry. No paragraphs, no timestamps/dates.";
 
 pub struct MemoryTool {
-    store: Arc<BoundedMemoryStore>,
+    store: Arc<MemoryStore>,
 }
 
 impl MemoryTool {
-    pub fn new(store: Arc<BoundedMemoryStore>) -> Self {
+    pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
 }
@@ -191,9 +191,9 @@ mod tests {
     use runic_tool::ToolContext;
     use std::sync::Arc;
 
-    fn make() -> (MemoryTool, Arc<BoundedMemoryStore>) {
+    fn make() -> (MemoryTool, Arc<MemoryStore>) {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let store = Arc::new(BoundedMemoryStore::new(backend));
+        let store = Arc::new(MemoryStore::new(backend));
         (MemoryTool::new(store.clone()), store)
     }
 

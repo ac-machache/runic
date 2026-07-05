@@ -11,12 +11,12 @@ use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
 use runic_memory::MemStorage;
-use runic_memory::{BoundedMemoryStore, Target};
+use runic_memory::{MemoryStore, Target};
 
 const CAP: usize = 200;
 
-fn store() -> BoundedMemoryStore {
-    BoundedMemoryStore::new(Arc::new(MemStorage::new()))
+fn store() -> MemoryStore {
+    MemoryStore::new(Arc::new(MemStorage::new()))
         .with_limits(CAP, CAP)
         .with_threat_scanning(false) // exercise arbitrary content, not the scanner
 }

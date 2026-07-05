@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_agent::Agent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
-use runic_memory::{BoundedMemoryStore, MEMORY_REVIEW_GUIDANCE, MemoryTool, ReviewScheduler};
+use runic_memory::{MEMORY_REVIEW_GUIDANCE, MemoryStore, MemoryTool, ReviewScheduler};
 use runic_provider::Provider;
 use runic_state::AgentState;
 use runic_types::Role;
@@ -15,7 +15,7 @@ pub struct MemoryCurator {
     scheduler: ReviewScheduler,
     provider: Arc<dyn Provider>,
     model: String,
-    store: Arc<BoundedMemoryStore>,
+    store: Arc<MemoryStore>,
 }
 
 impl MemoryCurator {
@@ -23,7 +23,7 @@ impl MemoryCurator {
         interval: u32,
         provider: Arc<dyn Provider>,
         model: impl Into<String>,
-        store: Arc<BoundedMemoryStore>,
+        store: Arc<MemoryStore>,
     ) -> Self {
         Self {
             scheduler: ReviewScheduler::new(interval),

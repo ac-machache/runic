@@ -7,7 +7,7 @@
 //!
 //! On non-Unix targets this is a no-op so the public API stays the same.
 //! Single-process safety is still provided by the in-process
-//! `tokio::sync::Mutex` inside `BoundedMemoryStore`.
+//! `tokio::sync::Mutex` inside `MemoryStore`.
 
 use std::path::{Path, PathBuf};
 

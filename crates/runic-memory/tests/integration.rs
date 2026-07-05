@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use runic_memory::LocalStorage;
-use runic_memory::{BoundedMemoryStore, MemoryTool, Target};
+use runic_memory::{MemoryStore, MemoryTool, Target};
 use runic_tool::{Tool, ToolContext};
 use tempfile::tempdir;
 
@@ -16,7 +16,7 @@ fn ctx() -> ToolContext {
 async fn writes_land_under_memory_subdir_on_disk() {
     let dir = tempdir().unwrap();
     let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
-    let store = BoundedMemoryStore::new(backend);
+    let store = MemoryStore::new(backend);
 
     store.add(Target::User, "user prefers Rust").await.unwrap();
 
@@ -29,7 +29,7 @@ async fn writes_land_under_memory_subdir_on_disk() {
 async fn second_entry_uses_section_sign_delimiter() {
     let dir = tempdir().unwrap();
     let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
-    let store = BoundedMemoryStore::new(backend);
+    let store = MemoryStore::new(backend);
 
     store.add(Target::Memory, "first").await.unwrap();
     store.add(Target::Memory, "second").await.unwrap();
@@ -48,7 +48,7 @@ async fn tool_writes_show_up_when_a_separate_reader_reads() {
     // a separate read path picks up the changes.
     let dir = tempdir().unwrap();
     let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
-    let store = Arc::new(BoundedMemoryStore::new(backend.clone()));
+    let store = Arc::new(MemoryStore::new(backend.clone()));
     let tool = MemoryTool::new(store.clone());
 
     let result = tool
@@ -72,7 +72,7 @@ async fn concurrent_adds_dont_lose_writes() {
     // add must show up in the final read.
     let dir = tempdir().unwrap();
     let backend: Arc<LocalStorage> = Arc::new(LocalStorage::new(dir.path()));
-    let store = Arc::new(BoundedMemoryStore::new(backend).with_limits(100_000, 100_000));
+    let store = Arc::new(MemoryStore::new(backend).with_limits(100_000, 100_000));
 
     let mut joins = Vec::new();
     for i in 0..20 {

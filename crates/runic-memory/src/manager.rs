@@ -147,7 +147,7 @@ mod tests {
 
     use crate::provider::BuiltinProvider;
     use crate::storage::MemStorage;
-    use crate::store::{BoundedMemoryStore, Target};
+    use crate::store::{MemoryStore, Target};
 
     /// A fake external provider that records the lifecycle fan-out and supplies
     /// a per-turn prefetch.
@@ -179,7 +179,7 @@ mod tests {
 
     async fn builtin_with(entry: &str) -> Arc<BuiltinProvider> {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let store = Arc::new(BoundedMemoryStore::new(backend));
+        let store = Arc::new(MemoryStore::new(backend));
         store.add(Target::Memory, entry).await.unwrap();
         Arc::new(BuiltinProvider::new(store))
     }
@@ -207,9 +207,7 @@ mod tests {
     #[tokio::test]
     async fn prefetch_is_empty_when_nothing_recalled() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
-            backend,
-        ))));
+        let builtin = Arc::new(BuiltinProvider::new(Arc::new(MemoryStore::new(backend))));
         let mut m = MemoryManager::new();
         m.add_provider(builtin); // built-in has no prefetch
         assert!(m.prefetch_all("x").await.is_empty());
@@ -234,9 +232,7 @@ mod tests {
     #[tokio::test]
     async fn tools_are_gathered_across_providers() {
         let backend: Arc<MemStorage> = Arc::new(MemStorage::new());
-        let builtin = Arc::new(BuiltinProvider::new(Arc::new(BoundedMemoryStore::new(
-            backend,
-        ))));
+        let builtin = Arc::new(BuiltinProvider::new(Arc::new(MemoryStore::new(backend))));
         let mut m = MemoryManager::new();
         m.add_provider(builtin);
         m.add_provider(Arc::new(FakeExternal::default()));

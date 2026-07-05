@@ -310,6 +310,64 @@ impl SessionStore for MemorySessionStore {
         Ok(())
     }
 
+    async fn claim_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let mut runs = self.runs.lock().unwrap();
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if rec.status != crate::RunStatus::Pending {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        rec.status = crate::RunStatus::Running;
+        rec.claimed_by = Some(claimed_by.to_string());
+        rec.lease_expires_at = Some(now + lease);
+        rec.updated_at = now;
+        Ok(true)
+    }
+
+    async fn heartbeat_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let mut runs = self.runs.lock().unwrap();
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if rec.status != crate::RunStatus::Running || rec.claimed_by.as_deref() != Some(claimed_by)
+        {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        rec.lease_expires_at = Some(now + lease);
+        rec.updated_at = now;
+        Ok(true)
+    }
+
+    async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
+        let now = Utc::now();
+        let mut reaped = Vec::new();
+        let mut runs = self.runs.lock().unwrap();
+        for rec in runs.values_mut() {
+            if rec.status == crate::RunStatus::Running
+                && rec.lease_expires_at.is_some_and(|at| at < now)
+            {
+                rec.status = crate::RunStatus::Error;
+                rec.error = Some("lease expired".into());
+                rec.updated_at = now;
+                reaped.push(rec.clone());
+            }
+        }
+        Ok(reaped)
+    }
+
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         Ok(self
             .runs

@@ -63,6 +63,7 @@ fn crud_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -75,6 +76,7 @@ fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     (app, sessions, artifacts)
 }

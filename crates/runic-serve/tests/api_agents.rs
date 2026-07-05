@@ -117,6 +117,7 @@ fn fixture() -> Fixture {
         transcriber: None,
         agents,
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     Fixture {
         app,
@@ -234,6 +235,7 @@ async fn missing_agent_on_a_single_agent_server_routes_to_it() {
             }),
         ),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     let resp = app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -261,6 +263,7 @@ async fn stateless_agent_is_rebuilt_every_run_and_persists_nothing() {
             }),
         ),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
 
     let first = app

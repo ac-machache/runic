@@ -48,6 +48,7 @@ fn config() -> ServeConfig {
         transcriber: None,
         agents: runic_serve::single_agent("main", Arc::new(EchoFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     }
 }
 

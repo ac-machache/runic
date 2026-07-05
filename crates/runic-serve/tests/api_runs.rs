@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
+use runic_serve::{AgentFactory, HumanHub, RunLimits, ServeConfig, router, single_agent};
 use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -222,6 +222,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -233,6 +234,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     (app, artifacts)
 }
@@ -244,6 +246,7 @@ fn failing_run_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -254,6 +257,7 @@ fn asking_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(AskingFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -272,6 +276,7 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
             }),
         ),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     (app, entered, gate)
 }
@@ -972,6 +977,28 @@ impl SessionStore for SlowStore {
     ) -> runic_substrate::Result<Option<runic_substrate::RunRecord>> {
         self.inner.latest_run(tenant, session_id).await
     }
+
+    async fn claim_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> runic_substrate::Result<bool> {
+        self.inner.claim_run(run_id, claimed_by, lease).await
+    }
+
+    async fn heartbeat_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> runic_substrate::Result<bool> {
+        self.inner.heartbeat_run(run_id, claimed_by, lease).await
+    }
+
+    async fn reap_expired_runs(&self) -> runic_substrate::Result<Vec<runic_substrate::RunRecord>> {
+        self.inner.reap_expired_runs().await
+    }
 }
 
 #[tokio::test]
@@ -986,6 +1013,7 @@ async fn wait_response_implies_the_run_is_durable() {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
 
     let resp = app
@@ -1015,6 +1043,7 @@ async fn stream_done_implies_the_run_is_durable() {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
 
     let resp = app
@@ -1119,6 +1148,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
             }),
         ),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
 
     let run_app = app.clone();
@@ -1184,6 +1214,84 @@ async fn steer_with_empty_text_is_400() {
 }
 
 #[tokio::test]
+async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let app = router(ServeConfig {
+        session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent(
+            "main",
+            Arc::new(GatedFactory {
+                entered: entered.clone(),
+                gate: gate.clone(),
+            }),
+        ),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: RunLimits {
+            max_concurrent_runs: 1,
+            ..Default::default()
+        },
+    });
+
+    let run_app = app.clone();
+    let busy = tokio::spawn(async move {
+        let resp = run_app
+            .oneshot(run_request("busy", TENANT, "go"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+    entered.notified().await;
+
+    let resp = app
+        .clone()
+        .oneshot(wait_request("other", TENANT, "hi"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "too_busy");
+
+    let cancel = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/busy/runs/cancel",
+            TENANT,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+    gate.notify_one();
+    busy.await.unwrap();
+
+    let admitted_app = app.clone();
+    let admitted = tokio::spawn(async move {
+        let resp = admitted_app
+            .oneshot(wait_request("other", TENANT, "hi"))
+            .await
+            .unwrap();
+        assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    });
+    entered.notified().await;
+    let cancel = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/other/runs/cancel",
+            TENANT,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+    gate.notify_one();
+    admitted.await.unwrap();
+}
+
+#[tokio::test]
 async fn run_rows_track_the_lifecycle_over_http() {
     let store = Arc::new(MemorySessionStore::new());
     let app = router(ServeConfig {
@@ -1192,6 +1300,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
 
     let resp = app
@@ -1209,6 +1318,8 @@ async fn run_rows_track_the_lifecycle_over_http() {
     assert_eq!(rec.status, runic_substrate::RunStatus::Success);
     assert_eq!(rec.agent, "main");
     assert_eq!(rec.session_id, "t1");
+    assert!(rec.claimed_by.unwrap().starts_with("inst-"));
+    assert!(rec.lease_expires_at.is_some());
 
     let failing = router(ServeConfig {
         session_store: store.clone(),
@@ -1216,6 +1327,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     });
     let resp = failing
         .oneshot(wait_request("t2", TENANT, "boom"))

@@ -29,6 +29,7 @@ fn crud_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 

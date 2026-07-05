@@ -905,6 +905,101 @@ pub async fn runs_are_tenant_scoped(store: &dyn SessionStore) {
     assert!(store.get_run(&t, "r-missing").await.unwrap().is_none());
 }
 
+pub async fn claiming_a_pending_run_takes_the_lease_once(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    store.create_run(&t, &s, &r, "coral").await.unwrap();
+
+    let lease = chrono::Duration::seconds(30);
+    assert!(store.claim_run(&r, "instance-a", lease).await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Running);
+    assert_eq!(rec.claimed_by.as_deref(), Some("instance-a"));
+    assert!(rec.lease_expires_at.unwrap() > chrono::Utc::now());
+
+    assert!(!store.claim_run(&r, "instance-b", lease).await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.claimed_by.as_deref(), Some("instance-a"));
+
+    assert!(
+        !store
+            .claim_run(&uid("r-missing"), "instance-a", lease)
+            .await
+            .unwrap()
+    );
+}
+
+pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    store.create_run(&t, &s, &r, "coral").await.unwrap();
+    store
+        .claim_run(&r, "instance-a", chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    let short = store
+        .get_run(&t, &r)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+
+    let lease = chrono::Duration::seconds(60);
+    assert!(!store.heartbeat_run(&r, "instance-b", lease).await.unwrap());
+    assert!(store.heartbeat_run(&r, "instance-a", lease).await.unwrap());
+    let extended = store
+        .get_run(&t, &r)
+        .await
+        .unwrap()
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+    assert!(extended > short);
+
+    store
+        .set_run_status(&r, RunStatus::Success, None)
+        .await
+        .unwrap();
+    assert!(!store.heartbeat_run(&r, "instance-a", lease).await.unwrap());
+}
+
+pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let (dead, alive, idle) = (uid("r-dead"), uid("r-alive"), uid("r-idle"));
+    store.create_run(&t, &s, &dead, "coral").await.unwrap();
+    store.create_run(&t, &s, &alive, "coral").await.unwrap();
+    store.create_run(&t, &s, &idle, "coral").await.unwrap();
+    store
+        .claim_run(&dead, "instance-a", chrono::Duration::seconds(-1))
+        .await
+        .unwrap();
+    store
+        .claim_run(&alive, "instance-a", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let reaped = store.reap_expired_runs().await.unwrap();
+    assert!(reaped.iter().any(|r| r.run_id == dead));
+    assert!(!reaped.iter().any(|r| r.run_id == alive));
+    assert!(!reaped.iter().any(|r| r.run_id == idle));
+
+    let rec = store.get_run(&t, &dead).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Error);
+    assert_eq!(rec.error.as_deref(), Some("lease expired"));
+    assert_eq!(
+        store.get_run(&t, &alive).await.unwrap().unwrap().status,
+        RunStatus::Running
+    );
+    assert_eq!(
+        store.get_run(&t, &idle).await.unwrap().unwrap().status,
+        RunStatus::Pending
+    );
+
+    let again = store.reap_expired_runs().await.unwrap();
+    assert!(!again.iter().any(|r| r.run_id == dead));
+}
+
 pub async fn deleting_a_session_deletes_its_runs(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store.create_run(&t, &s, "r-1", "coral").await.unwrap();

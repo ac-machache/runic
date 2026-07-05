@@ -129,6 +129,7 @@ fn crud_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -139,6 +140,7 @@ fn failing_store_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -149,6 +151,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> Router {
         transcriber,
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 
@@ -159,6 +162,7 @@ fn failing_agent_router() -> Router {
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingAgentFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 

@@ -222,7 +222,8 @@ pub struct WaitRunResponse {
             turn_complete, usage, ask_required, escalated, warning, run_error, hook_fired, \
             done. A provider failure emits `run_error` then `done`.",
          content_type = "text/event-stream", body = WireEvent),
-        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody)
+        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 429, description = "This instance is at its concurrent run limit", body = ErrorBody)
     )
 )]
 pub async fn create_and_stream_run(
@@ -264,7 +265,7 @@ pub async fn create_and_stream_run(
         .session_store
         .create_run(&tenant, &thread_id, &run_id, &agent_name)
         .await?;
-    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await;
+    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let persist = begun.persist.clone();
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     run_ctx = run_ctx
@@ -288,15 +289,23 @@ pub async fn create_and_stream_run(
     tokio::spawn(async move {
         let lock = registry.thread_lock(&tenant, &thread_id).await;
         let _guard = lock.lock().await;
+        let claim =
+            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if matches!(claim, crate::registry::Claim::Lost) {
+            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+            let _ = err_tx.send(WireEvent::RunError {
+                run_id: Some(run_id.clone()),
+                message: "run was claimed by another instance".into(),
+            });
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return;
+        }
         let mut agent =
             crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-        if let Err(e) = store
-            .set_run_status(&run_id, RunStatus::Running, None)
-            .await
-        {
-            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
-        }
         let outcome = agent.run_message_with(user_msg, run_ctx).await;
+        claim.release();
         let (status, error) = match &outcome {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
             Ok(_) => (RunStatus::Success, None),
@@ -388,6 +397,7 @@ pub async fn create_and_stream_run(
     responses(
         (status = 200, description = "The completed run", body = WaitRunResponse),
         (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 429, description = "This instance is at its concurrent run limit", body = ErrorBody),
         (status = 500, description = "The run failed (provider error, max turns, ...)", body = ErrorBody)
     )
 )]
@@ -417,7 +427,7 @@ pub async fn wait_run(
         .session_store
         .create_run(&tenant, &thread_id, &run_id, &agent_name)
         .await?;
-    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await;
+    let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     run_ctx = run_ctx
         .with_cancel(begun.cancel.clone())
@@ -433,15 +443,19 @@ pub async fn wait_run(
     let task = tokio::spawn(async move {
         let lock = registry.thread_lock(&tenant, &thread_id).await;
         let _guard = lock.lock().await;
+        let claim =
+            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if matches!(claim, crate::registry::Claim::Lost) {
+            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return Err("run was claimed by another instance".to_string());
+        }
         let mut agent =
             crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-        if let Err(e) = store
-            .set_run_status(&run_id, RunStatus::Running, None)
-            .await
-        {
-            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
-        }
         let result = agent.run_message_with(user_msg, run_ctx).await;
+        claim.release();
         let (status, error) = match &result {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
             Ok(_) => (RunStatus::Success, None),

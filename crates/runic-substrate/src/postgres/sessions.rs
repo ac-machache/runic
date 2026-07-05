@@ -420,6 +420,62 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
+    async fn claim_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE runs
+             SET status = 'running', claimed_by = $2,
+                 lease_expires_at = now() + make_interval(secs => $3),
+                 updated_at = now()
+             WHERE run_id = $1 AND status = 'pending'",
+        )
+        .bind(run_id)
+        .bind(claimed_by)
+        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn heartbeat_run(
+        &self,
+        run_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE runs
+             SET lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
+             WHERE run_id = $1 AND claimed_by = $2 AND status = 'running'",
+        )
+        .bind(run_id)
+        .bind(claimed_by)
+        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
+        let rows = sqlx::query(
+            "UPDATE runs
+             SET status = 'error', error = 'lease expired', updated_at = now()
+             WHERE status = 'running' AND lease_expires_at < now()
+             RETURNING run_id, tenant, session_id, agent, status, error, claimed_by,
+                       lease_expires_at, created_at, updated_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        rows.into_iter().map(row_to_run).collect()
+    }
+
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(
             "SELECT run_id, tenant, session_id, agent, status, error, claimed_by,

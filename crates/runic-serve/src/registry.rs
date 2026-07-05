@@ -23,6 +23,31 @@ const RETRY_BASE: Duration = Duration::from_millis(100);
 const RETRY_CAP: Duration = Duration::from_secs(5);
 const RETRY_ESCALATE_AFTER: u32 = 5;
 
+#[derive(Debug, Clone)]
+pub struct RunLimits {
+    pub max_concurrent_runs: usize,
+    pub persist_backlog_max: u64,
+    pub run_lease: Duration,
+    pub heartbeat_every: Duration,
+    pub reap_every: Duration,
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_runs: 256,
+            persist_backlog_max: DEFAULT_PERSIST_BACKLOG_MAX,
+            run_lease: Duration::from_secs(30),
+            heartbeat_every: Duration::from_secs(10),
+            reap_every: Duration::from_secs(30),
+        }
+    }
+}
+
+fn as_chrono(d: Duration) -> chrono::Duration {
+    chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::seconds(30))
+}
+
 pub struct AgentRegistry {
     factories: HashMap<String, BoxedAgentFactory>,
 }
@@ -117,27 +142,41 @@ struct LiveRun {
 
 type ThreadKey = (String, String);
 
-#[derive(Default)]
 pub struct RunRegistry {
+    instance_id: String,
+    limits: RunLimits,
     locks: Mutex<HashMap<ThreadKey, Arc<Mutex<()>>>>,
     live: RwLock<HashMap<ThreadKey, LiveRun>>,
     persist_watch: RwLock<HashMap<ThreadKey, Arc<PersistHandle>>>,
-    persist_backlog_max: u64,
+}
+
+impl Default for RunRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RunRegistry {
     pub fn new() -> Self {
+        Self::with_limits(RunLimits::default())
+    }
+
+    pub fn with_limits(limits: RunLimits) -> Self {
         Self {
+            instance_id: format!("inst-{}", uuid::Uuid::new_v4().simple()),
+            limits,
             locks: Mutex::new(HashMap::new()),
             live: RwLock::new(HashMap::new()),
             persist_watch: RwLock::new(HashMap::new()),
-            persist_backlog_max: DEFAULT_PERSIST_BACKLOG_MAX,
         }
     }
 
-    pub fn with_persist_backlog_max(mut self, max: u64) -> Self {
-        self.persist_backlog_max = max;
-        self
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    pub fn limits(&self) -> &RunLimits {
+        &self.limits
     }
 
     pub async fn thread_lock(&self, tenant: &str, thread_id: &str) -> Arc<Mutex<()>> {
@@ -149,7 +188,12 @@ impl RunRegistry {
             .clone()
     }
 
-    pub async fn begin(&self, tenant: &str, thread_id: &str, run_id: &str) -> BegunRun {
+    pub async fn begin(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+        run_id: &str,
+    ) -> Result<BegunRun, ServeError> {
         let cancel = CancelToken::new();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
@@ -161,17 +205,24 @@ impl RunRegistry {
             notify: Arc::new(Notify::new()),
         });
 
-        self.live.write().await.insert(
-            (tenant.to_string(), thread_id.to_string()),
-            LiveRun {
-                run_id: run_id.to_string(),
-                cancel: cancel.clone(),
-                steering: steer_tx,
-                events: events_tx.clone(),
-            },
-        );
+        {
+            let mut live = self.live.write().await;
+            let key = (tenant.to_string(), thread_id.to_string());
+            if !live.contains_key(&key) && live.len() >= self.limits.max_concurrent_runs {
+                return Err(ServeError::TooBusy { active: live.len() });
+            }
+            live.insert(
+                key,
+                LiveRun {
+                    run_id: run_id.to_string(),
+                    cancel: cancel.clone(),
+                    steering: steer_tx,
+                    events: events_tx.clone(),
+                },
+            );
+        }
 
-        BegunRun {
+        Ok(BegunRun {
             run_id: run_id.to_string(),
             cancel,
             steering_rx: steer_rx,
@@ -179,7 +230,7 @@ impl RunRegistry {
             persist_sink,
             persist_rx,
             persist,
-        }
+        })
     }
 
     pub async fn end(
@@ -258,7 +309,7 @@ impl RunRegistry {
             let watch = self.persist_watch.read().await;
             watch.get(&key).map(|h| h.backlog()).unwrap_or(0)
         };
-        if worst > self.persist_backlog_max {
+        if worst > self.limits.persist_backlog_max {
             return Err(ServeError::PersistenceDegraded {
                 thread: thread_id.to_string(),
                 backlog: worst,
@@ -330,6 +381,102 @@ pub async fn hydrate_agent(
     );
 
     agent
+}
+
+pub enum Claim {
+    Held(tokio::task::JoinHandle<()>),
+    Unleased,
+    Lost,
+}
+
+impl Claim {
+    pub fn release(self) {
+        if let Claim::Held(heartbeat) = self {
+            heartbeat.abort();
+        }
+    }
+}
+
+pub async fn claim_lease(
+    store: &Arc<dyn SessionStore>,
+    registry: &RunRegistry,
+    run_id: &str,
+    cancel: CancelToken,
+) -> Claim {
+    let limits = registry.limits();
+    let lease = as_chrono(limits.run_lease);
+    match store.claim_run(run_id, registry.instance_id(), lease).await {
+        Ok(true) => Claim::Held(spawn_heartbeat(
+            store.clone(),
+            run_id.to_string(),
+            registry.instance_id().to_string(),
+            lease,
+            limits.heartbeat_every,
+            cancel,
+        )),
+        Ok(false) => Claim::Lost,
+        Err(e) => {
+            tracing::warn!(%run_id, error = %e, "run lease claim failed — running unleased");
+            Claim::Unleased
+        }
+    }
+}
+
+fn spawn_heartbeat(
+    store: Arc<dyn SessionStore>,
+    run_id: String,
+    instance_id: String,
+    lease: chrono::Duration,
+    every: Duration,
+    cancel: CancelToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            match store.heartbeat_run(&run_id, &instance_id, lease).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(%run_id, "run lease lost — cancelling the run");
+                    cancel.cancel();
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(%run_id, error = %e, "run heartbeat failed");
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_lease_reaper(
+    store: Arc<dyn SessionStore>,
+    every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match store.reap_expired_runs().await {
+                Ok(reaped) => {
+                    for run in reaped {
+                        tracing::warn!(
+                            run_id = %run.run_id,
+                            tenant = %run.tenant,
+                            session_id = %run.session_id,
+                            claimed_by = run.claimed_by.as_deref().unwrap_or("-"),
+                            "expired run lease reaped"
+                        );
+                    }
+                }
+                Err(runic_substrate::Error::Unsupported(_)) => {
+                    tracing::debug!("store has no run rows — lease reaper off");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "lease reap failed");
+                }
+            }
+            tokio::time::sleep(every).await;
+        }
+    })
 }
 
 fn spawn_persister(
@@ -486,6 +633,78 @@ mod tests {
         }
     }
 
+    struct NoRunRowsStore;
+
+    #[async_trait]
+    impl SessionStore for NoRunRowsStore {
+        async fn append(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+            _event: &SessionEvent,
+        ) -> runic_substrate::Result<u64> {
+            Ok(0)
+        }
+
+        async fn append_batch(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+            _events: &[SessionEvent],
+        ) -> runic_substrate::Result<()> {
+            Ok(())
+        }
+
+        async fn read(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_after(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+            _after_seq: u64,
+        ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_sessions(
+            &self,
+            _tenant: &str,
+        ) -> runic_substrate::Result<Vec<runic_substrate::SessionMeta>> {
+            Ok(Vec::new())
+        }
+
+        async fn session_meta(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+        ) -> runic_substrate::Result<Option<runic_substrate::SessionMeta>> {
+            Ok(None)
+        }
+
+        async fn set_label(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+            _label: Option<&str>,
+        ) -> runic_substrate::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_session(
+            &self,
+            _tenant: &str,
+            _session_id: &str,
+        ) -> runic_substrate::Result<()> {
+            Ok(())
+        }
+    }
+
     struct FlakyStore {
         inner: MemorySessionStore,
         failures_left: std::sync::atomic::AtomicU32,
@@ -573,7 +792,7 @@ mod tests {
             failures_left: std::sync::atomic::AtomicU32::new(3),
         });
         let registry = RunRegistry::new();
-        let begun = registry.begin("t", "s", "r-1").await;
+        let begun = registry.begin("t", "s", "r-1").await.unwrap();
         spawn_persister(
             begun.persist_rx,
             store.clone(),
@@ -605,8 +824,11 @@ mod tests {
             inner: MemorySessionStore::new(),
             failures_left: std::sync::atomic::AtomicU32::new(u32::MAX),
         });
-        let registry = RunRegistry::new().with_persist_backlog_max(3);
-        let begun = registry.begin("t", "s", "r-1").await;
+        let registry = RunRegistry::with_limits(RunLimits {
+            persist_backlog_max: 3,
+            ..Default::default()
+        });
+        let begun = registry.begin("t", "s", "r-1").await.unwrap();
         spawn_persister(
             begun.persist_rx,
             store.clone(),
@@ -669,7 +891,7 @@ mod tests {
             .unwrap();
 
         let registry = RunRegistry::new();
-        let mut begun = registry.begin("t", "s", "r-9").await;
+        let mut begun = registry.begin("t", "s", "r-9").await.unwrap();
         let factory: BoxedAgentFactory = Arc::new(TestFactory);
         let agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
 
@@ -686,7 +908,7 @@ mod tests {
         store.append("t", "s", &message_event(0)).await.unwrap();
 
         let registry = RunRegistry::new();
-        let mut begun = registry.begin("t", "s", "r-1").await;
+        let mut begun = registry.begin("t", "s", "r-1").await.unwrap();
         let factory: BoxedAgentFactory = Arc::new(StatelessTestFactory);
         let mut agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
 
@@ -729,9 +951,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_refuses_new_threads_past_the_cap() {
+        let registry = RunRegistry::with_limits(RunLimits {
+            max_concurrent_runs: 1,
+            ..Default::default()
+        });
+        let begun = registry.begin("t", "a", "r-1").await.unwrap();
+        assert!(matches!(
+            registry.begin("t", "b", "r-2").await,
+            Err(ServeError::TooBusy { active: 1 })
+        ));
+        registry.end("t", "a", "r-1", begun.persist.clone()).await;
+        registry.begin("t", "b", "r-2").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn claiming_takes_the_lease_or_reports_it_lost() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        let registry = RunRegistry::new();
+
+        store.create_run("t", "s", "r-mine", "main").await.unwrap();
+        let claim = claim_lease(&store, &registry, "r-mine", CancelToken::new()).await;
+        assert!(matches!(claim, Claim::Held(_)));
+        claim.release();
+        let rec = store.get_run("t", "r-mine").await.unwrap().unwrap();
+        assert_eq!(rec.claimed_by.as_deref(), Some(registry.instance_id()));
+
+        store.create_run("t", "s", "r-taken", "main").await.unwrap();
+        store
+            .claim_run("r-taken", "someone-else", chrono::Duration::seconds(30))
+            .await
+            .unwrap();
+        let claim = claim_lease(&store, &registry, "r-taken", CancelToken::new()).await;
+        assert!(matches!(claim, Claim::Lost));
+
+        let unsupported: Arc<dyn SessionStore> = Arc::new(NoRunRowsStore);
+        let claim = claim_lease(&unsupported, &registry, "r-any", CancelToken::new()).await;
+        assert!(matches!(claim, Claim::Unleased));
+    }
+
+    #[tokio::test]
+    async fn a_lost_lease_cancels_the_run() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        store.create_run("t", "s", "r-1", "main").await.unwrap();
+        let registry = RunRegistry::with_limits(RunLimits {
+            heartbeat_every: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let cancel = CancelToken::new();
+        let claim = claim_lease(&store, &registry, "r-1", cancel.clone()).await;
+        assert!(matches!(claim, Claim::Held(_)));
+
+        store
+            .set_run_status("r-1", runic_substrate::RunStatus::Error, Some("reaped"))
+            .await
+            .unwrap();
+
+        for _ in 0..200 {
+            if cancel.is_cancelled() {
+                claim.release();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("losing the lease never cancelled the run");
+    }
+
+    #[tokio::test]
+    async fn the_reaper_marks_expired_runs() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        store.create_run("t", "s", "r-dead", "main").await.unwrap();
+        store
+            .claim_run("r-dead", "inst-gone", chrono::Duration::seconds(-1))
+            .await
+            .unwrap();
+
+        let reaper = spawn_lease_reaper(store.clone(), Duration::from_millis(10));
+        for _ in 0..200 {
+            let rec = store.get_run("t", "r-dead").await.unwrap().unwrap();
+            if rec.status == runic_substrate::RunStatus::Error {
+                assert_eq!(rec.error.as_deref(), Some("lease expired"));
+                reaper.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the reaper never swept the expired run");
+    }
+
+    #[tokio::test]
     async fn live_run_handles_answer_cancel_steer_and_attach() {
         let registry = RunRegistry::new();
-        let begun = registry.begin("t", "s", "r-1").await;
+        let begun = registry.begin("t", "s", "r-1").await.unwrap();
 
         assert!(registry.is_busy("t", "s").await);
         assert!(registry.live_events("t", "s", "r-1").await.is_some());

@@ -230,6 +230,28 @@ pub trait SessionStore: Send + Sync {
         Err(Error::Unsupported("set_run_status".into()))
     }
 
+    async fn claim_run(
+        &self,
+        _run_id: &str,
+        _claimed_by: &str,
+        _lease: chrono::Duration,
+    ) -> Result<bool> {
+        Err(Error::Unsupported("claim_run".into()))
+    }
+
+    async fn heartbeat_run(
+        &self,
+        _run_id: &str,
+        _claimed_by: &str,
+        _lease: chrono::Duration,
+    ) -> Result<bool> {
+        Err(Error::Unsupported("heartbeat_run".into()))
+    }
+
+    async fn reap_expired_runs(&self) -> Result<Vec<RunRecord>> {
+        Err(Error::Unsupported("reap_expired_runs".into()))
+    }
+
     async fn get_run(&self, _tenant: &str, _run_id: &str) -> Result<Option<RunRecord>> {
         Err(Error::Unsupported("get_run".into()))
     }

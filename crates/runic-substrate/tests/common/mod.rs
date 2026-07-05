@@ -136,6 +136,9 @@ macro_rules! session_store_contract_suite {
             run_rows_lifecycle,
             latest_run_picks_the_newest,
             runs_are_tenant_scoped,
+            claiming_a_pending_run_takes_the_lease_once,
+            heartbeat_extends_the_lease_for_the_owner_only,
+            reaping_marks_only_expired_running_runs,
             deleting_a_session_deletes_its_runs,
             read_tail_without_a_snapshot_reads_everything,
         );

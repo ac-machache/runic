@@ -46,6 +46,7 @@ fn transcribe_router() -> Router {
         transcriber: Some(Arc::new(EchoFilenameTranscriber)),
         agents: single_agent("main", Arc::new(PanicFactory)),
         human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
     })
 }
 

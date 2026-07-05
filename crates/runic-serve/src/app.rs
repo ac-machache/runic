@@ -24,7 +24,7 @@ use utoipa::OpenApi;
 
 use crate::factory::BoxedAgentFactory;
 use crate::human::HumanHub;
-use crate::registry::{AgentRegistry, RunRegistry};
+use crate::registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
 /// Everything every handler needs. Cheap to clone (all internal data is
@@ -54,6 +54,7 @@ pub struct ServeConfig {
     /// and installs it on each run's context, so an `ask_user` raised mid-run
     /// resolves via the HTTP answer endpoint.
     pub human_hub: Arc<HumanHub>,
+    pub limits: RunLimits,
 }
 
 pub fn single_agent(
@@ -69,7 +70,7 @@ pub fn bare_router(config: ServeConfig) -> Router {
         artifact_store: config.artifact_store,
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
-        runs: Arc::new(RunRegistry::new()),
+        runs: Arc::new(RunRegistry::with_limits(config.limits)),
         human_hub: config.human_hub,
     };
 
@@ -136,6 +137,13 @@ pub fn bare_router(config: ServeConfig) -> Router {
 }
 
 pub fn router(config: ServeConfig) -> Router {
+    let store = config.session_store.clone();
+    let reap_every = config.limits.reap_every;
+    if tokio::runtime::Handle::try_current().is_ok() {
+        spawn_lease_reaper(store, reap_every);
+    } else {
+        tracing::warn!("router built outside a tokio runtime — lease reaper not started");
+    }
     bare_router(config).layer(CorsLayer::permissive()).layer(
         ServiceBuilder::new()
             .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))

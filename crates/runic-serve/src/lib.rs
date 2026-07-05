@@ -49,6 +49,6 @@ pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
 pub use error::ServeError;
 pub use factory::{AgentFactory, BoxedAgentFactory};
 pub use human::{HumanChannel, HumanHub};
-pub use registry::{AgentRegistry, RunRegistry};
+pub use registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};
 pub use tenant::Tenant;
 pub use wire::WireEvent;

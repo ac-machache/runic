@@ -294,8 +294,35 @@ pub async fn create_and_stream_run(
     tokio::spawn(async move {
         let lock = registry.thread_lock(&tenant, &thread_id).await;
         let _guard = lock.lock().await;
-        let claim =
-            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if !crate::registry::acquire_thread_lease(
+            &store,
+            &registry,
+            &tenant,
+            &thread_id,
+            &begun.cancel,
+        )
+        .await
+        {
+            let _ = store
+                .set_run_status(&run_id, RunStatus::Cancelled, None)
+                .await;
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return;
+        }
+        let claim = crate::registry::claim_lease(
+            &store,
+            &registry,
+            crate::registry::HeartbeatRun {
+                tenant: tenant.clone(),
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+                cancel: begun.cancel.clone(),
+                steering: begun.steering_tx.clone(),
+            },
+        )
+        .await;
         if matches!(claim, crate::registry::Claim::Lost) {
             tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
             let _ = err_tx.send(WireEvent::RunError {
@@ -305,6 +332,7 @@ pub async fn create_and_stream_run(
             registry
                 .end(&tenant, &thread_id, &run_id, begun.persist.clone())
                 .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return;
         }
         let mut agent =
@@ -332,6 +360,7 @@ pub async fn create_and_stream_run(
         registry
             .end(&tenant, &thread_id, &run_id, begun.persist.clone())
             .await;
+        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
         // Guard drops → the next queued run on this thread proceeds. The agent
         // clears its event sender + human channel here, closing both rx ends.
     });
@@ -453,13 +482,41 @@ pub async fn wait_run(
     let task = tokio::spawn(async move {
         let lock = registry.thread_lock(&tenant, &thread_id).await;
         let _guard = lock.lock().await;
-        let claim =
-            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if !crate::registry::acquire_thread_lease(
+            &store,
+            &registry,
+            &tenant,
+            &thread_id,
+            &begun.cancel,
+        )
+        .await
+        {
+            let _ = store
+                .set_run_status(&run_id, RunStatus::Cancelled, None)
+                .await;
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return Err("run cancelled before it started".to_string());
+        }
+        let claim = crate::registry::claim_lease(
+            &store,
+            &registry,
+            crate::registry::HeartbeatRun {
+                tenant: tenant.clone(),
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+                cancel: begun.cancel.clone(),
+                steering: begun.steering_tx.clone(),
+            },
+        )
+        .await;
         if matches!(claim, crate::registry::Claim::Lost) {
             tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
             registry
                 .end(&tenant, &thread_id, &run_id, begun.persist.clone())
                 .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return Err("run was claimed by another instance".to_string());
         }
         let mut agent =
@@ -481,6 +538,7 @@ pub async fn wait_run(
         registry
             .end(&tenant, &thread_id, &run_id, begun.persist.clone())
             .await;
+        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
         match result {
             Ok(outcome) => {
                 let text = agent.state().last_assistant_text().unwrap_or_default();
@@ -601,13 +659,41 @@ pub async fn background_run(
     tokio::spawn(async move {
         let lock = registry.thread_lock(&tenant, &thread_id).await;
         let _guard = lock.lock().await;
-        let claim =
-            crate::registry::claim_lease(&store, &registry, &run_id, begun.cancel.clone()).await;
+        if !crate::registry::acquire_thread_lease(
+            &store,
+            &registry,
+            &tenant,
+            &thread_id,
+            &begun.cancel,
+        )
+        .await
+        {
+            let _ = store
+                .set_run_status(&run_id, RunStatus::Cancelled, None)
+                .await;
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            return;
+        }
+        let claim = crate::registry::claim_lease(
+            &store,
+            &registry,
+            crate::registry::HeartbeatRun {
+                tenant: tenant.clone(),
+                thread_id: thread_id.clone(),
+                run_id: run_id.clone(),
+                cancel: begun.cancel.clone(),
+                steering: begun.steering_tx.clone(),
+            },
+        )
+        .await;
         if matches!(claim, crate::registry::Claim::Lost) {
             tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
             registry
                 .end(&tenant, &thread_id, &run_id, begun.persist.clone())
                 .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return;
         }
         let mut agent =
@@ -632,6 +718,7 @@ pub async fn background_run(
         registry
             .end(&tenant, &thread_id, &run_id, begun.persist.clone())
             .await;
+        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
     });
 
     Ok((
@@ -723,9 +810,40 @@ pub async fn cancel_run(
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
     if state.runs.cancel_run(&tenant, &thread_id).await {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ServeError::NoRunInFlight { thread_id })
+        return Ok(StatusCode::ACCEPTED);
+    }
+    if let Some(run) = active_run(&state, &tenant, &thread_id).await
+        && state
+            .session_store
+            .request_cancel_run(&tenant, &run.run_id)
+            .await
+            .unwrap_or(false)
+    {
+        tracing::info!(%tenant, %thread_id, run_id = %run.run_id, "cancel signalled via run row");
+        return Ok(StatusCode::ACCEPTED);
+    }
+    Err(ServeError::NoRunInFlight { thread_id })
+}
+
+async fn active_run(
+    state: &AppState,
+    tenant: &str,
+    thread_id: &str,
+) -> Option<runic_substrate::RunRecord> {
+    match state
+        .session_store
+        .latest_active_run(tenant, thread_id)
+        .await
+    {
+        Ok(run) => run,
+        Err(runic_substrate::Error::Unsupported(_)) => state
+            .session_store
+            .latest_run(tenant, thread_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|r| !r.status.is_terminal()),
+        Err(_) => None,
     }
 }
 
@@ -764,11 +882,24 @@ pub async fn steer_run(
             "steer requires non-empty text".into(),
         ));
     }
-    if state.runs.steer_run(&tenant, &thread_id, req.text).await {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ServeError::NoRunInFlight { thread_id })
+    if state
+        .runs
+        .steer_run(&tenant, &thread_id, req.text.clone())
+        .await
+    {
+        return Ok(StatusCode::ACCEPTED);
     }
+    if let Some(run) = active_run(&state, &tenant, &thread_id).await
+        && state
+            .session_store
+            .push_steering(&tenant, &run.run_id, &req.text)
+            .await
+            .unwrap_or(false)
+    {
+        tracing::info!(%tenant, %thread_id, run_id = %run.run_id, "steering signalled via run row");
+        return Ok(StatusCode::ACCEPTED);
+    }
+    Err(ServeError::NoRunInFlight { thread_id })
 }
 
 /// `GET /threads/:id/runs/:run_id/stream`
@@ -816,6 +947,25 @@ pub async fn replay_run(
         return Err(ServeError::ThreadNotFound { id: thread_id });
     }
 
+    let live_rx = state.runs.live_events(&tenant, &thread_id, &run_id).await;
+
+    // A run executing on another instance: subscribe to the broker BEFORE
+    // reading the store, so nothing published in between is lost (the replay
+    // set below dedups the overlap).
+    let mut remote_rx = None;
+    if live_rx.is_none()
+        && let Some(broker) = state.runs.broker()
+        && state
+            .session_store
+            .get_run(&tenant, &run_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.session_id == thread_id && !r.status.is_terminal())
+    {
+        remote_rx = broker.subscribe(&tenant, &thread_id).await;
+    }
+
     // All persisted events for this run (from seq 0) — for existence + the real
     // terminal turn count; the replay payload is the slice after `after_seq`.
     let all = state
@@ -823,8 +973,7 @@ pub async fn replay_run(
         .read_run_after(&tenant, &thread_id, &run_id, 0)
         .await?;
 
-    let live_rx = state.runs.live_events(&tenant, &thread_id, &run_id).await;
-    let is_live = live_rx.is_some();
+    let is_live = live_rx.is_some() || remote_rx.is_some();
 
     if all.is_empty() && !is_live {
         return Err(ServeError::RunNotFound {
@@ -833,7 +982,20 @@ pub async fn replay_run(
         });
     }
 
-    tracing::info!(%tenant, %thread_id, %run_id, after_seq, live = is_live, "replay attached");
+    tracing::info!(
+        %tenant, %thread_id, %run_id, after_seq,
+        live = live_rx.is_some(),
+        remote = remote_rx.is_some(),
+        "replay attached"
+    );
+
+    let seen: std::collections::HashSet<String> = if remote_rx.is_some() {
+        all.iter()
+            .filter_map(|s| serde_json::to_string(&s.event).ok())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
 
     let completed = all.iter().rev().find_map(|s| match &s.event {
         SessionEvent::RunEnd { outcome, .. } => {
@@ -881,6 +1043,53 @@ pub async fn replay_run(
                     total_turns = Some(t);
                     stop_reason = s;
                     break;
+                }
+            }
+        } else if let Some(mut rx) = remote_rx {
+            // Broker-fed tail from the executing instance, with a run-row poll
+            // as the backstop when the publisher dies without a RunEnd.
+            let mut check = tokio::time::interval(Duration::from_secs(5));
+            check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            check.tick().await;
+            loop {
+                tokio::select! {
+                    event = rx.recv() => {
+                        let Some(event) = event else { break };
+                        if event.run_id() != run_id {
+                            continue;
+                        }
+                        if serde_json::to_string(&event)
+                            .is_ok_and(|key| seen.contains(&key))
+                        {
+                            continue;
+                        }
+                        let end = match &event {
+                            SessionEvent::RunEnd { outcome, .. } => {
+                                Some((outcome.total_turns, outcome.stop_reason.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(wire) = from_session_event(event) {
+                            yield Ok(to_sse(&wire, None));
+                        }
+                        if let Some((t, s)) = end {
+                            total_turns = Some(t);
+                            stop_reason = s;
+                            break;
+                        }
+                    }
+                    _ = check.tick() => {
+                        let terminal = state
+                            .session_store
+                            .get_run(&tenant, &run_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .is_none_or(|r| r.status.is_terminal());
+                        if terminal {
+                            break;
+                        }
+                    }
                 }
             }
         }

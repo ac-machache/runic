@@ -91,8 +91,16 @@ pub struct RunRecord {
     pub input: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub cancel_requested: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunSignals {
+    pub cancel_requested: bool,
+    pub steering: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -259,8 +267,45 @@ pub trait SessionStore: Send + Sync {
         _run_id: &str,
         _claimed_by: &str,
         _lease: chrono::Duration,
-    ) -> Result<bool> {
+    ) -> Result<Option<RunSignals>> {
         Err(Error::Unsupported("heartbeat_run".into()))
+    }
+
+    async fn request_cancel_run(&self, _tenant: &str, _run_id: &str) -> Result<bool> {
+        Err(Error::Unsupported("request_cancel_run".into()))
+    }
+
+    async fn push_steering(&self, _tenant: &str, _run_id: &str, _text: &str) -> Result<bool> {
+        Err(Error::Unsupported("push_steering".into()))
+    }
+
+    async fn claim_thread(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _claimed_by: &str,
+        _lease: chrono::Duration,
+    ) -> Result<bool> {
+        Err(Error::Unsupported("claim_thread".into()))
+    }
+
+    async fn extend_thread_lease(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _claimed_by: &str,
+        _lease: chrono::Duration,
+    ) -> Result<bool> {
+        Err(Error::Unsupported("extend_thread_lease".into()))
+    }
+
+    async fn release_thread(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _claimed_by: &str,
+    ) -> Result<()> {
+        Err(Error::Unsupported("release_thread".into()))
     }
 
     async fn reap_expired_runs(&self) -> Result<Vec<RunRecord>> {
@@ -285,6 +330,14 @@ pub trait SessionStore: Send + Sync {
 
     async fn latest_run(&self, _tenant: &str, _session_id: &str) -> Result<Option<RunRecord>> {
         Err(Error::Unsupported("latest_run".into()))
+    }
+
+    async fn latest_active_run(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+    ) -> Result<Option<RunRecord>> {
+        Err(Error::Unsupported("latest_active_run".into()))
     }
 
     /// Textual (NOT semantic) full-text search over a tenant's conversations.

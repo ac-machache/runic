@@ -105,12 +105,19 @@ struct SessionRec {
     last_activity: DateTime<Utc>,
 }
 
+struct ThreadLease {
+    claimed_by: String,
+    expires_at: DateTime<Utc>,
+}
+
 /// In-RAM [`SessionStore`] — the event log in a map. Tests / ephemeral mode;
 /// nothing survives a restart.
 #[derive(Default)]
 pub struct MemorySessionStore {
     sessions: RwLock<HashMap<(String, String), SessionRec>>,
     runs: RwLock<HashMap<String, crate::RunRecord>>,
+    steering: RwLock<HashMap<String, Vec<String>>>,
+    thread_leases: RwLock<HashMap<(String, String), ThreadLease>>,
 }
 
 impl MemorySessionStore {
@@ -262,10 +269,24 @@ impl SessionStore for MemorySessionStore {
             .write()
             .await
             .remove(&(tenant.to_string(), session_id.to_string()));
-        self.runs
+        let dropped: Vec<String> = {
+            let mut runs = self.runs.write().await;
+            let dropped = runs
+                .values()
+                .filter(|r| r.tenant == tenant && r.session_id == session_id)
+                .map(|r| r.run_id.clone())
+                .collect();
+            runs.retain(|_, r| !(r.tenant == tenant && r.session_id == session_id));
+            dropped
+        };
+        let mut steering = self.steering.write().await;
+        for run_id in dropped {
+            steering.remove(&run_id);
+        }
+        self.thread_leases
             .write()
             .await
-            .retain(|_, r| !(r.tenant == tenant && r.session_id == session_id));
+            .remove(&(tenant.to_string(), session_id.to_string()));
         Ok(())
     }
 
@@ -295,6 +316,7 @@ impl SessionStore for MemorySessionStore {
                 lease_expires_at: None,
                 input: input.input.clone(),
                 context: input.context.clone(),
+                cancel_requested: false,
                 created_at: now,
                 updated_at: now,
             },
@@ -344,19 +366,114 @@ impl SessionStore for MemorySessionStore {
         run_id: &str,
         claimed_by: &str,
         lease: chrono::Duration,
-    ) -> Result<bool> {
+    ) -> Result<Option<crate::RunSignals>> {
         let mut runs = self.runs.write().await;
         let Some(rec) = runs.get_mut(run_id) else {
-            return Ok(false);
+            return Ok(None);
         };
         if rec.status != crate::RunStatus::Running || rec.claimed_by.as_deref() != Some(claimed_by)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let now = Utc::now();
         rec.lease_expires_at = Some(now + lease);
         rec.updated_at = now;
+        let steering = self
+            .steering
+            .write()
+            .await
+            .remove(run_id)
+            .unwrap_or_default();
+        Ok(Some(crate::RunSignals {
+            cancel_requested: rec.cancel_requested,
+            steering,
+        }))
+    }
+
+    async fn request_cancel_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
+        let mut runs = self.runs.write().await;
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if rec.tenant != tenant || rec.status.is_terminal() {
+            return Ok(false);
+        }
+        if rec.status == crate::RunStatus::Queued && rec.claimed_by.is_none() {
+            rec.status = crate::RunStatus::Cancelled;
+        } else {
+            rec.cancel_requested = true;
+        }
+        rec.updated_at = Utc::now();
         Ok(true)
+    }
+
+    async fn push_steering(&self, tenant: &str, run_id: &str, text: &str) -> Result<bool> {
+        let runs = self.runs.read().await;
+        let Some(rec) = runs.get(run_id) else {
+            return Ok(false);
+        };
+        if rec.tenant != tenant || rec.status.is_terminal() {
+            return Ok(false);
+        }
+        self.steering
+            .write()
+            .await
+            .entry(run_id.to_string())
+            .or_default()
+            .push(text.to_string());
+        Ok(true)
+    }
+
+    async fn claim_thread(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let now = Utc::now();
+        let mut leases = self.thread_leases.write().await;
+        let key = (tenant.to_string(), session_id.to_string());
+        match leases.get(&key) {
+            Some(l) if l.claimed_by != claimed_by && l.expires_at > now => Ok(false),
+            _ => {
+                leases.insert(
+                    key,
+                    ThreadLease {
+                        claimed_by: claimed_by.to_string(),
+                        expires_at: now + lease,
+                    },
+                );
+                Ok(true)
+            }
+        }
+    }
+
+    async fn extend_thread_lease(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let mut leases = self.thread_leases.write().await;
+        let key = (tenant.to_string(), session_id.to_string());
+        match leases.get_mut(&key) {
+            Some(l) if l.claimed_by == claimed_by => {
+                l.expires_at = Utc::now() + lease;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    async fn release_thread(&self, tenant: &str, session_id: &str, claimed_by: &str) -> Result<()> {
+        let mut leases = self.thread_leases.write().await;
+        let key = (tenant.to_string(), session_id.to_string());
+        if leases.get(&key).is_some_and(|l| l.claimed_by == claimed_by) {
+            leases.remove(&key);
+        }
+        Ok(())
     }
 
     async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
@@ -419,6 +536,19 @@ impl SessionStore for MemorySessionStore {
             .await
             .get(run_id)
             .filter(|r| r.tenant == tenant)
+            .cloned())
+    }
+
+    async fn latest_active_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Option<crate::RunRecord>> {
+        let runs = self.runs.read().await;
+        Ok(runs
+            .values()
+            .filter(|r| r.tenant == tenant && r.session_id == session_id && !r.status.is_terminal())
+            .max_by_key(|r| (r.status == crate::RunStatus::Running, r.created_at))
             .cloned())
     }
 

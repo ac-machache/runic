@@ -122,6 +122,7 @@ async fn a_background_task_is_durable_without_another_run() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app

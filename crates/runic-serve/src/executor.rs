@@ -119,16 +119,33 @@ async fn execute_queued_run(
 
     let heartbeat = spawn_heartbeat(
         store.clone(),
-        run_id.clone(),
+        crate::registry::HeartbeatRun {
+            tenant: tenant.clone(),
+            thread_id: thread_id.clone(),
+            run_id: run_id.clone(),
+            cancel: begun.cancel.clone(),
+            steering: begun.steering_tx.clone(),
+        },
         registry.instance_id().to_string(),
         as_chrono(registry.limits().run_lease),
         registry.limits().heartbeat_every,
-        begun.cancel.clone(),
     );
 
     tracing::info!(%tenant, %thread_id, %run_id, agent = %record.agent, "worker picked up run");
     let lock = registry.thread_lock(&tenant, &thread_id).await;
     let _guard = lock.lock().await;
+    if !crate::registry::acquire_thread_lease(&store, &registry, &tenant, &thread_id, &begun.cancel)
+        .await
+    {
+        heartbeat.abort();
+        let _ = store
+            .set_run_status(&run_id, RunStatus::Cancelled, None)
+            .await;
+        registry
+            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+            .await;
+        return;
+    }
     let mut agent =
         crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
     let outcome = agent.run_message_with(user_msg, run_ctx).await;
@@ -151,6 +168,7 @@ async fn execute_queued_run(
     registry
         .end(&tenant, &thread_id, &run_id, begun.persist.clone())
         .await;
+    crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
 }
 
 async fn fail(store: &Arc<dyn SessionStore>, run_id: &str, reason: &str) {

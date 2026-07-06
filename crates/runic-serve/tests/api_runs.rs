@@ -224,6 +224,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -237,6 +238,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     (app, artifacts)
 }
@@ -250,6 +252,7 @@ fn failing_run_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -262,6 +265,7 @@ fn asking_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -282,6 +286,7 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     (app, entered, gate)
 }
@@ -998,7 +1003,7 @@ impl SessionStore for SlowStore {
         run_id: &str,
         claimed_by: &str,
         lease: chrono::Duration,
-    ) -> runic_substrate::Result<bool> {
+    ) -> runic_substrate::Result<Option<runic_substrate::RunSignals>> {
         self.inner.heartbeat_run(run_id, claimed_by, lease).await
     }
 
@@ -1021,6 +1026,7 @@ async fn wait_response_implies_the_run_is_durable() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app
@@ -1052,6 +1058,7 @@ async fn stream_done_implies_the_run_is_durable() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app
@@ -1158,6 +1165,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let run_app = app.clone();
@@ -1233,6 +1241,7 @@ async fn background_run_returns_202_and_completes_detached() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app
@@ -1318,6 +1327,7 @@ async fn background_run_failure_lands_in_the_run_row() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app
@@ -1355,6 +1365,7 @@ fn queued_router(store: Arc<dyn SessionStore>) -> Router {
         agents: single_agent("main", Arc::new(ScriptedFactory)),
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
+        broker: None,
         workers: Some(runic_serve::WorkerConfig {
             max_concurrent_runs: 4,
             poll_every: Duration::from_millis(20),
@@ -1459,6 +1470,668 @@ async fn a_queued_run_with_bad_input_is_failed_by_the_worker() {
     assert!(rec.error.unwrap().contains("unknown agent"));
 }
 
+#[derive(Default)]
+struct FakeBroker {
+    subs: tokio::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            Vec<tokio::sync::mpsc::UnboundedSender<runic_state::SessionEvent>>,
+        >,
+    >,
+}
+
+#[async_trait]
+impl runic_serve::EventBroker for FakeBroker {
+    async fn publish(&self, tenant: &str, thread_id: &str, event: &runic_state::SessionEvent) {
+        let key = format!("{tenant}:{thread_id}");
+        let mut subs = self.subs.lock().await;
+        if let Some(senders) = subs.get_mut(&key) {
+            senders.retain(|tx| tx.send(event.clone()).is_ok());
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        tenant: &str,
+        thread_id: &str,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<runic_state::SessionEvent>> {
+        let key = format!("{tenant}:{thread_id}");
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.subs.lock().await.entry(key).or_default().push(tx);
+        Some(rx)
+    }
+}
+
+fn replay_message(run_id: &str, text: &str) -> runic_state::SessionEvent {
+    runic_state::SessionEvent::Message {
+        run_id: run_id.into(),
+        msg: runic_types::Message::assistant(text),
+        at: chrono::Utc::now(),
+    }
+}
+
+fn replay_end(run_id: &str) -> runic_state::SessionEvent {
+    runic_state::SessionEvent::RunEnd {
+        run_id: run_id.into(),
+        outcome: runic_state::RunOutcome {
+            total_turns: 1,
+            stop_reason: Some("end_turn".into()),
+            usage: TokenUsage::default(),
+            structured: None,
+        },
+        at: chrono::Utc::now(),
+    }
+}
+
+fn broker_replay_router(
+    store: Arc<MemorySessionStore>,
+    broker: Arc<dyn runic_serve::EventBroker>,
+) -> Router {
+    router(ServeConfig {
+        session_store: store,
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        workers: None,
+        broker: Some(broker),
+    })
+}
+
+#[tokio::test]
+async fn a_viewer_on_another_instance_gets_the_live_tail_via_the_broker() {
+    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+
+    let instance = |factory: runic_serve::BoxedAgentFactory| {
+        router(ServeConfig {
+            session_store: store.clone(),
+            artifact_store: Arc::new(MemoryArtifactStore::new()),
+            transcriber: None,
+            agents: single_agent("main", factory),
+            human_hub: Arc::new(HumanHub::new()),
+            limits: Default::default(),
+            workers: None,
+            broker: Some(broker.clone()),
+        })
+    };
+    let executor = instance(Arc::new(GatedFactory {
+        entered: entered.clone(),
+        gate: gate.clone(),
+    }));
+    let viewer = instance(Arc::new(ScriptedFactory));
+
+    let exec_app = executor.clone();
+    let run_task = tokio::spawn(async move {
+        let resp = exec_app
+            .oneshot(run_request("t1", TENANT, "go"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+    entered.notified().await;
+
+    let mut run_id = None;
+    for _ in 0..100 {
+        if let Some(rec) = store.latest_run(TENANT, "t1").await.unwrap() {
+            run_id = Some(rec.run_id);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let run_id = run_id.expect("run row exists");
+
+    let viewer_task = tokio::spawn({
+        let viewer = viewer.clone();
+        let run_id = run_id.clone();
+        async move {
+            let resp = viewer
+                .oneshot(get_with(
+                    &format!("/threads/t1/runs/{run_id}/stream"),
+                    TENANT,
+                    &[],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_string(resp).await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cancel = executor
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+    gate.notify_one();
+    run_task.await.unwrap();
+
+    let viewer_body = viewer_task.await.unwrap();
+    let kinds = sse_kinds(&viewer_body);
+    assert!(
+        kinds.iter().any(|k| k == "message"),
+        "live events crossed instances: {kinds:?}"
+    );
+    assert_eq!(kinds.last().map(String::as_str), Some("done"));
+    let done = sse_data(&viewer_body)
+        .into_iter()
+        .find(|e| e["type"] == "done")
+        .unwrap();
+    assert_eq!(done["stop_reason"], "cancelled");
+}
+
+#[tokio::test]
+async fn remote_replay_ignores_broker_events_for_other_runs() {
+    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
+    let app = broker_replay_router(store.clone(), broker.clone());
+
+    create_thread(&app, TENANT, "t1").await;
+    store
+        .create_run(TENANT, "t1", "r-target", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-target", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let replay_app = app.clone();
+    let replay = tokio::spawn(async move {
+        let resp = replay_app
+            .oneshot(get_with("/threads/t1/runs/r-target/stream", TENANT, &[]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    broker
+        .publish(TENANT, "t1", &replay_message("r-other", "wrong run"))
+        .await;
+    broker
+        .publish(TENANT, "t1", &replay_message("r-target", "right run"))
+        .await;
+    broker.publish(TENANT, "t1", &replay_end("r-target")).await;
+
+    let body = replay.await.unwrap();
+    assert!(body.contains("right run"), "{body}");
+    assert!(!body.contains("wrong run"), "{body}");
+    assert_eq!(sse_kinds(&body).last().map(String::as_str), Some("done"));
+}
+
+#[tokio::test]
+async fn remote_replay_deduplicates_persisted_and_broker_overlap() {
+    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
+    let app = broker_replay_router(store.clone(), broker.clone());
+    let event = replay_message("r-dupe", "dupe-once");
+
+    create_thread(&app, TENANT, "t1").await;
+    store
+        .create_run(TENANT, "t1", "r-dupe", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-dupe", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+    store.append(TENANT, "t1", &event).await.unwrap();
+
+    let replay_app = app.clone();
+    let replay = tokio::spawn(async move {
+        let resp = replay_app
+            .oneshot(get_with("/threads/t1/runs/r-dupe/stream", TENANT, &[]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_string(resp).await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    broker.publish(TENANT, "t1", &event).await;
+    broker.publish(TENANT, "t1", &replay_end("r-dupe")).await;
+
+    let body = replay.await.unwrap();
+    assert_eq!(body.matches("dupe-once").count(), 1, "{body}");
+    assert_eq!(sse_kinds(&body).last().map(String::as_str), Some("done"));
+}
+
+#[tokio::test]
+async fn remote_replay_refuses_a_run_from_another_thread() {
+    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
+    let app = broker_replay_router(store.clone(), broker);
+
+    create_thread(&app, TENANT, "t1").await;
+    create_thread(&app, TENANT, "t2").await;
+    store
+        .create_run(TENANT, "t2", "r-on-t2", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-on-t2", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(get_with("/threads/t1/runs/r-on-t2/stream", TENANT, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn remote_replay_refuses_a_run_from_another_tenant() {
+    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
+    let app = broker_replay_router(store.clone(), broker);
+
+    create_thread(&app, TENANT, "t1").await;
+    create_thread(&app, "mallory", "t1").await;
+    store
+        .create_run("mallory", "t1", "r-foreign", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-foreign", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(get_with("/threads/t1/runs/r-foreign/stream", TENANT, &[]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cancel_and_steer_fall_back_to_run_row_signals() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = queued_router(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-remote", "inst-other", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let rec = store.get_run(TENANT, "r-remote").await.unwrap().unwrap();
+    assert!(rec.cancel_requested);
+    assert_eq!(rec.status, runic_substrate::RunStatus::Running);
+
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "change course" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let signals = store
+        .heartbeat_run("r-remote", "inst-other", chrono::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(signals.steering, ["change course"]);
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/ghost/runs/cancel",
+            TENANT,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn remote_cancel_is_tenant_scoped() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/cancel",
+            "mallory",
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let rec = store.get_run(TENANT, "r-remote").await.unwrap().unwrap();
+    assert!(!rec.cancel_requested);
+}
+
+#[tokio::test]
+async fn remote_steer_is_tenant_scoped() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            "mallory",
+            json!({ "text": "foreign steer" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    let signals = store
+        .heartbeat_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signals.steering.is_empty());
+}
+
+#[tokio::test]
+async fn cancel_prefers_the_running_run_over_a_newer_queued_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .create_run(
+            TENANT,
+            "t1",
+            "r-queued",
+            "main",
+            &runic_substrate::RunInput {
+                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let running = store.get_run(TENANT, "r-running").await.unwrap().unwrap();
+    assert_eq!(running.status, runic_substrate::RunStatus::Running);
+    assert!(running.cancel_requested);
+
+    let queued = store.get_run(TENANT, "r-queued").await.unwrap().unwrap();
+    assert_eq!(queued.status, runic_substrate::RunStatus::Queued);
+    assert!(!queued.cancel_requested);
+}
+
+#[tokio::test]
+async fn cancel_prefers_the_running_run_over_a_newer_terminal_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .create_run(TENANT, "t1", "r-done", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status("r-done", runic_substrate::RunStatus::Success, None)
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let running = store.get_run(TENANT, "r-running").await.unwrap().unwrap();
+    assert_eq!(running.status, runic_substrate::RunStatus::Running);
+    assert!(running.cancel_requested);
+}
+
+#[tokio::test]
+async fn queued_cancel_is_tenant_scoped() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+    store
+        .create_run(
+            "mallory",
+            "t1",
+            "r-mallory",
+            "main",
+            &runic_substrate::RunInput {
+                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        store
+            .get_run("mallory", "r-mallory")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        runic_substrate::RunStatus::Queued
+    );
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/cancel",
+            "mallory",
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        store
+            .get_run("mallory", "r-mallory")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        runic_substrate::RunStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn steer_prefers_the_running_run_over_a_newer_queued_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .create_run(
+            TENANT,
+            "t1",
+            "r-queued",
+            "main",
+            &runic_substrate::RunInput {
+                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "interrupt the active run" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let signals = store
+        .heartbeat_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(signals.steering, ["interrupt the active run"]);
+
+    let queued = store.get_run(TENANT, "r-queued").await.unwrap().unwrap();
+    assert_eq!(queued.status, runic_substrate::RunStatus::Queued);
+    assert!(!queued.cancel_requested);
+}
+
+#[tokio::test]
+async fn steer_prefers_the_running_run_over_a_newer_terminal_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    store
+        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    store
+        .create_run(TENANT, "t1", "r-done", "main", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status("r-done", runic_substrate::RunStatus::Success, None)
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs/steer",
+            TENANT,
+            json!({ "text": "still running" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let signals = store
+        .heartbeat_run("r-running", "inst-remote", chrono::Duration::seconds(60))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(signals.steering, ["still running"]);
+}
+
+#[tokio::test]
+async fn cancelling_a_queued_run_before_pickup_drops_it() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        workers: None,
+        broker: None,
+    });
+    store
+        .create_run(
+            TENANT,
+            "t1",
+            "r-waiting",
+            "main",
+            &runic_substrate::RunInput {
+                input: serde_json::to_value(runic_types::Message::user("go")).ok(),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    let resp = app
+        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        store
+            .get_run(TENANT, "r-waiting")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        runic_substrate::RunStatus::Cancelled
+    );
+}
+
 #[tokio::test]
 async fn run_status_for_an_unknown_or_foreign_run_is_404() {
     let store = Arc::new(MemorySessionStore::new());
@@ -1470,6 +2143,7 @@ async fn run_status_for_an_unknown_or_foreign_run_is_404() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     store
         .create_run(TENANT, "t1", "r-real", "main", &Default::default())
@@ -1514,6 +2188,7 @@ async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
         ),
         human_hub: Arc::new(HumanHub::new()),
         workers: None,
+        broker: None,
         limits: RunLimits {
             max_concurrent_runs: 1,
             ..Default::default()
@@ -1587,6 +2262,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     let resp = app
@@ -1615,6 +2291,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     let resp = failing
         .oneshot(wait_request("t2", TENANT, "boom"))

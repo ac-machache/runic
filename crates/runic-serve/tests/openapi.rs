@@ -29,6 +29,7 @@ fn app() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 

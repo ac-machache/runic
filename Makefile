@@ -1,4 +1,4 @@
-.PHONY: fmt format fmt-check check clippy test test-fast test-doc test-db test-pg test-stress test-full verify
+.PHONY: fmt format fmt-check check clippy test test-fast test-doc test-db test-redis test-pg test-stress test-full verify
 
 fmt:
 	cargo fmt
@@ -26,6 +26,9 @@ test-db:
 	bash crates/runic-substrate/scripts/test-postgres.sh
 	bash crates/runic-serve/scripts/test-postgres.sh
 
+test-redis:
+	bash crates/runic-serve/scripts/test-redis.sh
+
 test-pg: test-db
 
 test-stress:
@@ -38,4 +41,4 @@ test-full:
 	bash crates/runic-substrate/scripts/test-postgres.sh --include-ignored
 	bash crates/runic-serve/scripts/test-postgres.sh
 
-verify: fmt-check clippy test-fast test-doc test-db
+verify: fmt-check clippy test-fast test-doc test-db test-redis

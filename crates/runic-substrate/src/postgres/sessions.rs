@@ -67,7 +67,7 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
 }
 
 const RUN_COLUMNS: &str = "run_id, tenant, session_id, agent, status, error, claimed_by, \
-     lease_expires_at, input, context, created_at, updated_at";
+     lease_expires_at, input, context, cancel_requested, created_at, updated_at";
 
 fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
     let status: String = row.try_get("status").map_err(db)?;
@@ -83,6 +83,7 @@ fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
         lease_expires_at: row.try_get("lease_expires_at").map_err(db)?,
         input: row.try_get("input").map_err(db)?,
         context: row.try_get("context").map_err(db)?,
+        cancel_requested: row.try_get("cancel_requested").map_err(db)?,
         created_at: row.try_get("created_at").map_err(db)?,
         updated_at: row.try_get("updated_at").map_err(db)?,
     })
@@ -380,6 +381,12 @@ impl SessionStore for PostgresSessionStore {
             .execute(&self.pool)
             .await
             .map_err(db)?;
+        sqlx::query("DELETE FROM thread_leases WHERE tenant = $1 AND session_id = $2")
+            .bind(tenant)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
         Ok(())
     }
 
@@ -456,19 +463,138 @@ impl SessionStore for PostgresSessionStore {
         run_id: &str,
         claimed_by: &str,
         lease: chrono::Duration,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE runs
-             SET lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
-             WHERE run_id = $1 AND claimed_by = $2 AND status = 'running'",
+    ) -> Result<Option<crate::RunSignals>> {
+        let row = sqlx::query(
+            "UPDATE runs r
+             SET lease_expires_at = now() + make_interval(secs => $3),
+                 steering = NULL, updated_at = now()
+             FROM (SELECT run_id, steering FROM runs WHERE run_id = $1 FOR UPDATE) old
+             WHERE r.run_id = old.run_id AND r.claimed_by = $2 AND r.status = 'running'
+             RETURNING r.cancel_requested, old.steering",
         )
         .bind(run_id)
+        .bind(claimed_by)
+        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let cancel_requested: bool = row.try_get("cancel_requested").map_err(db)?;
+        let steering: Option<serde_json::Value> = row.try_get("steering").map_err(db)?;
+        let steering = steering
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
+            .unwrap_or_default();
+        Ok(Some(crate::RunSignals {
+            cancel_requested,
+            steering,
+        }))
+    }
+
+    async fn request_cancel_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
+        let dropped = sqlx::query(
+            "UPDATE runs SET status = 'cancelled', updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'queued' AND claimed_by IS NULL",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        if dropped.rows_affected() > 0 {
+            return Ok(true);
+        }
+        let flagged = sqlx::query(
+            "UPDATE runs SET cancel_requested = TRUE, updated_at = now()
+             WHERE run_id = $1 AND tenant = $2
+               AND status IN ('pending', 'queued', 'running')",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(flagged.rows_affected() > 0)
+    }
+
+    async fn push_steering(&self, tenant: &str, run_id: &str, text: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE runs
+             SET steering = COALESCE(steering, '[]'::jsonb) || to_jsonb($3::text),
+                 updated_at = now()
+             WHERE run_id = $1 AND tenant = $2
+               AND status IN ('pending', 'queued', 'running')",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .bind(text)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn claim_thread(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT INTO thread_leases (tenant, session_id, claimed_by, lease_expires_at)
+             VALUES ($1, $2, $3, now() + make_interval(secs => $4))
+             ON CONFLICT (tenant, session_id) DO UPDATE
+               SET claimed_by = EXCLUDED.claimed_by,
+                   lease_expires_at = EXCLUDED.lease_expires_at
+               WHERE thread_leases.lease_expires_at < now()
+                  OR thread_leases.claimed_by = EXCLUDED.claimed_by",
+        )
+        .bind(tenant)
+        .bind(session_id)
         .bind(claimed_by)
         .bind(lease.num_milliseconds() as f64 / 1000.0)
         .execute(&self.pool)
         .await
         .map_err(db)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn extend_thread_lease(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        claimed_by: &str,
+        lease: chrono::Duration,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE thread_leases
+             SET lease_expires_at = now() + make_interval(secs => $4)
+             WHERE tenant = $1 AND session_id = $2 AND claimed_by = $3",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(claimed_by)
+        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn release_thread(&self, tenant: &str, session_id: &str, claimed_by: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM thread_leases
+             WHERE tenant = $1 AND session_id = $2 AND claimed_by = $3",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(claimed_by)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
     }
 
     async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
@@ -532,6 +658,26 @@ impl SessionStore for PostgresSessionStore {
         ))
         .bind(tenant)
         .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db)?;
+        row.map(row_to_run).transpose()
+    }
+
+    async fn latest_active_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> Result<Option<crate::RunRecord>> {
+        let row = sqlx::query(&format!(
+            "SELECT {RUN_COLUMNS} FROM runs
+             WHERE tenant = $1 AND session_id = $2
+               AND status IN ('pending', 'queued', 'running')
+             ORDER BY (status = 'running') DESC, created_at DESC
+             LIMIT 1"
+        ))
+        .bind(tenant)
+        .bind(session_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(db)?;

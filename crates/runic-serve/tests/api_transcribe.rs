@@ -48,6 +48,7 @@ fn transcribe_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 

@@ -65,6 +65,7 @@ fn crud_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -79,6 +80,7 @@ fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     (app, sessions, artifacts)
 }

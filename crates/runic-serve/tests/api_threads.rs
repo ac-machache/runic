@@ -65,6 +65,7 @@ fn crud_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -77,6 +78,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 

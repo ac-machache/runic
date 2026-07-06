@@ -19,6 +19,7 @@ use crate::error::ServeError;
 use crate::factory::BoxedAgentFactory;
 
 pub const DEFAULT_PERSIST_BACKLOG_MAX: u64 = 10_000;
+const THREAD_LEASE_POLL: Duration = Duration::from_millis(250);
 const RETRY_BASE: Duration = Duration::from_millis(100);
 const RETRY_CAP: Duration = Duration::from_secs(5);
 const RETRY_ESCALATE_AFTER: u32 = 5;
@@ -126,6 +127,7 @@ impl PersistHandle {
 pub struct BegunRun {
     pub run_id: String,
     pub cancel: CancelToken,
+    pub steering_tx: mpsc::UnboundedSender<String>,
     pub steering_rx: mpsc::UnboundedReceiver<String>,
     pub events_tx: broadcast::Sender<Arc<SessionEvent>>,
     pub persist_sink: PersistSink,
@@ -145,6 +147,7 @@ type ThreadKey = (String, String);
 pub struct RunRegistry {
     instance_id: String,
     limits: RunLimits,
+    broker: Option<Arc<dyn crate::broker::EventBroker>>,
     locks: Mutex<HashMap<ThreadKey, Arc<Mutex<()>>>>,
     live: RwLock<HashMap<ThreadKey, LiveRun>>,
     persist_watch: RwLock<HashMap<ThreadKey, Arc<PersistHandle>>>,
@@ -165,10 +168,20 @@ impl RunRegistry {
         Self {
             instance_id: format!("inst-{}", uuid::Uuid::new_v4().simple()),
             limits,
+            broker: None,
             locks: Mutex::new(HashMap::new()),
             live: RwLock::new(HashMap::new()),
             persist_watch: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn with_broker(mut self, broker: Arc<dyn crate::broker::EventBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    pub fn broker(&self) -> Option<Arc<dyn crate::broker::EventBroker>> {
+        self.broker.clone()
     }
 
     pub fn instance_id(&self) -> &str {
@@ -216,15 +229,25 @@ impl RunRegistry {
                 LiveRun {
                     run_id: run_id.to_string(),
                     cancel: cancel.clone(),
-                    steering: steer_tx,
+                    steering: steer_tx.clone(),
                     events: events_tx.clone(),
                 },
+            );
+        }
+
+        if let Some(broker) = &self.broker {
+            crate::broker::spawn_broker_forwarder(
+                broker.clone(),
+                tenant.to_string(),
+                thread_id.to_string(),
+                events_tx.subscribe(),
             );
         }
 
         Ok(BegunRun {
             run_id: run_id.to_string(),
             cancel,
+            steering_tx: steer_tx,
             steering_rx: steer_rx,
             events_tx,
             persist_sink,
@@ -397,55 +420,122 @@ impl Claim {
     }
 }
 
-pub async fn claim_lease(
+pub(crate) async fn claim_lease(
     store: &Arc<dyn SessionStore>,
     registry: &RunRegistry,
-    run_id: &str,
-    cancel: CancelToken,
+    run: HeartbeatRun,
 ) -> Claim {
     let limits = registry.limits();
     let lease = as_chrono(limits.run_lease);
-    match store.claim_run(run_id, registry.instance_id(), lease).await {
+    match store
+        .claim_run(&run.run_id, registry.instance_id(), lease)
+        .await
+    {
         Ok(true) => Claim::Held(spawn_heartbeat(
             store.clone(),
-            run_id.to_string(),
+            run,
             registry.instance_id().to_string(),
             lease,
             limits.heartbeat_every,
-            cancel,
         )),
         Ok(false) => Claim::Lost,
         Err(e) => {
-            tracing::warn!(%run_id, error = %e, "run lease claim failed — running unleased");
+            tracing::warn!(run_id = %run.run_id, error = %e, "run lease claim failed — running unleased");
             Claim::Unleased
         }
     }
 }
 
+pub(crate) struct HeartbeatRun {
+    pub(crate) tenant: String,
+    pub(crate) thread_id: String,
+    pub(crate) run_id: String,
+    pub(crate) cancel: CancelToken,
+    pub(crate) steering: mpsc::UnboundedSender<String>,
+}
+
 pub(crate) fn spawn_heartbeat(
     store: Arc<dyn SessionStore>,
-    run_id: String,
+    run: HeartbeatRun,
     instance_id: String,
     lease: chrono::Duration,
     every: Duration,
-    cancel: CancelToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(every).await;
-            match store.heartbeat_run(&run_id, &instance_id, lease).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    tracing::warn!(%run_id, "run lease lost — cancelling the run");
-                    cancel.cancel();
+            match store.heartbeat_run(&run.run_id, &instance_id, lease).await {
+                Ok(Some(signals)) => {
+                    if signals.cancel_requested {
+                        tracing::info!(run_id = %run.run_id, "cross-instance cancel picked up");
+                        run.cancel.cancel();
+                    }
+                    for text in signals.steering {
+                        let _ = run.steering.send(text);
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(run_id = %run.run_id, "run lease lost — cancelling the run");
+                    run.cancel.cancel();
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!(%run_id, error = %e, "run heartbeat failed");
+                    tracing::warn!(run_id = %run.run_id, error = %e, "run heartbeat failed");
                 }
+            }
+            if let Err(e) = store
+                .extend_thread_lease(&run.tenant, &run.thread_id, &instance_id, lease)
+                .await
+                && !matches!(e, runic_substrate::Error::Unsupported(_))
+            {
+                tracing::warn!(run_id = %run.run_id, error = %e, "thread lease extension failed");
             }
         }
     })
+}
+
+pub(crate) async fn acquire_thread_lease(
+    store: &Arc<dyn SessionStore>,
+    registry: &RunRegistry,
+    tenant: &str,
+    thread_id: &str,
+    cancel: &CancelToken,
+) -> bool {
+    let lease = as_chrono(registry.limits().run_lease);
+    loop {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        match store
+            .claim_thread(tenant, thread_id, registry.instance_id(), lease)
+            .await
+        {
+            Ok(true) => return true,
+            Ok(false) => {
+                tokio::time::sleep(THREAD_LEASE_POLL).await;
+            }
+            Err(runic_substrate::Error::Unsupported(_)) => return true,
+            Err(e) => {
+                tracing::warn!(%tenant, %thread_id, error = %e, "thread lease claim failed");
+                tokio::time::sleep(THREAD_LEASE_POLL).await;
+            }
+        }
+    }
+}
+
+pub(crate) async fn release_thread_lease(
+    store: &Arc<dyn SessionStore>,
+    registry: &RunRegistry,
+    tenant: &str,
+    thread_id: &str,
+) {
+    if let Err(e) = store
+        .release_thread(tenant, thread_id, registry.instance_id())
+        .await
+        && !matches!(e, runic_substrate::Error::Unsupported(_))
+    {
+        tracing::warn!(%tenant, %thread_id, error = %e, "thread lease release failed");
+    }
 }
 
 pub fn spawn_lease_reaper(
@@ -595,6 +685,18 @@ mod tests {
             "solo".to_string(),
             Arc::new(TestFactory) as BoxedAgentFactory,
         )]))
+    }
+
+    fn hb(run_id: &str) -> HeartbeatRun {
+        let (steer_tx, _steer_rx) = mpsc::unbounded_channel();
+        std::mem::forget(_steer_rx);
+        HeartbeatRun {
+            tenant: "t".into(),
+            thread_id: "s".into(),
+            run_id: run_id.into(),
+            cancel: CancelToken::new(),
+            steering: steer_tx,
+        }
     }
 
     fn message_event(i: usize) -> SessionEvent {
@@ -974,7 +1076,7 @@ mod tests {
             .create_run("t", "s", "r-mine", "main", &Default::default())
             .await
             .unwrap();
-        let claim = claim_lease(&store, &registry, "r-mine", CancelToken::new()).await;
+        let claim = claim_lease(&store, &registry, hb("r-mine")).await;
         assert!(matches!(claim, Claim::Held(_)));
         claim.release();
         let rec = store.get_run("t", "r-mine").await.unwrap().unwrap();
@@ -988,11 +1090,11 @@ mod tests {
             .claim_run("r-taken", "someone-else", chrono::Duration::seconds(30))
             .await
             .unwrap();
-        let claim = claim_lease(&store, &registry, "r-taken", CancelToken::new()).await;
+        let claim = claim_lease(&store, &registry, hb("r-taken")).await;
         assert!(matches!(claim, Claim::Lost));
 
         let unsupported: Arc<dyn SessionStore> = Arc::new(NoRunRowsStore);
-        let claim = claim_lease(&unsupported, &registry, "r-any", CancelToken::new()).await;
+        let claim = claim_lease(&unsupported, &registry, hb("r-any")).await;
         assert!(matches!(claim, Claim::Unleased));
     }
 
@@ -1008,7 +1110,9 @@ mod tests {
             ..Default::default()
         });
         let cancel = CancelToken::new();
-        let claim = claim_lease(&store, &registry, "r-1", cancel.clone()).await;
+        let mut run = hb("r-1");
+        run.cancel = cancel.clone();
+        let claim = claim_lease(&store, &registry, run).await;
         assert!(matches!(claim, Claim::Held(_)));
 
         store
@@ -1024,6 +1128,77 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("losing the lease never cancelled the run");
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_delivers_cross_instance_signals() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        store
+            .create_run("t", "s", "r-1", "main", &Default::default())
+            .await
+            .unwrap();
+        let registry = RunRegistry::with_limits(RunLimits {
+            heartbeat_every: Duration::from_millis(10),
+            ..Default::default()
+        });
+        let cancel = CancelToken::new();
+        let (steer_tx, mut steer_rx) = mpsc::unbounded_channel();
+        let claim = claim_lease(
+            &store,
+            &registry,
+            HeartbeatRun {
+                tenant: "t".into(),
+                thread_id: "s".into(),
+                run_id: "r-1".into(),
+                cancel: cancel.clone(),
+                steering: steer_tx,
+            },
+        )
+        .await;
+        assert!(matches!(claim, Claim::Held(_)));
+
+        store.push_steering("t", "r-1", "go left").await.unwrap();
+        store.request_cancel_run("t", "r-1").await.unwrap();
+
+        let mut steered = None;
+        for _ in 0..200 {
+            if let Ok(text) = steer_rx.try_recv() {
+                steered = Some(text);
+            }
+            if cancel.is_cancelled() && steered.is_some() {
+                claim.release();
+                assert_eq!(steered.as_deref(), Some("go left"));
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("heartbeat never delivered the signals");
+    }
+
+    #[tokio::test]
+    async fn thread_lease_acquisition_waits_out_a_foreign_lease() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+        let registry = RunRegistry::new();
+        store
+            .claim_thread("t", "s", "inst-other", chrono::Duration::milliseconds(200))
+            .await
+            .unwrap();
+
+        let start = std::time::Instant::now();
+        assert!(acquire_thread_lease(&store, &registry, "t", "s", &CancelToken::new()).await);
+        assert!(start.elapsed() >= Duration::from_millis(150));
+
+        store
+            .claim_thread("t", "s2", "inst-other", chrono::Duration::seconds(60))
+            .await
+            .unwrap();
+        let cancel = CancelToken::new();
+        let killer = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            killer.cancel();
+        });
+        assert!(!acquire_thread_lease(&store, &registry, "t", "s2", &cancel).await);
     }
 
     #[tokio::test]

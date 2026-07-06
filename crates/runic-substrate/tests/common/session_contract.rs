@@ -964,8 +964,20 @@ pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionS
         .unwrap();
 
     let lease = chrono::Duration::seconds(60);
-    assert!(!store.heartbeat_run(&r, "instance-b", lease).await.unwrap());
-    assert!(store.heartbeat_run(&r, "instance-a", lease).await.unwrap());
+    assert!(
+        store
+            .heartbeat_run(&r, "instance-b", lease)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .heartbeat_run(&r, "instance-a", lease)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let extended = store
         .get_run(&t, &r)
         .await
@@ -979,7 +991,13 @@ pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionS
         .set_run_status(&r, RunStatus::Success, None)
         .await
         .unwrap();
-    assert!(!store.heartbeat_run(&r, "instance-a", lease).await.unwrap());
+    assert!(
+        store
+            .heartbeat_run(&r, "instance-a", lease)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
@@ -1109,6 +1127,426 @@ pub async fn queued_runs_dequeue_oldest_first_and_release_requeues(store: &dyn S
         store.get_run(&t, &b).await.unwrap().unwrap().status,
         RunStatus::Running,
         "release by a non-owner is a no-op"
+    );
+}
+
+pub async fn thread_leases_fence_claim_extend_release(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let lease = chrono::Duration::seconds(60);
+
+    assert!(store.claim_thread(&t, &s, "inst-a", lease).await.unwrap());
+    assert!(!store.claim_thread(&t, &s, "inst-b", lease).await.unwrap());
+    assert!(store.claim_thread(&t, &s, "inst-a", lease).await.unwrap());
+
+    assert!(
+        !store
+            .extend_thread_lease(&t, &s, "inst-b", lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .extend_thread_lease(&t, &s, "inst-a", lease)
+            .await
+            .unwrap()
+    );
+
+    store.release_thread(&t, &s, "inst-b").await.unwrap();
+    assert!(!store.claim_thread(&t, &s, "inst-b", lease).await.unwrap());
+    store.release_thread(&t, &s, "inst-a").await.unwrap();
+    assert!(store.claim_thread(&t, &s, "inst-b", lease).await.unwrap());
+
+    let (t2, s2) = tenant_session();
+    assert!(
+        store
+            .claim_thread(&t2, &s2, "inst-a", chrono::Duration::seconds(-1))
+            .await
+            .unwrap()
+    );
+    assert!(store.claim_thread(&t2, &s2, "inst-b", lease).await.unwrap());
+}
+
+pub async fn thread_leases_are_tenant_and_session_scoped(store: &dyn SessionStore) {
+    let tenant = uid("tenant");
+    let session = uid("session");
+    let lease = chrono::Duration::seconds(60);
+
+    assert!(
+        store
+            .claim_thread(&tenant, &session, "inst-a", lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .claim_thread(&format!("{tenant}-other"), &session, "inst-b", lease)
+            .await
+            .unwrap(),
+        "same session id in another tenant must not be fenced"
+    );
+    assert!(
+        store
+            .claim_thread(&tenant, &format!("{session}-other"), "inst-b", lease)
+            .await
+            .unwrap(),
+        "another session in the same tenant must not be fenced"
+    );
+
+    store
+        .release_thread(&format!("{tenant}-other"), &session, "inst-b")
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .claim_thread(&tenant, &session, "inst-c", lease)
+            .await
+            .unwrap(),
+        "releasing another tenant's lease must not release this tenant"
+    );
+    store
+        .release_thread(&tenant, &format!("{session}-other"), "inst-b")
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .claim_thread(&tenant, &session, "inst-c", lease)
+            .await
+            .unwrap(),
+        "releasing another session's lease must not release this session"
+    );
+}
+
+pub async fn cancel_and_steering_signals_flow_through_the_heartbeat(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    let lease = chrono::Duration::seconds(60);
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+
+    assert!(store.push_steering(&t, &r, "focus on rust").await.unwrap());
+    assert!(store.push_steering(&t, &r, "be brief").await.unwrap());
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signals.cancel_requested);
+    assert_eq!(signals.steering, ["focus on rust", "be brief"]);
+
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signals.cancel_requested);
+    assert!(signals.steering.is_empty(), "steering drains exactly once");
+
+    assert!(
+        !store
+            .request_cancel_run(&t, &uid("r-missing"))
+            .await
+            .unwrap()
+    );
+    store
+        .set_run_status(&r, RunStatus::Success, None)
+        .await
+        .unwrap();
+    assert!(!store.push_steering(&t, &r, "too late").await.unwrap());
+    assert!(!store.request_cancel_run(&t, &r).await.unwrap());
+}
+
+pub async fn cancelling_an_unclaimed_queued_run_drops_it(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("q");
+    store
+        .create_run(
+            &t,
+            &s,
+            &r,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("go")),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Cancelled);
+    assert!(!rec.cancel_requested, "dropped, not flagged");
+}
+
+pub async fn cancelling_a_pending_run_flags_it_for_the_owner(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("pending");
+    let lease = chrono::Duration::seconds(60);
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Pending);
+    assert!(rec.cancel_requested);
+
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signals.cancel_requested);
+}
+
+pub async fn cancelled_queued_runs_are_not_dequeued(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let cancelled = uid("q-cancelled");
+    let live = uid("q-live");
+    store
+        .create_run(
+            &t,
+            &s,
+            &cancelled,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("cancel me")),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .create_run(
+            &t,
+            &s,
+            &live,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("run me")),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(store.request_cancel_run(&t, &cancelled).await.unwrap());
+
+    let mut claimed = Vec::new();
+    for _ in 0..10 {
+        if let Some(run) = store
+            .claim_next_queued_run("inst-a", chrono::Duration::seconds(60))
+            .await
+            .unwrap()
+        {
+            claimed.push(run.run_id);
+        }
+    }
+
+    assert_eq!(claimed, vec![live]);
+    assert_eq!(
+        store.get_run(&t, &cancelled).await.unwrap().unwrap().status,
+        RunStatus::Cancelled
+    );
+}
+
+pub async fn steering_is_rejected_after_a_queued_run_is_cancelled(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("queued");
+    store
+        .create_run(
+            &t,
+            &s,
+            &r,
+            "coral",
+            &runic_substrate::RunInput {
+                input: Some(serde_json::json!("go")),
+                context: None,
+                queued: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+    assert!(!store.push_steering(&t, &r, "too late").await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Cancelled);
+}
+
+pub async fn terminal_runs_reject_late_signals(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    for status in [RunStatus::Success, RunStatus::Error, RunStatus::Cancelled] {
+        let r = uid("terminal");
+        store
+            .create_run(&t, &s, &r, "coral", &Default::default())
+            .await
+            .unwrap();
+        store
+            .set_run_status(&r, status, Some("done"))
+            .await
+            .unwrap();
+
+        assert!(!store.request_cancel_run(&t, &r).await.unwrap());
+        assert!(!store.push_steering(&t, &r, "too late").await.unwrap());
+        assert!(
+            store
+                .heartbeat_run(&r, "inst-a", chrono::Duration::seconds(60))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+pub async fn signal_operations_are_tenant_scoped(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    let lease = chrono::Duration::seconds(60);
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+
+    assert!(!store.request_cancel_run("other-tenant", &r).await.unwrap());
+    assert!(
+        !store
+            .push_steering("other-tenant", &r, "foreign nudge")
+            .await
+            .unwrap()
+    );
+
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!signals.cancel_requested);
+    assert!(signals.steering.is_empty());
+}
+
+pub async fn wrong_heartbeat_owner_does_not_drain_signals(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    let lease = chrono::Duration::seconds(60);
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+    assert!(store.push_steering(&t, &r, "keep me").await.unwrap());
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+
+    assert!(
+        store
+            .heartbeat_run(&r, "inst-b", lease)
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-owner heartbeat must not see or drain signals"
+    );
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(signals.cancel_requested);
+    assert_eq!(signals.steering, ["keep me"]);
+}
+
+pub async fn multiple_steering_messages_keep_fifo_order(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    let lease = chrono::Duration::seconds(60);
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+
+    for i in 0..20 {
+        assert!(
+            store
+                .push_steering(&t, &r, &format!("nudge-{i:02}"))
+                .await
+                .unwrap()
+        );
+    }
+    let signals = store
+        .heartbeat_run(&r, "inst-a", lease)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected: Vec<String> = (0..20).map(|i| format!("nudge-{i:02}")).collect();
+    assert_eq!(signals.steering, expected);
+}
+
+pub async fn delete_session_clears_run_signals_and_thread_lease(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("r");
+    let lease = chrono::Duration::seconds(60);
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    assert!(store.claim_run(&r, "inst-a", lease).await.unwrap());
+    assert!(store.claim_thread(&t, &s, "inst-a", lease).await.unwrap());
+    assert!(store.push_steering(&t, &r, "orphan me").await.unwrap());
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+
+    store.delete_session(&t, &s).await.unwrap();
+
+    assert!(store.get_run(&t, &r).await.unwrap().is_none());
+    assert!(!store.request_cancel_run(&t, &r).await.unwrap());
+    assert!(!store.push_steering(&t, &r, "too late").await.unwrap());
+    assert!(
+        store.claim_thread(&t, &s, "inst-b", lease).await.unwrap(),
+        "deleting a thread must not leave a stale thread lease behind"
+    );
+}
+
+pub async fn delete_session_does_not_clear_other_tenant_thread_lease(store: &dyn SessionStore) {
+    let session = uid("shared-session");
+    let lease = chrono::Duration::seconds(60);
+    assert!(
+        store
+            .claim_thread("tenant-a", &session, "inst-a", lease)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .claim_thread("tenant-b", &session, "inst-b", lease)
+            .await
+            .unwrap()
+    );
+
+    store.delete_session("tenant-a", &session).await.unwrap();
+
+    assert!(
+        store
+            .claim_thread("tenant-a", &session, "inst-c", lease)
+            .await
+            .unwrap(),
+        "deleted tenant's lease should be gone"
+    );
+    assert!(
+        !store
+            .claim_thread("tenant-b", &session, "inst-c", lease)
+            .await
+            .unwrap(),
+        "deleting tenant-a must not release tenant-b's lease"
     );
 }
 

@@ -131,6 +131,7 @@ fn crud_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -143,6 +144,7 @@ fn failing_store_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -155,6 +157,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -167,6 +170,7 @@ fn failing_agent_router() -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 

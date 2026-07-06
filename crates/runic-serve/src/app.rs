@@ -61,6 +61,9 @@ pub struct ServeConfig {
     /// only records the run; polling workers (this instance's and any other
     /// instance's) claim and execute. `None` (default) executes in-process.
     pub workers: Option<WorkerConfig>,
+    /// Cross-instance live event fan-out (e.g. [`crate::RedisBroker`]). `None`
+    /// (default) keeps live SSE attach instance-local; replay always works.
+    pub broker: Option<Arc<dyn crate::broker::EventBroker>>,
 }
 
 pub fn single_agent(
@@ -71,12 +74,16 @@ pub fn single_agent(
 }
 
 fn app_state(config: ServeConfig) -> (AppState, Option<WorkerConfig>) {
+    let mut registry = RunRegistry::with_limits(config.limits);
+    if let Some(broker) = config.broker {
+        registry = registry.with_broker(broker);
+    }
     let state = AppState {
         session_store: config.session_store,
         artifact_store: config.artifact_store,
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
-        runs: Arc::new(RunRegistry::with_limits(config.limits)),
+        runs: Arc::new(registry),
         human_hub: config.human_hub,
         queue_runs: config.workers.is_some(),
     };

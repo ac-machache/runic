@@ -41,6 +41,7 @@ fn make_router() -> axum::Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -94,6 +95,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -139,6 +141,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> axum::Router
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     })
 }
 
@@ -520,6 +523,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     create_thread(&app, "with-artifact").await;
 
@@ -570,6 +574,7 @@ async fn tenant_header_isolates_thread_listings() {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
 
     // Alice creates a thread via CRUD (no agent path → PanicFactory is safe).
@@ -1141,6 +1146,7 @@ fn resolving_setup() -> (
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
+        broker: None,
     });
     (app, session, artifacts, last)
 }

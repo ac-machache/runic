@@ -486,6 +486,49 @@ async fn memory_review_waits_until_interval() {
     assert_eq!(provider.count(), 1);
 }
 
+#[tokio::test]
+async fn memory_review_counts_runs_across_rebuilds() {
+    let provider = Arc::new(RecordingProvider::default());
+    let memory_dir = tempfile::tempdir().unwrap();
+    let mut assembly = base_assembly(provider.clone());
+    assembly.memory = Some(
+        memory(memory_dir.path())
+            .init()
+            .include_memory_tool()
+            .curate_every_turns(2),
+    );
+
+    let mut first = assemble(&assembly, "alice", "s1").await;
+    first.run("one").await.unwrap();
+    assert_eq!(provider.count(), 1, "run one: review not due yet");
+    let log: Vec<runic_state::SessionEvent> = first.state().events().to_vec();
+
+    let mut second = assemble(&assembly, "alice", "s1").await;
+    for event in log {
+        second.state_mut().fold_event(event);
+    }
+    second.run("two").await.unwrap();
+
+    for _ in 0..50 {
+        if provider.count() >= 3 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        provider.count(),
+        3,
+        "a rebuilt agent must still know run one happened — the schedule lives in state"
+    );
+    assert_eq!(
+        second
+            .state()
+            .get("memory-curator/last-review-run")
+            .and_then(|v| v.as_u64()),
+        Some(2)
+    );
+}
+
 struct EchoTool;
 #[async_trait]
 impl Tool for EchoTool {

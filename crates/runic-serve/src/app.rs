@@ -64,6 +64,7 @@ pub struct ServeConfig {
     /// Cross-instance live event fan-out (e.g. [`crate::RedisBroker`]). `None`
     /// (default) keeps live SSE attach instance-local; replay always works.
     pub broker: Option<Arc<dyn crate::broker::EventBroker>>,
+    pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
 }
 
 pub fn single_agent(
@@ -73,7 +74,13 @@ pub fn single_agent(
     HashMap::from([(name.into(), factory)])
 }
 
-fn app_state(config: ServeConfig) -> (AppState, Option<WorkerConfig>) {
+fn app_state(
+    config: ServeConfig,
+) -> (
+    AppState,
+    Option<WorkerConfig>,
+    Option<Arc<dyn crate::auth::IdentityResolver>>,
+) {
     let mut registry = RunRegistry::with_limits(config.limits);
     if let Some(broker) = config.broker {
         registry = registry.with_broker(broker);
@@ -87,12 +94,12 @@ fn app_state(config: ServeConfig) -> (AppState, Option<WorkerConfig>) {
         human_hub: config.human_hub,
         queue_runs: config.workers.is_some(),
     };
-    (state, config.workers)
+    (state, config.workers, config.identity)
 }
 
 pub fn bare_router(config: ServeConfig) -> Router {
-    let (state, _) = app_state(config);
-    routes(state)
+    let (state, _, identity) = app_state(config);
+    crate::auth::apply(routes(state), identity)
 }
 
 fn routes(state: AppState) -> Router {
@@ -162,7 +169,7 @@ fn routes(state: AppState) -> Router {
 
 pub fn router(config: ServeConfig) -> Router {
     let reap_every = config.limits.reap_every;
-    let (state, workers) = app_state(config);
+    let (state, workers, identity) = app_state(config);
     if tokio::runtime::Handle::try_current().is_ok() {
         spawn_lease_reaper(state.session_store.clone(), reap_every);
         if let Some(worker_config) = workers {
@@ -176,39 +183,41 @@ pub fn router(config: ServeConfig) -> Router {
     } else {
         tracing::warn!("router built outside a tokio runtime — background loops not started");
     }
-    routes(state).layer(CorsLayer::permissive()).layer(
-        ServiceBuilder::new()
-            .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
-            .layer(
-                TraceLayer::new_for_http()
-                    .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-                        let request_id = request
-                            .extensions()
-                            .get::<RequestId>()
-                            .and_then(|id| id.header_value().to_str().ok())
-                            .unwrap_or("-")
-                            .to_string();
-                        tracing::info_span!(
-                            "http_request",
-                            method = %request.method(),
-                            path = %request.uri().path(),
-                            request_id = %request_id,
-                        )
-                    })
-                    .on_response(
-                        |response: &axum::response::Response,
-                         latency: Duration,
-                         _span: &tracing::Span| {
-                            tracing::info!(
-                                status = %response.status().as_u16(),
-                                latency_ms = %latency.as_millis(),
-                                "request completed"
-                            );
-                        },
-                    ),
-            )
-            .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
-    )
+    crate::auth::apply(routes(state), identity)
+        .layer(CorsLayer::permissive())
+        .layer(
+            ServiceBuilder::new()
+                .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                            let request_id = request
+                                .extensions()
+                                .get::<RequestId>()
+                                .and_then(|id| id.header_value().to_str().ok())
+                                .unwrap_or("-")
+                                .to_string();
+                            tracing::info_span!(
+                                "http_request",
+                                method = %request.method(),
+                                path = %request.uri().path(),
+                                request_id = %request_id,
+                            )
+                        })
+                        .on_response(
+                            |response: &axum::response::Response,
+                             latency: Duration,
+                             _span: &tracing::Span| {
+                                tracing::info!(
+                                    status = %response.status().as_u16(),
+                                    latency_ms = %latency.as_millis(),
+                                    "request completed"
+                                );
+                            },
+                        ),
+                )
+                .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
+        )
 }
 
 pub async fn serve(

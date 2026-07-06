@@ -17,7 +17,7 @@
 //! It does NOT know about:
 //!   - Which provider / tools / hooks / skills are wired (the binary
 //!     decides via its [`AgentFactory`] impl)
-//!   - Auth (just reads a tenant out of the `X-Runic-Tenant` header)
+//!   - Token validation (consumer-owned via [`auth::IdentityResolver`])
 //!   - LangGraph compatibility (this is the runic-native wire format —
 //!     a thin direct serialization of our internal events)
 //!
@@ -36,6 +36,7 @@
 //! store-assigned seq number from [`SessionStore`].
 
 pub mod app;
+pub mod auth;
 pub mod broker;
 pub mod error;
 pub mod executor;
@@ -48,6 +49,7 @@ pub mod tenant;
 pub mod wire;
 
 pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
+pub use auth::{Identity, IdentityError, IdentityResolver};
 pub use broker::{EventBroker, RedisBroker};
 pub use error::ServeError;
 pub use executor::{WorkerConfig, spawn_run_workers};

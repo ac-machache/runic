@@ -132,6 +132,7 @@ fn crud_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -145,6 +146,7 @@ fn failing_store_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -158,6 +160,7 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -171,6 +174,7 @@ fn failing_agent_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 

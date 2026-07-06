@@ -225,6 +225,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -239,6 +240,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
     (app, artifacts)
 }
@@ -253,6 +255,7 @@ fn failing_run_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -266,6 +269,7 @@ fn asking_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 
@@ -287,6 +291,7 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
     (app, entered, gate)
 }
@@ -1027,6 +1032,7 @@ async fn wait_response_implies_the_run_is_durable() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app
@@ -1059,6 +1065,7 @@ async fn stream_done_implies_the_run_is_durable() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app
@@ -1166,6 +1173,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let run_app = app.clone();
@@ -1242,6 +1250,7 @@ async fn background_run_returns_202_and_completes_detached() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app
@@ -1328,6 +1337,7 @@ async fn background_run_failure_lands_in_the_run_row() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app
@@ -1366,6 +1376,7 @@ fn queued_router(store: Arc<dyn SessionStore>) -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         broker: None,
+        identity: None,
         workers: Some(runic_serve::WorkerConfig {
             max_concurrent_runs: 4,
             poll_every: Duration::from_millis(20),
@@ -1536,6 +1547,7 @@ fn broker_replay_router(
         limits: Default::default(),
         workers: None,
         broker: Some(broker),
+        identity: None,
     })
 }
 
@@ -1556,6 +1568,7 @@ async fn a_viewer_on_another_instance_gets_the_live_tail_via_the_broker() {
             limits: Default::default(),
             workers: None,
             broker: Some(broker.clone()),
+            identity: None,
         })
     };
     let executor = instance(Arc::new(GatedFactory {
@@ -2100,6 +2113,7 @@ async fn cancelling_a_queued_run_before_pickup_drops_it() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
     store
         .create_run(
@@ -2144,6 +2158,7 @@ async fn run_status_for_an_unknown_or_foreign_run_is_404() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
     store
         .create_run(TENANT, "t1", "r-real", "main", &Default::default())
@@ -2189,6 +2204,7 @@ async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
         human_hub: Arc::new(HumanHub::new()),
         workers: None,
         broker: None,
+        identity: None,
         limits: RunLimits {
             max_concurrent_runs: 1,
             ..Default::default()
@@ -2263,6 +2279,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app
@@ -2292,6 +2309,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
     let resp = failing
         .oneshot(wait_request("t2", TENANT, "boom"))

@@ -82,6 +82,7 @@ fn make_router(sessions: Arc<dyn SessionStore>, artifacts: Arc<dyn ArtifactStore
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 

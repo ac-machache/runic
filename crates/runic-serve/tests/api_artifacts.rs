@@ -32,6 +32,7 @@ fn crud_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     })
 }
 

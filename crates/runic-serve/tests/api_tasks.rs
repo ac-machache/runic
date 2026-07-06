@@ -123,6 +123,7 @@ async fn a_background_task_is_durable_without_another_run() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        identity: None,
     });
 
     let resp = app

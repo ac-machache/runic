@@ -1,11 +1,3 @@
-//! `Tenant` extractor — pulls the value of `X-Runic-Tenant` off the
-//! request (or falls back to `"default"`).
-//!
-//! This is the lightest possible auth surface: we trust the header.
-//! Behind a real gateway this is fine; for production you'd swap this
-//! out for a proper auth middleware that validates a token and emits
-//! the same `Tenant` extension.
-
 use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use axum::http::request::Parts;
 use std::convert::Infallible;
@@ -30,6 +22,9 @@ impl<S: Send + Sync> FromRequestParts<S> for Tenant {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        if let Some(identity) = parts.extensions.get::<crate::auth::Identity>() {
+            return Ok(Tenant(identity.tenant.clone()));
+        }
         let value = parts
             .headers
             .get(TENANT_HEADER)

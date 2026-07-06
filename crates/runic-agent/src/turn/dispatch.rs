@@ -16,6 +16,7 @@ use runic_hook::HookOutcome;
 use runic_state::HookLifecycle;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, ToolCall};
+use tracing::Instrument;
 
 use crate::loop_guard::Verdict;
 use crate::turn::hooks::outcome_kind;
@@ -169,7 +170,7 @@ impl Agent {
                     let call = plans[i].call().clone();
                     let tool = self.resolve_tool(&call.name);
                     let ctx = self.tool_context(run_id);
-                    async move { (i, dispatch_one(tool, call, ctx, timeout).await) }
+                    async move { (i, dispatch_one(tool, call, ctx, timeout, true).await) }
                 })
                 .collect();
             for (i, r) in futures::future::join_all(futs).await {
@@ -188,7 +189,7 @@ impl Agent {
                 let call = call.clone();
                 let tool = self.resolve_tool(&call.name);
                 let ctx = self.tool_context(run_id);
-                results[i] = Some(dispatch_one(tool, call, ctx, timeout).await);
+                results[i] = Some(dispatch_one(tool, call, ctx, timeout, false).await);
             }
         }
 
@@ -270,6 +271,7 @@ impl Agent {
             .iter()
             .filter(|b| matches!(b, ContentBlock::ToolResult { is_error: true, .. }))
             .count();
+        tracing::Span::current().record("errors", errors);
         tracing::debug!(
             run_id,
             batch_size = blocks.len(),
@@ -316,9 +318,33 @@ async fn dispatch_one(
     call: ToolCall,
     ctx: ToolContext,
     timeout: Duration,
+    parallel: bool,
+) -> ToolResult {
+    let span = tracing::info_span!(
+        "tool",
+        name = %call.name,
+        call_id = %call.id,
+        parallel,
+        is_error = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
+    let result = dispatch_one_inner(tool, call, ctx, timeout, &span)
+        .instrument(span.clone())
+        .await;
+    span.record("is_error", !result.success);
+    result
+}
+
+async fn dispatch_one_inner(
+    tool: Option<Arc<dyn Tool>>,
+    call: ToolCall,
+    ctx: ToolContext,
+    timeout: Duration,
+    span: &tracing::Span,
 ) -> ToolResult {
     let Some(tool) = tool else {
         tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "unknown tool");
+        span.record("outcome", "unknown_tool");
         return ToolResult::error(format!("unknown tool: {}", call.name));
     };
     // Catch panics so a buggy tool can NEVER abort the run task (which would
@@ -335,19 +361,25 @@ async fn dispatch_one(
                     error = %result.error.as_deref().unwrap_or(&result.output),
                     "tool returned error"
                 );
+                span.record("outcome", "error");
+            } else {
+                span.record("outcome", "ok");
             }
             result
         }
         Ok(Ok(Err(e))) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, error = %e, "tool returned error");
+            span.record("outcome", "error");
             ToolResult::error(format!("tool '{}' failed: {e}", call.name))
         }
         Ok(Err(_panic)) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "tool panicked");
+            span.record("outcome", "panic");
             ToolResult::error(format!("tool '{}' panicked", call.name))
         }
         Err(_) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, timeout_s = timeout.as_secs(), "tool timed out");
+            span.record("outcome", "timeout");
             ToolResult::error(format!(
                 "tool '{}' timed out after {}s",
                 call.name,

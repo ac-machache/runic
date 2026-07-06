@@ -24,7 +24,7 @@ use runic_tool::{ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, T
 use tokio::sync::mpsc;
 
 mod external;
-mod run;
+pub(crate) mod run;
 mod turn;
 
 pub mod loop_guard;
@@ -141,6 +141,9 @@ pub struct RunContext {
     pub agent: Option<String>,
     /// Optional pre-generated run id; the loop generates one when absent.
     pub run_id: Option<String>,
+    /// Invocation mode recorded on the run trace span (`stream` / `wait` /
+    /// `background` / `queued`); defaults to `direct`.
+    pub mode: Option<&'static str>,
 }
 
 impl RunContext {
@@ -190,6 +193,11 @@ impl RunContext {
 
     pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
         self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn with_mode(mut self, mode: &'static str) -> Self {
+        self.mode = Some(mode);
         self
     }
 }

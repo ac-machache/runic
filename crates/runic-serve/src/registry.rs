@@ -14,6 +14,7 @@ use runic_agent::{Agent, CancelToken};
 use runic_state::{EVENT_BROADCAST_CAPACITY, PersistSink, SessionEvent};
 use runic_substrate::SessionStore;
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
+use tracing::Instrument;
 
 use crate::error::ServeError;
 use crate::factory::BoxedAgentFactory;
@@ -357,6 +358,26 @@ pub async fn hydrate_agent(
     thread_id: &str,
     begun: &mut BegunRun,
 ) -> Agent {
+    let span = tracing::info_span!(
+        "hydrate",
+        tenant = %tenant,
+        thread = %thread_id,
+        stateless = factory.stateless(),
+        events = tracing::field::Empty,
+    );
+    hydrate_agent_inner(store, factory, tenant, thread_id, begun, &span)
+        .instrument(span.clone())
+        .await
+}
+
+async fn hydrate_agent_inner(
+    store: &Arc<dyn SessionStore>,
+    factory: &BoxedAgentFactory,
+    tenant: &str,
+    thread_id: &str,
+    begun: &mut BegunRun,
+    span: &tracing::Span,
+) -> Agent {
     let mut agent = factory.build(tenant, thread_id).await;
 
     if factory.stateless() {
@@ -373,6 +394,7 @@ pub async fn hydrate_agent(
     // look in-flight on a fresh agent.
     match store.read_tail(tenant, thread_id).await {
         Ok(stored) => {
+            span.record("events", stored.len());
             for entry in stored {
                 if matches!(
                     entry.event,

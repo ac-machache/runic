@@ -11,6 +11,8 @@ use runic_state::{RunOutcome, SessionEvent, new_run_id};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
+use tracing::Instrument;
+
 use crate::turn::Point;
 use crate::{Agent, AgentError, CancelToken, RunContext};
 
@@ -60,8 +62,20 @@ impl Agent {
         let cancel = ctx.cancel.take();
         let mut steering = ctx.steering.take();
         let agent_label = ctx.agent.take();
-        let run_id = ctx.run_id.take();
+        let run_id = ctx.run_id.take().unwrap_or_else(new_run_id);
 
+        let span = tracing::info_span!(
+            "run",
+            run_id = %run_id,
+            tenant = %self.state.user_id,
+            thread = %self.state.session_id,
+            mode = ctx.mode.unwrap_or("direct"),
+            total_turns = tracing::field::Empty,
+            input_tokens = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            stop_reason = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
         let result = self
             .run_loop(
                 user_msg,
@@ -70,7 +84,20 @@ impl Agent {
                 cancel.as_ref(),
                 steering.as_mut(),
             )
+            .instrument(span.clone())
             .await;
+        match &result {
+            Ok(outcome) => {
+                span.record("total_turns", outcome.total_turns);
+                span.record("input_tokens", outcome.usage.input_tokens);
+                span.record("output_tokens", outcome.usage.output_tokens);
+                span.record("stop_reason", outcome.stop_reason.as_deref().unwrap_or("-"));
+            }
+            Err(e) => {
+                span.record("stop_reason", tracing::field::display(e));
+                span.record("otel.status_code", "ERROR");
+            }
+        }
 
         self.events = None; // drop the sink (closes the receiver)
         self.human = None; // drop the per-run human channel
@@ -89,12 +116,11 @@ impl Agent {
     async fn run_loop(
         &mut self,
         user_msg: Message,
-        run_id: Option<String>,
+        run_id: String,
         agent_label: Option<String>,
         cancel: Option<&CancelToken>,
         mut steering: Option<&mut mpsc::UnboundedReceiver<String>>,
     ) -> Result<RunOutcome, AgentError> {
-        let run_id = run_id.unwrap_or_else(new_run_id);
         self.guard.reset();
 
         let now = Utc::now();
@@ -166,7 +192,11 @@ impl Agent {
             }
 
             tracing::debug!(%run_id, turn = total_turns + 1, "turn started");
-            let turn = match self.run_one_turn(&run_id).await {
+            let turn = match self
+                .run_one_turn(&run_id)
+                .instrument(tracing::info_span!("turn", n = total_turns + 1))
+                .await
+            {
                 Ok(t) => t,
                 Err(e) => break Err(e),
             };
@@ -212,7 +242,16 @@ impl Agent {
                 break Ok(stop_reason_str(turn.stop_reason).to_string());
             }
 
-            if let Err(e) = self.dispatch_tools(turn.tool_calls, &run_id).await {
+            let dispatch_span = tracing::info_span!(
+                "dispatch",
+                batch = turn.tool_calls.len(),
+                errors = tracing::field::Empty,
+            );
+            if let Err(e) = self
+                .dispatch_tools(turn.tool_calls, &run_id)
+                .instrument(dispatch_span)
+                .await
+            {
                 break Err(e);
             }
         };
@@ -285,7 +324,7 @@ fn add_usage(total: &mut TokenUsage, delta: &TokenUsage) {
     total.output_tokens += delta.output_tokens;
 }
 
-fn stop_reason_str(s: StopReason) -> &'static str {
+pub(crate) fn stop_reason_str(s: StopReason) -> &'static str {
     match s {
         StopReason::EndTurn => "end_turn",
         StopReason::ToolUse => "tool_use",

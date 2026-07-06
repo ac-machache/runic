@@ -279,6 +279,7 @@ pub async fn create_and_stream_run(
         .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_run_id(&run_id)
+        .with_mode("stream")
         .with_human(Arc::new(HumanChannel::new(
             state.human_hub.clone(),
             ask_tx,
@@ -472,7 +473,8 @@ pub async fn wait_run(
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
-        .with_run_id(&run_id);
+        .with_run_id(&run_id)
+        .with_mode("wait");
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "wait run accepted");
 
@@ -648,7 +650,8 @@ pub async fn background_run(
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
-        .with_run_id(&run_id);
+        .with_run_id(&run_id)
+        .with_mode("background");
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run accepted");
 

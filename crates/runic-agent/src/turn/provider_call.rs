@@ -10,11 +10,48 @@
 use runic_provider::{CompletionRequest, CompletionResponse, ProviderError, StreamEvent};
 use runic_types::{ContentBlock, MessageContent};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::{Agent, AgentError, AgentEvent, retry};
 
 impl Agent {
     pub(crate) async fn call_model(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, AgentError> {
+        let span = tracing::info_span!(
+            "provider_call",
+            model = %request.model,
+            streaming = self.events.is_some(),
+            messages = request.messages.len(),
+            tools = request.tools.len(),
+            input_tokens = tracing::field::Empty,
+            output_tokens = tracing::field::Empty,
+            stop_reason = tracing::field::Empty,
+            fallback_model = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let result = self
+            .call_model_inner(request)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(response) => {
+                span.record("input_tokens", response.usage.input_tokens);
+                span.record("output_tokens", response.usage.output_tokens);
+                span.record(
+                    "stop_reason",
+                    crate::run::stop_reason_str(response.stop_reason),
+                );
+            }
+            Err(_) => {
+                span.record("otel.status_code", "ERROR");
+            }
+        }
+        result
+    }
+
+    async fn call_model_inner(
         &self,
         mut request: CompletionRequest,
     ) -> Result<CompletionResponse, AgentError> {
@@ -97,6 +134,7 @@ impl Agent {
             req.model = fb.model.clone();
             match retry::call_with_retry(fb.provider.as_ref(), req).await {
                 Ok(response) => {
+                    tracing::Span::current().record("fallback_model", fb.model.as_str());
                     tracing::warn!(
                         fallback_provider = fb.provider.name(),
                         fallback_model = %fb.model,

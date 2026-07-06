@@ -22,6 +22,7 @@ runic-tool = { path = "../runic-tool" }
 runic-hook = { path = "../runic-hook" }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 anyhow = { workspace = true }
 serde_json = { workspace = true }

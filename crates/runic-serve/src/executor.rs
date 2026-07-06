@@ -115,7 +115,8 @@ async fn execute_queued_run(
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&record.agent)
-        .with_run_id(&run_id);
+        .with_run_id(&run_id)
+        .with_mode("queued");
 
     let heartbeat = spawn_heartbeat(
         store.clone(),

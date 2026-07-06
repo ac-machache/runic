@@ -120,6 +120,7 @@ fn fixture() -> Fixture {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     Fixture {
@@ -241,6 +242,7 @@ async fn missing_agent_on_a_single_agent_server_routes_to_it() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     let resp = app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
@@ -272,6 +274,7 @@ async fn stateless_agent_is_rebuilt_every_run_and_persists_nothing() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 

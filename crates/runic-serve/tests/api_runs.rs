@@ -225,6 +225,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }
@@ -240,6 +241,7 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     (app, artifacts)
@@ -255,6 +257,7 @@ fn failing_run_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }
@@ -269,6 +272,7 @@ fn asking_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }
@@ -291,6 +295,7 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     (app, entered, gate)
@@ -1032,6 +1037,7 @@ async fn wait_response_implies_the_run_is_durable() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -1065,6 +1071,7 @@ async fn stream_done_implies_the_run_is_durable() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -1173,6 +1180,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -1250,6 +1258,7 @@ async fn background_run_returns_202_and_completes_detached() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -1337,6 +1346,7 @@ async fn background_run_failure_lands_in_the_run_row() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -1376,6 +1386,7 @@ fn queued_router(store: Arc<dyn SessionStore>) -> Router {
         human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         broker: None,
+        nudge: None,
         identity: None,
         workers: Some(runic_serve::WorkerConfig {
             max_concurrent_runs: 4,
@@ -1435,6 +1446,107 @@ async fn queued_mode_executes_background_runs_via_workers() {
         resp.status(),
         StatusCode::OK,
         "wait runs still execute locally in queue mode"
+    );
+}
+
+#[tokio::test]
+async fn a_nudge_wakes_workers_without_waiting_out_the_poll_interval() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        broker: None,
+        nudge: Some(runic_serve::LocalNudge::new()),
+        identity: None,
+        workers: Some(runic_serve::WorkerConfig {
+            max_concurrent_runs: 4,
+            poll_every: Duration::from_secs(120),
+        }),
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let resp = app
+        .oneshot(post_json(
+            "/threads/t1/runs",
+            TENANT,
+            json!({ "message": "go" }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let run_id = body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rec = wait_terminal(&store, &run_id).await;
+    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
+}
+
+#[tokio::test]
+async fn a_burst_of_queued_runs_survives_collapsed_nudges() {
+    let store = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(ScriptedFactory)),
+        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        broker: None,
+        nudge: Some(runic_serve::LocalNudge::new()),
+        identity: None,
+        workers: Some(runic_serve::WorkerConfig {
+            max_concurrent_runs: 1,
+            poll_every: Duration::from_secs(120),
+        }),
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut run_ids = Vec::new();
+    for thread in ["t1", "t2", "t3"] {
+        let resp = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/threads/{thread}/runs"),
+                TENANT,
+                json!({ "message": "go" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        run_ids.push(
+            body_json(resp).await["run_id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+    }
+
+    for run_id in &run_ids {
+        let rec = wait_terminal(&store, run_id).await;
+        assert_eq!(
+            rec.status,
+            runic_substrate::RunStatus::Success,
+            "every queued run in the burst must execute even when nudges collapse"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_local_nudge_fired_before_the_wait_is_not_lost() {
+    let nudge = runic_serve::LocalNudge::new();
+    runic_serve::QueueNudge::nudge(nudge.as_ref()).await;
+
+    let start = std::time::Instant::now();
+    runic_serve::QueueNudge::wait(nudge.as_ref(), Duration::from_secs(10)).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "a stored permit must satisfy the next wait immediately"
     );
 }
 
@@ -1547,6 +1659,7 @@ fn broker_replay_router(
         limits: Default::default(),
         workers: None,
         broker: Some(broker),
+        nudge: None,
         identity: None,
     })
 }
@@ -1568,6 +1681,7 @@ async fn a_viewer_on_another_instance_gets_the_live_tail_via_the_broker() {
             limits: Default::default(),
             workers: None,
             broker: Some(broker.clone()),
+            nudge: None,
             identity: None,
         })
     };
@@ -2113,6 +2227,7 @@ async fn cancelling_a_queued_run_before_pickup_drops_it() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     store
@@ -2158,6 +2273,7 @@ async fn run_status_for_an_unknown_or_foreign_run_is_404() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     store
@@ -2204,6 +2320,7 @@ async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
         human_hub: Arc::new(HumanHub::new()),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
         limits: RunLimits {
             max_concurrent_runs: 1,
@@ -2279,6 +2396,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
 
@@ -2309,6 +2427,7 @@ async fn run_rows_track_the_lifecycle_over_http() {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     let resp = failing

@@ -30,6 +30,7 @@ fn app() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }

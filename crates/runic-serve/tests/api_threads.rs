@@ -66,6 +66,7 @@ fn crud_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }
@@ -80,6 +81,7 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }

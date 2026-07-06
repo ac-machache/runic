@@ -50,7 +50,7 @@ pub mod wire;
 
 pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
 pub use auth::{Identity, IdentityError, IdentityResolver};
-pub use broker::{EventBroker, RedisBroker};
+pub use broker::{EventBroker, LocalNudge, QueueNudge, RedisBroker};
 pub use error::ServeError;
 pub use executor::{WorkerConfig, spawn_run_workers};
 pub use factory::{AgentFactory, BoxedAgentFactory};

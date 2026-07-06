@@ -629,6 +629,9 @@ pub async fn background_run(
         .await?;
 
     if state.queue_runs {
+        if let Some(nudge) = &state.nudge {
+            nudge.nudge().await;
+        }
         tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run queued");
         return Ok((
             StatusCode::ACCEPTED,

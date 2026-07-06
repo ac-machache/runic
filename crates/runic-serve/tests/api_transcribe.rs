@@ -49,6 +49,7 @@ fn transcribe_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }

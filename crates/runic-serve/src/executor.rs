@@ -29,6 +29,7 @@ pub fn spawn_run_workers(
     agents: Arc<AgentRegistry>,
     registry: Arc<RunRegistry>,
     config: WorkerConfig,
+    nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let semaphore = Arc::new(Semaphore::new(config.max_concurrent_runs.max(1)));
@@ -57,7 +58,10 @@ pub fn spawn_run_workers(
                 }
                 Ok(None) => {
                     drop(permit);
-                    tokio::time::sleep(config.poll_every).await;
+                    match &nudge {
+                        Some(nudge) => nudge.wait(config.poll_every).await,
+                        None => tokio::time::sleep(config.poll_every).await,
+                    }
                 }
                 Err(runic_substrate::Error::Unsupported(_)) => {
                     tracing::warn!("store has no run rows — run workers off");

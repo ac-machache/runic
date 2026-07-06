@@ -66,6 +66,7 @@ fn crud_router() -> Router {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     })
 }
@@ -82,6 +83,7 @@ fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: None,
     });
     (app, sessions, artifacts)

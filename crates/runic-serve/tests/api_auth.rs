@@ -78,6 +78,7 @@ fn config(store: Arc<dyn SessionStore>) -> ServeConfig {
         limits: Default::default(),
         workers: None,
         broker: None,
+        nudge: None,
         identity: Some(Arc::new(BearerResolver)),
     }
 }

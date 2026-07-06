@@ -41,6 +41,7 @@ pub struct AppState {
     /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
     pub human_hub: Arc<HumanHub>,
     pub queue_runs: bool,
+    pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
 }
 
 /// Construction parameters — the binary fills these in and hands them to
@@ -64,6 +65,7 @@ pub struct ServeConfig {
     /// Cross-instance live event fan-out (e.g. [`crate::RedisBroker`]). `None`
     /// (default) keeps live SSE attach instance-local; replay always works.
     pub broker: Option<Arc<dyn crate::broker::EventBroker>>,
+    pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
     pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
 }
 
@@ -93,6 +95,7 @@ fn app_state(
         runs: Arc::new(registry),
         human_hub: config.human_hub,
         queue_runs: config.workers.is_some(),
+        nudge: config.nudge,
     };
     (state, config.workers, config.identity)
 }
@@ -178,6 +181,7 @@ pub fn router(config: ServeConfig) -> Router {
                 state.agents.clone(),
                 state.runs.clone(),
                 worker_config,
+                state.nudge.clone(),
             );
         }
     } else {

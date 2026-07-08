@@ -158,6 +158,27 @@ impl SkillSet {
         SkillSet { skills, sources }
     }
 
+    pub fn scope_glob<S: AsRef<str>>(&self, patterns: &[S]) -> SkillSet {
+        let pats: Vec<&str> = patterns.iter().map(|s| s.as_ref()).collect();
+        let allowed = |skill: &Skill| {
+            let id = skill.id();
+            pats.iter().any(|p| {
+                *p == "*"
+                    || p.strip_suffix(":*") == Some(skill.namespace.as_str())
+                    || *p == id.as_str()
+            })
+        };
+        let skills: Vec<Skill> = self.skills.iter().filter(|s| allowed(s)).cloned().collect();
+        let used: HashSet<&str> = skills.iter().map(|s| s.namespace.as_str()).collect();
+        let sources = self
+            .sources
+            .iter()
+            .filter(|(k, _)| used.contains(k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        SkillSet { skills, sources }
+    }
+
     /// The compact index injected into the system prompt (id + description).
     pub fn prompt_section(&self) -> String {
         if self.skills.is_empty() {
@@ -297,6 +318,73 @@ mod tests {
         assert_eq!(scoped.len(), 1);
         assert!(scoped.get("ns:a").is_some());
         assert!(scoped.get("ns:b").is_none());
+    }
+
+    #[tokio::test]
+    async fn scope_glob_supports_wildcards_namespaces_and_exact_ids() {
+        let src = MapSource::arc(&[
+            ("pipeline/SKILL.md", &skill_md("pipeline", "crm p")),
+            ("followup/SKILL.md", &skill_md("followup", "crm f")),
+        ]);
+        let other = MapSource::arc(&[("deep/SKILL.md", &skill_md("deep", "research d"))]);
+        let set = SkillSet::load(HashMap::from([
+            ("crm".to_string(), src),
+            ("research".to_string(), other),
+        ]))
+        .await;
+
+        assert_eq!(set.scope_glob(&["*"]).len(), 3);
+
+        let ns = set.scope_glob(&["crm:*"]);
+        let mut ids = ns.ids();
+        ids.sort();
+        assert_eq!(ids, vec!["crm:followup", "crm:pipeline"]);
+
+        let exact = set.scope_glob(&["crm:pipeline", "research:deep"]);
+        let mut ids = exact.ids();
+        ids.sort();
+        assert_eq!(ids, vec!["crm:pipeline", "research:deep"]);
+
+        assert!(set.scope_glob::<&str>(&[]).is_empty());
+        assert!(set.scope_glob(&["ghost:*"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn scope_glob_prunes_sources_to_used_namespaces() {
+        let crm = MapSource::arc(&[
+            ("pipeline/SKILL.md", &skill_md("pipeline", "p")),
+            ("pipeline/extra.md", "detail"),
+        ]);
+        let research = MapSource::arc(&[("deep/SKILL.md", &skill_md("deep", "d"))]);
+        let set = SkillSet::load(HashMap::from([
+            ("crm".to_string(), crm),
+            ("research".to_string(), research),
+        ]))
+        .await;
+
+        let scoped = set.scope_glob(&["crm:*"]);
+        let skill = scoped.get("crm:pipeline").unwrap().clone();
+        assert_eq!(
+            scoped.read_subfile(&skill, "extra.md").await.unwrap(),
+            "detail"
+        );
+        assert!(scoped.get("research:deep").is_none());
+    }
+
+    #[tokio::test]
+    async fn scope_glob_bare_namespace_name_is_not_a_wildcard() {
+        let src = MapSource::arc(&[("pipeline/SKILL.md", &skill_md("pipeline", "p"))]);
+        let set = SkillSet::load(HashMap::from([("crm".to_string(), src)])).await;
+        assert!(set.scope_glob(&["crm"]).is_empty());
+        assert_eq!(set.scope_glob(&["crm:pipeline"]).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scope_glob_overlapping_patterns_do_not_duplicate() {
+        let src = MapSource::arc(&[("pipeline/SKILL.md", &skill_md("pipeline", "p"))]);
+        let set = SkillSet::load(HashMap::from([("crm".to_string(), src)])).await;
+        let scoped = set.scope_glob(&["*", "crm:*", "crm:pipeline"]);
+        assert_eq!(scoped.ids(), vec!["crm:pipeline"]);
     }
 
     #[tokio::test]

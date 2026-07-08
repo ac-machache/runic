@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use runic::FoundrySubagentBuilder;
 use runic_agent::AgentError;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_skills::SkillSet;
 use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -88,6 +89,32 @@ fn builder(provider: Arc<dyn Provider>) -> FoundrySubagentBuilder {
     FoundrySubagentBuilder {
         provider,
         model: "parent-model".into(),
+        skills: None,
+    }
+}
+
+async fn crm_catalog() -> Arc<SkillSet> {
+    let dir = tempfile::tempdir().unwrap();
+    for (entry, desc) in [("pipeline", "crm pipeline"), ("followup", "crm followup")] {
+        let skill = dir.path().join(entry);
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {entry}\ndescription: {desc}\n---\nBody for {entry}."),
+        )
+        .unwrap();
+    }
+    Arc::new(SkillSet::load_dir("crm", dir.path()).await)
+}
+
+fn builder_with_skills(
+    provider: Arc<dyn Provider>,
+    skills: Arc<SkillSet>,
+) -> FoundrySubagentBuilder {
+    FoundrySubagentBuilder {
+        provider,
+        model: "parent-model".into(),
+        skills: Some(skills),
     }
 }
 
@@ -118,30 +145,38 @@ async fn child_falls_back_to_parent_model() {
 }
 
 #[tokio::test]
-async fn child_gets_base_tools_only() {
+async fn child_without_allowed_tools_gets_no_tools_at_all() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let def = def("---\nname: reviewer\ndescription: reviews\n---\nChild instructions.");
     let mut agent = builder(provider.clone()).build(&def, &ctx()).await.unwrap();
 
     agent.run("go").await.unwrap();
 
-    let mut names: Vec<String> = provider
+    assert!(provider.last_request().tools.is_empty());
+}
+
+#[tokio::test]
+async fn child_wildcard_gets_the_base_pool_but_never_privileged_tools() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let def =
+        def("---\nname: reviewer\ndescription: reviews\ntools: [\"*\"]\n---\nChild instructions.");
+    let mut agent = builder(provider.clone()).build(&def, &ctx()).await.unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let names: Vec<String> = provider
         .last_request()
         .tools
         .into_iter()
         .map(|tool| tool.name)
         .collect();
-    names.sort();
 
-    // the fs-free base only
     for expected in ["calculator", "system_time"] {
         assert!(
             names.iter().any(|name| name == expected),
             "missing {expected}"
         );
     }
-
-    // file tools are gone; higher-tier tools never escalate to a child
     for forbidden in [
         "read_file",
         "write_file",
@@ -184,10 +219,140 @@ async fn child_allowed_tools_narrows_even_base_tools() {
 }
 
 #[tokio::test]
+async fn child_gets_only_the_skills_its_def_lists() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let catalog = crm_catalog().await;
+    let def =
+        def("---\nname: crm\ndescription: crm\nskills: [crm:pipeline]\n---\nChild instructions.");
+    let mut agent = builder_with_skills(provider.clone(), catalog)
+        .build(&def, &ctx())
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let request = provider.last_request();
+    let system = request.system.as_deref().unwrap();
+    assert!(system.contains("<available-skills>"));
+    assert!(system.contains("crm:pipeline"));
+    assert!(!system.contains("crm:followup"));
+
+    let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["skill_view"]);
+}
+
+#[tokio::test]
+async fn child_wildcard_gets_the_whole_catalog() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let catalog = crm_catalog().await;
+    let def = def("---\nname: crm\ndescription: crm\nskills: [\"*\"]\n---\nChild instructions.");
+    let mut agent = builder_with_skills(provider.clone(), catalog)
+        .build(&def, &ctx())
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let system = provider.last_request().system.unwrap();
+    assert!(system.contains("crm:pipeline"));
+    assert!(system.contains("crm:followup"));
+}
+
+#[tokio::test]
+async fn child_without_listed_skills_gets_none_even_with_a_catalog() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let catalog = crm_catalog().await;
+    let def = def("---\nname: crm\ndescription: crm\n---\nChild instructions.");
+    let mut agent = builder_with_skills(provider.clone(), catalog)
+        .build(&def, &ctx())
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let request = provider.last_request();
+    assert!(
+        !request
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("<available-skills>")
+    );
+    assert!(!request.tools.iter().any(|t| t.name == "skill_view"));
+}
+
+#[tokio::test]
+async fn child_with_skills_listed_but_no_catalog_gets_none() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let def = def("---\nname: crm\ndescription: crm\nskills: [crm:pipeline]\n---\nChild.");
+    let mut agent = builder(provider.clone()).build(&def, &ctx()).await.unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let request = provider.last_request();
+    assert!(
+        !request
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("<available-skills>")
+    );
+    assert!(!request.tools.iter().any(|t| t.name == "skill_view"));
+}
+
+#[tokio::test]
+async fn child_listing_unknown_skills_gets_no_empty_section_or_tool() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let catalog = crm_catalog().await;
+    let def = def("---\nname: crm\ndescription: crm\nskills: [ghost:*]\n---\nChild.");
+    let mut agent = builder_with_skills(provider.clone(), catalog)
+        .build(&def, &ctx())
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let request = provider.last_request();
+    assert!(
+        !request
+            .system
+            .as_deref()
+            .unwrap()
+            .contains("<available-skills>")
+    );
+    assert!(!request.tools.iter().any(|t| t.name == "skill_view"));
+}
+
+#[tokio::test]
+async fn skills_are_independent_of_the_tool_allow_list() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
+    let catalog = crm_catalog().await;
+    let def = def(
+        "---\nname: crm\ndescription: crm\nallowed-tools: [calculator]\nskills: [crm:pipeline]\n---\nChild.",
+    );
+    let mut agent = builder_with_skills(provider.clone(), catalog)
+        .build(&def, &ctx())
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    let mut names: Vec<String> = provider
+        .last_request()
+        .tools
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["calculator", "skill_view"]);
+}
+
+#[tokio::test]
 async fn child_respects_max_turns() {
     let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response("calculator")]));
-    let def =
-        def("---\nname: reviewer\ndescription: reviews\nmax-turns: 1\n---\nChild instructions.");
+    let def = def(
+        "---\nname: reviewer\ndescription: reviews\nmax-turns: 1\ntools: [calculator]\n---\nChild instructions.",
+    );
     let mut agent = builder(provider).build(&def, &ctx()).await.unwrap();
 
     let err = agent.run("go").await.unwrap_err();

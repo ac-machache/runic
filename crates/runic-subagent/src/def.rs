@@ -102,18 +102,18 @@ impl AgentDef {
         })
     }
 
-    /// Narrow a parent tool pool to what this agent may use — the no-escalation
-    /// rule made real. An empty `allowed_tools` inherits the whole pool
-    /// (back-compat); names not present in the pool are simply not granted.
-    /// `SubagentBuilder` implementations must route their tools through this.
     pub fn scope_tools(&self, pool: &[Arc<dyn Tool>]) -> Vec<Arc<dyn Tool>> {
-        if self.allowed_tools.is_empty() {
-            return pool.to_vec();
-        }
         pool.iter()
-            .filter(|t| self.allowed_tools.iter().any(|a| a == t.name()))
+            .filter(|t| self.allowed_tools.iter().any(|p| glob_matches(p, t.name())))
             .cloned()
             .collect()
+    }
+}
+
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
     }
 }
 
@@ -256,43 +256,134 @@ mod tests {
     }
 
     #[test]
-    fn scope_tools_enforces_allow_list() {
-        use async_trait::async_trait;
-        use runic_tool::{ToolContext, ToolResult};
+    fn skills_list_parses_dedups_and_preserves_glob_syntax() {
+        let def = AgentDef::parse_markdown(
+            "---\nname: a\ndescription: d\nskills: [\"*\", crm:pipeline, crm:pipeline]\n---\nb",
+        )
+        .unwrap();
+        assert_eq!(def.skills, vec!["*", "crm:pipeline"]);
 
-        struct T(&'static str);
-        #[async_trait]
-        impl Tool for T {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "t"
-            }
-            fn parameters_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(
-                &self,
-                _a: serde_json::Value,
-                _c: &ToolContext,
-            ) -> anyhow::Result<ToolResult> {
-                Ok(ToolResult::ok(""))
-            }
+        let none = AgentDef::parse_markdown("---\nname: a\ndescription: d\n---\nb").unwrap();
+        assert!(none.skills.is_empty());
+    }
+
+    use async_trait::async_trait;
+    use runic_tool::{ToolContext, ToolResult};
+
+    struct T(&'static str);
+    #[async_trait]
+    impl Tool for T {
+        fn name(&self) -> &str {
+            self.0
         }
+        fn description(&self) -> &str {
+            "t"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _a: serde_json::Value,
+            _c: &ToolContext,
+        ) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult::ok(""))
+        }
+    }
 
-        let pool: Vec<Arc<dyn Tool>> = vec![Arc::new(T("a")), Arc::new(T("b")), Arc::new(T("c"))];
+    fn tool_pool(names: &[&'static str]) -> Vec<Arc<dyn Tool>> {
+        names
+            .iter()
+            .map(|&n| Arc::new(T(n)) as Arc<dyn Tool>)
+            .collect()
+    }
 
-        let scoped =
-            AgentDef::parse_markdown("---\nname: x\ndescription: d\ntools: [a, c, ghost]\n---\nb")
-                .unwrap();
-        let scoped_tools = scoped.scope_tools(&pool);
-        let got: Vec<&str> = scoped_tools.iter().map(|t| t.name()).collect();
-        assert_eq!(got, vec!["a", "c"]); // ghost (not in pool) silently dropped
+    fn scoped(md: &str, pool: &[Arc<dyn Tool>]) -> Vec<String> {
+        AgentDef::parse_markdown(md)
+            .unwrap()
+            .scope_tools(pool)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect()
+    }
 
-        // empty allowed_tools inherits the whole pool
-        let open = AgentDef::parse_markdown("---\nname: x\ndescription: d\n---\nb").unwrap();
-        assert_eq!(open.scope_tools(&pool).len(), 3);
+    #[test]
+    fn scope_tools_matches_exact_names_and_drops_unknowns() {
+        let pool = tool_pool(&["a", "b", "mcp__crm__search"]);
+        assert_eq!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [a, ghost]\n---\nb",
+                &pool
+            ),
+            vec!["a"]
+        );
+    }
+
+    #[test]
+    fn scope_tools_empty_grants_nothing_and_star_grants_the_whole_pool() {
+        let pool = tool_pool(&["a", "b", "mcp__crm__search"]);
+        assert!(scoped("---\nname: x\ndescription: d\n---\nb", &pool).is_empty());
+        assert_eq!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [\"*\"]\n---\nb",
+                &pool
+            )
+            .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn scope_tools_prefix_glob_is_bounded_to_its_namespace() {
+        let pool = tool_pool(&[
+            "mcp__crm__search",
+            "mcp__crm__update",
+            "mcp__crmx__thing",
+            "mcp__crm_admin__wipe",
+        ]);
+        assert_eq!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [mcp__crm__*]\n---\nb",
+                &pool
+            ),
+            vec!["mcp__crm__search", "mcp__crm__update"]
+        );
+    }
+
+    #[test]
+    fn scope_tools_only_a_trailing_star_is_a_wildcard() {
+        let pool = tool_pool(&["mcp__crm__search", "mcp__docs__read"]);
+        assert!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [mcp__*__search]\n---\nb",
+                &pool
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn scope_tools_overlapping_patterns_do_not_duplicate() {
+        let pool = tool_pool(&["a", "mcp__crm__search"]);
+        assert_eq!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [\"*\", mcp__crm__*, a]\n---\nb",
+                &pool
+            ),
+            vec!["a", "mcp__crm__search"]
+        );
+    }
+
+    #[test]
+    fn scope_tools_never_grants_a_tool_outside_the_pool() {
+        let pool = tool_pool(&["a", "b"]);
+        assert_eq!(
+            scoped(
+                "---\nname: x\ndescription: d\ntools: [c, mcp__ghost__*, \"*\"]\n---\nb",
+                &pool
+            ),
+            vec!["a", "b"]
+        );
     }
 
     #[test]

@@ -104,6 +104,7 @@ pub async fn assemble(a: &Assembly, tenant: &str, session: &str) -> Agent {
             Arc::new(FoundrySubagentBuilder {
                 provider: a.provider.clone(),
                 model: a.model.clone(),
+                skills: a.skills.clone(),
             })
         });
         if let Some(tool) = s.tool(builder) {

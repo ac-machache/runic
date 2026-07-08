@@ -8,7 +8,7 @@ use runic_agent::{Agent, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
 use runic_state::{TaskStatus, ThreadStats};
-use runic_subagent::{AgentDef, AgentRoster, DelegateTool, DelegationCtx, SubagentBuilder};
+use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage, ToolCall};
 
@@ -85,14 +85,12 @@ struct StubBuilder;
 
 #[async_trait]
 impl SubagentBuilder for StubBuilder {
-    async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
-        Ok(Agent::builder(
-            ScriptedProvider::new(vec![text_response("found 3 competitors")]),
-            "sub",
-            &def.name,
-        )
-        .system_prompt(&def.system_prompt)
-        .build())
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        ScriptedProvider::new(vec![text_response("found 3 competitors")])
+    }
+
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        String::new()
     }
 }
 

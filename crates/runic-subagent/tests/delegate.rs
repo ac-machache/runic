@@ -6,10 +6,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{
-    AgentDef, AgentRoster, DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder,
+    AgentDef, AgentRoster, DelegateTool, SpawnBudget, SubagentBuilder, SubagentReq,
 };
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -40,12 +39,12 @@ struct FakeBuilder;
 
 #[async_trait]
 impl SubagentBuilder for FakeBuilder {
-    async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
-        let provider = Arc::new(OneShot(format!("done: {}", def.name)));
-        Ok(Agent::builder(provider, "u", "s")
-            .model("test")
-            .system_prompt(def.system_prompt.clone())
-            .build())
+    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        Arc::new(OneShot(format!("done: {}", req.def.name)))
+    }
+
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        "test".to_string()
     }
 }
 

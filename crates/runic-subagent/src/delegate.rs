@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{Agent, CancelToken, RunContext, TasksSnapshot};
+use runic_agent::{Agent, AgentBuilder, CancelToken, RunContext, TasksSnapshot};
+use runic_provider::Provider;
+use runic_skills::SkillSet;
 use runic_state::ExternalEvents;
 use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult};
@@ -47,15 +49,70 @@ pub struct DelegationCtx {
     pub config: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Builds the child [`Agent`] for a subagent definition. The app implements
-/// this — it owns provider resolution and tool scoping. It MUST enforce the
-/// no-escalation rule by routing the parent's tool pool through
-/// [`AgentDef::scope_tools`], which keeps only the tools the def's
-/// `allowed_tools` permits. `runic-subagent` owns the orchestration
-/// (depth/budget/cancel).
+pub struct SubagentReq<'a> {
+    pub def: &'a AgentDef,
+    pub dctx: &'a DelegationCtx,
+}
+
 #[async_trait]
 pub trait SubagentBuilder: Send + Sync {
-    async fn build(&self, def: &AgentDef, dctx: &DelegationCtx) -> anyhow::Result<Agent>;
+    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider>;
+
+    fn default_model(&self, req: &SubagentReq<'_>) -> String;
+
+    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
+        Vec::new()
+    }
+
+    fn skill_catalog(&self, _req: &SubagentReq<'_>) -> Option<Arc<SkillSet>> {
+        None
+    }
+
+    fn identity(&self, req: &SubagentReq<'_>) -> (String, String) {
+        ("subagent".to_string(), req.def.name.clone())
+    }
+
+    fn decorate(&self, b: AgentBuilder, _req: &SubagentReq<'_>) -> AgentBuilder {
+        b
+    }
+}
+
+pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<'_>) -> Agent {
+    let (tenant, session) = builder.identity(req);
+    let provider = builder.provider(req).await;
+    let model = req
+        .def
+        .model
+        .clone()
+        .unwrap_or_else(|| builder.default_model(req));
+    let pool = builder.tool_pool(req).await;
+
+    let scoped = builder
+        .skill_catalog(req)
+        .filter(|_| !req.def.skills.is_empty())
+        .map(|catalog| Arc::new(catalog.scope_glob(&req.def.skills)))
+        .filter(|set| !set.is_empty());
+
+    let mut prompt = req.def.system_prompt.clone();
+    if let Some(set) = &scoped {
+        prompt = format!("{prompt}\n\n{}", set.prompt_section());
+    }
+
+    let mut b = Agent::builder(provider, tenant, session)
+        .model(model)
+        .system_prompt(prompt);
+    for t in req.def.scope_tools(&pool) {
+        b = b.tool(t);
+    }
+    if let Some(set) = &scoped
+        && let Some(tool) = set.view_tool()
+    {
+        b = b.tool(tool);
+    }
+    if let Some(max_turns) = req.def.max_turns {
+        b = b.max_turns(max_turns);
+    }
+    builder.decorate(b, req).build()
 }
 
 /// Total + concurrent spawn budget, shared across a parent's delegate calls.
@@ -433,7 +490,8 @@ async fn run_child(
     dctx: &DelegationCtx,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let mut child = builder.build(def, dctx).await?;
+    let req = SubagentReq { def, dctx };
+    let mut child = assemble_subagent(builder.as_ref(), &req).await;
     let rc = RunContext::new()
         .with_cancel(dctx.cancel.clone())
         .with_config(dctx.config.clone());

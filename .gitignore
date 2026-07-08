@@ -32,3 +32,4 @@ crates/runic-agent/target/rust-analyzer/flycheck0/
 
 # personal working notes, never committed
 /NOTES.md
+docs/design/

@@ -19,6 +19,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 runic-agent = { path = "../runic-agent" }
+runic-provider = { path = "../runic-provider" }
+runic-skills = { path = "../runic-skills" }
 runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }
 

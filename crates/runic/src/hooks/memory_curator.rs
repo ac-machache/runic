@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runic_agent::Agent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_memory::{MEMORY_REVIEW_GUIDANCE, MemoryStore, MemoryTool};
 use runic_provider::Provider;
 use runic_state::AgentState;
 use runic_types::Role;
+
+use crate::hooks::HookAgent;
 
 const LAST_REVIEW_KEY: &str = "memory-curator/last-review-run";
 
@@ -71,14 +72,12 @@ impl WriteHook for MemoryCurator {
         let store = self.store.clone();
         let guidance = self.guidance.clone();
         tokio::spawn(async move {
-            let mut curator = Agent::builder(provider, "memory-review", "review")
-                .model(model)
-                .system_prompt(guidance)
+            let result = HookAgent::new(provider, model)
+                .prompt(guidance)
                 .tool(Arc::new(MemoryTool::new(store)))
-                .max_turns(8)
-                .graceful_max_turns(true)
-                .build();
-            if let Err(e) = curator.run(transcript).await {
+                .run(transcript)
+                .await;
+            if let Err(e) = result {
                 tracing::warn!(error = %e, "memory review curator failed");
             }
         });

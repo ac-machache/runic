@@ -1,12 +1,8 @@
-use runic_memory::MemoryStore;
-use runic_skills::SkillSet;
-use runic_subagent::{AgentRoster, roster_prompt_section};
-
 /// Where a fragment sits relative to the prompt-cache boundary. Stable
 /// fragments form the cacheable prefix; volatile ones (per-turn freshness)
 /// go after it so they don't invalidate the cache.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Layer {
+pub enum Layer {
     Stable,
     Volatile,
 }
@@ -38,34 +34,8 @@ impl Context {
         self
     }
 
-    pub async fn memory(&mut self, store: &MemoryStore, mem: bool, user: bool) -> &mut Self {
-        if let Ok(snap) = store.snapshot().await {
-            // The snapshot is captured once per session — frozen, so the prefix
-            // stays stable across the session's turns.
-            self.push("memory", &snap.section(mem, user), Layer::Stable);
-        }
-        self
-    }
-
-    pub fn skills(&mut self, set: &SkillSet) -> &mut Self {
-        if !set.is_empty() {
-            self.push("skills", &set.prompt_section(), Layer::Stable);
-        }
-        self
-    }
-
-    pub fn subagents(&mut self, roster: &AgentRoster) -> &mut Self {
-        if !roster.is_empty() {
-            self.push("subagents", &roster_prompt_section(roster), Layer::Stable);
-        }
-        self
-    }
-
-    pub fn mcp(&mut self, section: Option<&str>) -> &mut Self {
-        if let Some(s) = section {
-            self.push("mcp", s, Layer::Stable);
-        }
-        self
+    pub(crate) fn fragment(&mut self, layer: Layer, text: impl Into<String>) {
+        self.push("ability", &text.into(), layer);
     }
 
     fn push(&mut self, name: &'static str, body: &str, layer: Layer) {

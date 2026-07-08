@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use runic::{Assembly, assemble};
+use runic::compose::{Compose, Composer, Delegation, Memory, Skills, Toolset};
+use runic_agent::Agent;
 use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -89,25 +90,17 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Assembly {
-    Assembly {
-        provider: Arc::new(NoopProvider),
-        model: "bench".into(),
-        instructions: "you are the bench agent ".repeat(50),
-        memory: Some(memory(fx.memory_dir.path()).init().scope_per_tenant()),
-        skills: Some(skills),
-        subagents: Some(runic_subagent::subagents(fx.agent_dir.path())),
-        subagent_builder: None,
-        mcp: None,
-        sessions: None,
-        tools: Some(runic_tools::tools()),
-        custom_tools: Vec::new(),
-        output_schema: None,
-        max_turns: None,
-        compaction: None,
-        write_hooks: Vec::new(),
-        artifact_store: None,
-    }
+fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
+    Agent::compose(Arc::new(NoopProvider), "bench")
+        .instructions("you are the bench agent ".repeat(50))
+        .with(Memory(
+            memory(fx.memory_dir.path()).init().scope_per_tenant(),
+        ))
+        .with(Skills(skills))
+        .with(Delegation::new(runic_subagent::subagents(
+            fx.agent_dir.path(),
+        )))
+        .with(Toolset(runic_tools::tools()))
 }
 
 async fn timed<F, Fut>(label: &str, iters: u32, mut f: F) -> Duration
@@ -145,7 +138,7 @@ async fn cost_of_pure_stateless_rebuild() {
             async move {
                 let skills = Arc::new(SkillSet::load_dir("", fx.skill_dir.path()).await);
                 let a = assembly(fx, skills);
-                let agent = assemble(&a, "bench-tenant", "t1").await;
+                let agent = a.build("bench-tenant", "t1").await;
                 std::hint::black_box(agent);
             }
         },
@@ -159,14 +152,18 @@ async fn cost_of_pure_stateless_rebuild() {
         || {
             let a = &shared;
             async move {
-                let agent = assemble(a, "bench-tenant", "t1").await;
+                let agent = a.build("bench-tenant", "t1").await;
                 std::hint::black_box(agent);
             }
         },
     )
     .await;
 
-    let prebuilt_store = shared.memory.as_ref().unwrap().store("bench-tenant").await;
+    let prebuilt_store = memory(fx.memory_dir.path())
+        .init()
+        .scope_per_tenant()
+        .store("bench-tenant")
+        .await;
     timed("C. memory snapshot read alone (per request)", 200, || {
         let store = prebuilt_store.clone();
         async move {

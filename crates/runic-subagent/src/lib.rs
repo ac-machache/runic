@@ -24,7 +24,8 @@ pub use dirs::Dirs;
 pub use def::{AgentDef, AgentRoster};
 pub use delegate::{
     BackgroundTask, DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TOTAL_SPAWNS,
-    DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder, TaskStatus,
+    DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder, SubagentReq, TaskStatus,
+    assemble_subagent,
 };
 pub use loader::{Subagents, subagents};
 

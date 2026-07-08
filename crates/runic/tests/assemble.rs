@@ -1,7 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::{Assembly, assemble};
+use runic::compose::{
+    Compaction as CompactionAbility, Compose, Composer, Delegation, Memory, Sessions, Skills,
+    Tools, Toolset,
+};
+use runic_agent::Agent;
 use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -53,25 +57,8 @@ fn text_response(text: &str) -> CompletionResponse {
     }
 }
 
-fn base_assembly(provider: Arc<dyn Provider>) -> Assembly {
-    Assembly {
-        provider,
-        model: "model-a".into(),
-        instructions: "core instructions".into(),
-        memory: None,
-        skills: None,
-        subagents: None,
-        subagent_builder: None,
-        mcp: None,
-        sessions: None,
-        tools: None,
-        custom_tools: Vec::new(),
-        output_schema: None,
-        max_turns: None,
-        compaction: None,
-        write_hooks: Vec::new(),
-        artifact_store: None,
-    }
+fn base(provider: Arc<dyn Provider>) -> Composer {
+    Agent::compose(provider, "model-a").instructions("core instructions")
 }
 
 async fn write_skill(root: &std::path::Path, dir: &str, name: &str, description: &str) {
@@ -97,7 +84,7 @@ async fn write_agent(root: &std::path::Path, dir: &str, name: &str, description:
 }
 
 #[tokio::test]
-async fn assemble_composes_prompt_sections_in_order() {
+async fn composes_prompt_sections_in_order() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
     let skill_dir = tempfile::tempdir().unwrap();
@@ -117,12 +104,14 @@ async fn assemble_composes_prompt_sections_in_order() {
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
     write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
-    let mut assembly = base_assembly(provider);
-    assembly.memory = Some(memory_cfg);
-    assembly.skills = Some(Arc::new(SkillSet::load_dir("", skill_dir.path()).await));
-    assembly.subagents = Some(subagents(agent_dir.path()));
-
-    let agent = assemble(&assembly, "alice", "s1").await;
+    let agent = base(provider)
+        .with(Memory(memory_cfg))
+        .with(Skills(Arc::new(
+            SkillSet::load_dir("", skill_dir.path()).await,
+        )))
+        .with(Delegation::new(subagents(agent_dir.path())))
+        .build("alice", "s1")
+        .await;
     let system = &agent.state().system_prompt;
 
     let instructions = system.find("core instructions").unwrap();
@@ -138,7 +127,7 @@ async fn assemble_composes_prompt_sections_in_order() {
 }
 
 #[tokio::test]
-async fn assemble_registers_enabled_tool_surfaces() {
+async fn registers_enabled_tool_surfaces() {
     let provider = Arc::new(RecordingProvider::default());
     let skill_dir = tempfile::tempdir().unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
@@ -147,14 +136,18 @@ async fn assemble_registers_enabled_tool_surfaces() {
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
     write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
-    let mut assembly = base_assembly(provider.clone());
-    assembly.tools = Some(tools().web().weather().hitl());
-    assembly.memory = Some(memory(memory_dir.path()).init().include_memory_tool());
-    assembly.skills = Some(Arc::new(SkillSet::load_dir("", skill_dir.path()).await));
-    assembly.subagents = Some(subagents(agent_dir.path()));
-    assembly.sessions = Some(sessions_memory());
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Toolset(tools().web().weather().hitl()))
+        .with(Memory(
+            memory(memory_dir.path()).init().include_memory_tool(),
+        ))
+        .with(Skills(Arc::new(
+            SkillSet::load_dir("", skill_dir.path()).await,
+        )))
+        .with(Delegation::new(subagents(agent_dir.path())))
+        .with(Sessions(sessions_memory()))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     let mut names: Vec<String> = provider
@@ -183,7 +176,6 @@ async fn assemble_registers_enabled_tool_surfaces() {
             "missing {expected}"
         );
     }
-    // file tools were removed with runic-filesystem — never registered
     for absent in [
         "read_file",
         "write_file",
@@ -204,15 +196,16 @@ async fn assemble_registers_enabled_tool_surfaces() {
 async fn memory_tool_description_override_reaches_the_model() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(
-        memory(memory_dir.path())
-            .init()
-            .include_memory_tool()
-            .memory_tool_description("notes for a support bot"),
-    );
 
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Memory(
+            memory(memory_dir.path())
+                .init()
+                .include_memory_tool()
+                .memory_tool_description("notes for a support bot"),
+        ))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     let tool = provider
@@ -225,9 +218,9 @@ async fn memory_tool_description_override_reaches_the_model() {
 }
 
 #[tokio::test]
-async fn assemble_omits_optional_prompt_sections_and_tools_when_empty() {
+async fn omits_optional_prompt_sections_and_tools_when_empty() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = assemble(&base_assembly(provider.clone()), "alice", "s1").await;
+    let mut agent = base(provider.clone()).build("alice", "s1").await;
 
     assert_eq!(agent.state().system_prompt, "core instructions");
     agent.run("hello").await.unwrap();
@@ -238,14 +231,14 @@ async fn assemble_omits_optional_prompt_sections_and_tools_when_empty() {
 #[tokio::test]
 async fn compaction_folds_history_before_the_model_call() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut assembly = base_assembly(provider.clone());
-    assembly.compaction = Some(
-        runic::Compaction::new()
-            .max_context_tokens(12)
-            .keep_recent(2),
-    );
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(CompactionAbility(
+            runic::Compaction::new()
+                .max_context_tokens(12)
+                .keep_recent(2),
+        ))
+        .build("alice", "s1")
+        .await;
     let old = [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -295,15 +288,15 @@ async fn compaction_folds_history_before_the_model_call() {
 #[tokio::test]
 async fn summary_guidance_override_reaches_the_summarizer() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut assembly = base_assembly(provider.clone());
-    assembly.compaction = Some(
-        runic::Compaction::new()
-            .max_context_tokens(12)
-            .keep_recent(2)
-            .summary_guidance("custom summary instructions"),
-    );
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(CompactionAbility(
+            runic::Compaction::new()
+                .max_context_tokens(12)
+                .keep_recent(2)
+                .summary_guidance("custom summary instructions"),
+        ))
+        .build("alice", "s1")
+        .await;
     for msg in [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -330,13 +323,14 @@ async fn summary_guidance_override_reaches_the_summarizer() {
 #[tokio::test]
 async fn compaction_sweeps_notified_keys_of_departed_tasks() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut assembly = base_assembly(provider.clone());
-    assembly.compaction = Some(
-        runic::Compaction::new()
-            .max_context_tokens(12)
-            .keep_recent(2),
-    );
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(CompactionAbility(
+            runic::Compaction::new()
+                .max_context_tokens(12)
+                .keep_recent(2),
+        ))
+        .build("alice", "s1")
+        .await;
 
     let state = agent.state_mut();
     state.fold_event(runic_state::SessionEvent::TaskSpawned {
@@ -390,10 +384,10 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
 async fn memory_review_is_disabled_by_default() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(memory(memory_dir.path()).init());
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Memory(memory(memory_dir.path()).init()))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     assert_eq!(provider.count(), 1);
@@ -403,15 +397,15 @@ async fn memory_review_is_disabled_by_default() {
 async fn memory_review_spawns_when_interval_is_due() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(
-        memory(memory_dir.path())
-            .init()
-            .include_memory_tool()
-            .curate_every_turns(1),
-    );
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Memory(
+            memory(memory_dir.path())
+                .init()
+                .include_memory_tool()
+                .curate_every_turns(1),
+        ))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     for _ in 0..50 {
@@ -442,16 +436,16 @@ async fn memory_review_spawns_when_interval_is_due() {
 async fn curation_guidance_override_reaches_the_curator() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(
-        memory(memory_dir.path())
-            .init()
-            .include_memory_tool()
-            .curate_every_turns(1)
-            .curation_guidance("custom curation instructions"),
-    );
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Memory(
+            memory(memory_dir.path())
+                .init()
+                .include_memory_tool()
+                .curate_every_turns(1)
+                .curation_guidance("custom curation instructions"),
+        ))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     for _ in 0..50 {
@@ -472,15 +466,15 @@ async fn curation_guidance_override_reaches_the_curator() {
 async fn memory_review_waits_until_interval() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(
-        memory(memory_dir.path())
-            .init()
-            .include_memory_tool()
-            .curate_every_turns(2),
-    );
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Memory(
+            memory(memory_dir.path())
+                .init()
+                .include_memory_tool()
+                .curate_every_turns(2),
+        ))
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     assert_eq!(provider.count(), 1);
@@ -490,20 +484,19 @@ async fn memory_review_waits_until_interval() {
 async fn memory_review_counts_runs_across_rebuilds() {
     let provider = Arc::new(RecordingProvider::default());
     let memory_dir = tempfile::tempdir().unwrap();
-    let mut assembly = base_assembly(provider.clone());
-    assembly.memory = Some(
+    let composer = base(provider.clone()).with(Memory(
         memory(memory_dir.path())
             .init()
             .include_memory_tool()
             .curate_every_turns(2),
-    );
+    ));
 
-    let mut first = assemble(&assembly, "alice", "s1").await;
+    let mut first = composer.build("alice", "s1").await;
     first.run("one").await.unwrap();
     assert_eq!(provider.count(), 1, "run one: review not due yet");
     let log: Vec<runic_state::SessionEvent> = first.state().events().to_vec();
 
-    let mut second = assemble(&assembly, "alice", "s1").await;
+    let mut second = composer.build("alice", "s1").await;
     for event in log {
         second.state_mut().fold_event(event);
     }
@@ -547,14 +540,14 @@ impl Tool for EchoTool {
 }
 
 #[tokio::test]
-async fn assemble_registers_custom_tools_and_output_schema() {
+async fn registers_custom_tools_and_output_schema() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut assembly = base_assembly(provider.clone());
-    assembly.custom_tools = vec![Arc::new(EchoTool)];
-    assembly.output_schema = Some(serde_json::json!({ "type": "object" }));
-    assembly.max_turns = Some(2);
-
-    let mut agent = assemble(&assembly, "alice", "s1").await;
+    let mut agent = base(provider.clone())
+        .with(Tools(vec![Arc::new(EchoTool)]))
+        .output_schema(serde_json::json!({ "type": "object" }))
+        .max_turns(2)
+        .build("alice", "s1")
+        .await;
     agent.run("hello").await.unwrap();
 
     let names: Vec<String> = provider

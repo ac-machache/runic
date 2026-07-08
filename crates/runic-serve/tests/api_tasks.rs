@@ -8,8 +8,8 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use runic::subagent::{AgentDef, AgentRoster, DelegateTool, DelegationCtx, SubagentBuilder};
-use runic_agent::Agent;
+use runic::agent::Agent;
+use runic::subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
 use runic_state::SessionEvent;
@@ -74,13 +74,14 @@ struct StubBuilder;
 
 #[async_trait]
 impl SubagentBuilder for StubBuilder {
-    async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
-        let provider = Arc::new(ScriptedProvider {
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        Arc::new(ScriptedProvider {
             responses: Mutex::new(vec![text_response("dug it up")].into()),
-        });
-        Ok(Agent::builder(provider, "sub", &def.name)
-            .system_prompt(&def.system_prompt)
-            .build())
+        })
+    }
+
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        String::new()
     }
 }
 

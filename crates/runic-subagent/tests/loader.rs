@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder, subagents};
+use runic_subagent::{SubagentBuilder, SubagentReq, subagents};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 fn write_agent_file(root: &std::path::Path, name: &str, body: &str) {
@@ -40,11 +39,12 @@ struct FakeSubagentBuilder;
 
 #[async_trait]
 impl SubagentBuilder for FakeSubagentBuilder {
-    async fn build(&self, def: &AgentDef, _dctx: &DelegationCtx) -> anyhow::Result<Agent> {
-        Ok(Agent::builder(Arc::new(OneShot), "u", &def.name)
-            .model("test")
-            .system_prompt(def.system_prompt.clone())
-            .build())
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        Arc::new(OneShot)
+    }
+
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        "test".to_string()
     }
 }
 

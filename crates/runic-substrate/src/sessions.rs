@@ -332,6 +332,22 @@ pub trait SessionStore: Send + Sync {
         Err(Error::Unsupported("resume_run".into()))
     }
 
+    async fn deliver_and_resume(
+        &self,
+        tenant: &str,
+        run_id: &str,
+        event: &SessionEvent,
+    ) -> Result<bool> {
+        let Some(rec) = self.get_run(tenant, run_id).await? else {
+            return Ok(false);
+        };
+        if rec.status != crate::RunStatus::Paused {
+            return Ok(false);
+        }
+        self.append(tenant, &rec.session_id, event).await?;
+        self.resume_run(tenant, run_id).await
+    }
+
     async fn get_run(&self, _tenant: &str, _run_id: &str) -> Result<Option<RunRecord>> {
         Err(Error::Unsupported("get_run".into()))
     }

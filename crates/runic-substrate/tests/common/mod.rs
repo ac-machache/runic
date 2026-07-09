@@ -137,6 +137,7 @@ macro_rules! session_store_contract_suite {
             pause_resume_cycle,
             cancelling_a_paused_run_prevents_resume,
             resume_clears_a_stale_paused_lease,
+            deliver_and_resume_appends_and_requeues_a_paused_run,
             latest_run_picks_the_newest,
             runs_are_tenant_scoped,
             claiming_a_pending_run_takes_the_lease_once,

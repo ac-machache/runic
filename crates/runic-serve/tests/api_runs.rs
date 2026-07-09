@@ -1328,8 +1328,17 @@ impl SessionStore for RacingResumeStore {
     }
 
     async fn resume_run(&self, tenant: &str, run_id: &str) -> runic_substrate::Result<bool> {
-        self.resume_barrier.wait().await;
         self.inner.resume_run(tenant, run_id).await
+    }
+
+    async fn deliver_and_resume(
+        &self,
+        tenant: &str,
+        run_id: &str,
+        event: &runic_state::SessionEvent,
+    ) -> runic_substrate::Result<bool> {
+        self.resume_barrier.wait().await;
+        self.inner.deliver_and_resume(tenant, run_id, event).await
     }
 }
 

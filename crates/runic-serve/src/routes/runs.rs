@@ -1201,28 +1201,25 @@ async fn resolve_answer(
         )));
     };
 
-    if !state.session_store.resume_run(&tenant, &run_id).await? {
+    let event = SessionEvent::Message {
+        run_id: run_id.clone(),
+        msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: ask_id,
+            tool_name,
+            content: answer,
+            is_error: false,
+        }]),
+        at: chrono::Utc::now(),
+    };
+    if !state
+        .session_store
+        .deliver_and_resume(&tenant, &run_id, &event)
+        .await?
+    {
         return Err(ServeError::BadRequest(format!(
             "run '{run_id}' is not awaiting an answer"
         )));
     }
-    state
-        .session_store
-        .append(
-            &tenant,
-            &thread_id,
-            &SessionEvent::Message {
-                run_id: run_id.clone(),
-                msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
-                    tool_use_id: ask_id,
-                    tool_name,
-                    content: answer,
-                    is_error: false,
-                }]),
-                at: chrono::Utc::now(),
-            },
-        )
-        .await?;
 
     if let Some(nudge) = &state.nudge {
         nudge.nudge().await;

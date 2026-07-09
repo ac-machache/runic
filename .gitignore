@@ -1,5 +1,6 @@
 /target
 /crates/*/target/
+/e2e/harness/target/
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store

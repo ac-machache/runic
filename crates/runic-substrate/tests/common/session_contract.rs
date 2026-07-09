@@ -986,6 +986,56 @@ pub async fn resume_clears_a_stale_paused_lease(store: &dyn SessionStore) {
     );
 }
 
+pub async fn deliver_and_resume_appends_and_requeues_a_paused_run(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("deliver");
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status(&r, RunStatus::Paused, None)
+        .await
+        .unwrap();
+
+    let event = SessionEvent::Message {
+        run_id: r.clone(),
+        msg: Message::user("the answer"),
+        at: Utc::now(),
+    };
+    assert!(store.deliver_and_resume(&t, &r, &event).await.unwrap());
+
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert!(rec.claimed_by.is_none());
+
+    let msgs = store
+        .read(&t, &s)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| matches!(&e.event, SessionEvent::Message { .. }))
+        .count();
+    assert_eq!(msgs, 1, "delivered event should be appended exactly once");
+
+    assert!(!store.deliver_and_resume(&t, &r, &event).await.unwrap());
+    let msgs2 = store
+        .read(&t, &s)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| matches!(&e.event, SessionEvent::Message { .. }))
+        .count();
+    assert_eq!(msgs2, 1, "a losing delivery must not append");
+
+    assert!(
+        !store
+            .deliver_and_resume("someone-else", &r, &event)
+            .await
+            .unwrap()
+    );
+}
+
 pub async fn latest_run_picks_the_newest(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store

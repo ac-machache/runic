@@ -550,6 +550,44 @@ impl SessionStore for MemorySessionStore {
         Ok(true)
     }
 
+    async fn deliver_and_resume(
+        &self,
+        tenant: &str,
+        run_id: &str,
+        event: &SessionEvent,
+    ) -> Result<bool> {
+        let mut runs = self.runs.write().await;
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if rec.tenant != tenant || rec.status != crate::RunStatus::Paused {
+            return Ok(false);
+        }
+        let session_id = rec.session_id.clone();
+        {
+            let mut sessions = self.sessions.write().await;
+            let srec = sessions
+                .entry((tenant.to_string(), session_id))
+                .or_insert_with(|| SessionRec {
+                    events: Vec::new(),
+                    label: None,
+                    created_at: event_at(event),
+                    last_activity: event_at(event),
+                });
+            let seq = srec.events.len() as u64 + 1;
+            srec.last_activity = event_at(event);
+            srec.events.push(StoredEvent {
+                seq,
+                event: event.clone(),
+            });
+        }
+        rec.status = crate::RunStatus::Queued;
+        rec.claimed_by = None;
+        rec.lease_expires_at = None;
+        rec.updated_at = Utc::now();
+        Ok(true)
+    }
+
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         Ok(self
             .runs

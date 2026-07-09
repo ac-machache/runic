@@ -669,6 +669,35 @@ impl SessionStore for PostgresSessionStore {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn deliver_and_resume(
+        &self,
+        tenant: &str,
+        run_id: &str,
+        event: &SessionEvent,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let row = sqlx::query(
+            "UPDATE runs
+             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
+                 updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'paused'
+             RETURNING session_id",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(db)?;
+            return Ok(false);
+        };
+        let session_id: String = row.try_get("session_id").map_err(db)?;
+        write_event(&mut tx, tenant, &session_id, event).await?;
+        tx.commit().await.map_err(db)?;
+        Ok(true)
+    }
+
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(&format!(
             "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND run_id = $2"

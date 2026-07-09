@@ -154,7 +154,8 @@ async fn execute_queued_run(
     }
     let mut agent =
         crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-    let outcome = if resuming(agent.state().events(), &run_id) {
+    let log = store.read(&tenant, &thread_id).await.unwrap_or_default();
+    let outcome = if resuming(&log, &run_id) {
         agent.resume(run_ctx).await
     } else {
         agent.run_message_with(user_msg, run_ctx).await
@@ -182,13 +183,13 @@ async fn execute_queued_run(
     crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
 }
 
-fn resuming(events: &[SessionEvent], run_id: &str) -> bool {
-    let started = events
+fn resuming(log: &[runic_substrate::StoredEvent], run_id: &str) -> bool {
+    let started = log
         .iter()
-        .any(|e| matches!(e, SessionEvent::RunStart { run_id: r, .. } if r == run_id));
-    let ended = events
+        .any(|e| matches!(&e.event, SessionEvent::RunStart { run_id: r, .. } if r == run_id));
+    let ended = log
         .iter()
-        .any(|e| matches!(e, SessionEvent::RunEnd { run_id: r, .. } if r == run_id));
+        .any(|e| matches!(&e.event, SessionEvent::RunEnd { run_id: r, .. } if r == run_id));
     started && !ended
 }
 

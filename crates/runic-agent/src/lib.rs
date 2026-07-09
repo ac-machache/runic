@@ -57,30 +57,34 @@ pub struct FallbackProvider {
 /// token-level + tool-lifecycle granularity a UI needs.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    /// A run began.
-    RunStarted { run_id: String },
-    /// Incremental assistant text.
+    RunStarted {
+        run_id: String,
+    },
     TextDelta(String),
-    /// Incremental reasoning/thinking text.
     ThinkingDelta(String),
-    /// A tool is about to run, with the input args it was called with.
     ToolStarted {
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// A tool finished, with its output (for live display).
     ToolFinished {
         id: String,
         name: String,
         is_error: bool,
         result: String,
     },
-    /// One model turn completed.
-    TurnCompleted { turn: u32, stop_reason: String },
-    /// The run finished.
+    TurnCompleted {
+        turn: u32,
+        stop_reason: String,
+    },
+    ToolDeferred {
+        run_id: String,
+        call_id: String,
+        channel: String,
+        payload: serde_json::Value,
+    },
     RunCompleted(RunOutcome),
-    /// A hook did something other than `Continue`.
+    /// Only fires for a non-`Continue` outcome.
     HookFired {
         hook_name: String,
         hook_kind: &'static str,
@@ -300,6 +304,7 @@ pub struct Agent {
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
     pub(crate) transient_tool_outputs: HashMap<String, String>,
+    pub(crate) pending_deferral: Option<(String, runic_tool::Deferral)>,
     pub(crate) pending_external_tx: mpsc::UnboundedSender<runic_state::SessionEvent>,
     pub(crate) pending_external_rx: mpsc::UnboundedReceiver<runic_state::SessionEvent>,
 }
@@ -500,6 +505,7 @@ impl AgentBuilder {
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
             transient_tool_outputs: HashMap::new(),
+            pending_deferral: None,
             pending_external_tx: pending_tx,
             pending_external_rx: pending_rx,
         }

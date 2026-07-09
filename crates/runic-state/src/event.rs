@@ -104,6 +104,14 @@ pub enum SessionEvent {
         value: serde_json::Value,
         at: DateTime<Utc>,
     },
+
+    ToolDeferred {
+        run_id: String,
+        call_id: String,
+        channel: String,
+        payload: serde_json::Value,
+        at: DateTime<Utc>,
+    },
 }
 
 impl SessionEvent {
@@ -117,7 +125,8 @@ impl SessionEvent {
             | SessionEvent::StateSnapshot { run_id, .. }
             | SessionEvent::TaskSpawned { run_id, .. }
             | SessionEvent::TaskFinished { run_id, .. }
-            | SessionEvent::StateUpdated { run_id, .. } => run_id,
+            | SessionEvent::StateUpdated { run_id, .. }
+            | SessionEvent::ToolDeferred { run_id, .. } => run_id,
         }
     }
 }

@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
+use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{
     ArtifactStore, LocalArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
 };
@@ -38,7 +38,6 @@ fn make_router() -> axum::Router {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -94,7 +93,6 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -142,7 +140,6 @@ fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> axum::Router
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber,
         agents: single_agent("main", Arc::new(PanicFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -526,7 +523,6 @@ async fn delete_thread_removes_local_artifact_blobs() {
         artifact_store: artifact_store.clone(),
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -579,7 +575,6 @@ async fn tenant_header_isolates_thread_listings() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(PanicFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -805,7 +800,7 @@ async fn answering_missing_human_ask_returns_bad_request() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(body_to_string(resp).await.contains("no pending ask"));
+    assert!(body_to_string(resp).await.contains("no deferred call"));
 }
 
 // ── artifacts ────────────────────────────────────────────────────────────
@@ -1153,7 +1148,6 @@ fn resolving_setup() -> (
                 last: last.clone(),
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,

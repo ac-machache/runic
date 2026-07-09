@@ -49,6 +49,7 @@ fn event_kind(e: &SessionEvent) -> &'static str {
         SessionEvent::TaskSpawned { .. } => "TaskSpawned",
         SessionEvent::TaskFinished { .. } => "TaskFinished",
         SessionEvent::StateUpdated { .. } => "StateUpdated",
+        SessionEvent::ToolDeferred { .. } => "ToolDeferred",
     }
 }
 
@@ -447,7 +448,7 @@ impl SessionStore for PostgresSessionStore {
              SET status = 'running', claimed_by = $2,
                  lease_expires_at = now() + make_interval(secs => $3),
                  updated_at = now()
-             WHERE run_id = $1 AND status = 'pending'",
+             WHERE run_id = $1 AND status IN ('pending', 'queued') AND claimed_by IS NULL",
         )
         .bind(run_id)
         .bind(claimed_by)
@@ -495,7 +496,8 @@ impl SessionStore for PostgresSessionStore {
     async fn request_cancel_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let dropped = sqlx::query(
             "UPDATE runs SET status = 'cancelled', updated_at = now()
-             WHERE run_id = $1 AND tenant = $2 AND status = 'queued' AND claimed_by IS NULL",
+             WHERE run_id = $1 AND tenant = $2
+               AND (status = 'paused' OR (status = 'queued' AND claimed_by IS NULL))",
         )
         .bind(run_id)
         .bind(tenant)
@@ -508,7 +510,7 @@ impl SessionStore for PostgresSessionStore {
         let flagged = sqlx::query(
             "UPDATE runs SET cancel_requested = TRUE, updated_at = now()
              WHERE run_id = $1 AND tenant = $2
-               AND status IN ('pending', 'queued', 'running')",
+               AND status IN ('pending', 'queued', 'running', 'paused')",
         )
         .bind(run_id)
         .bind(tenant)
@@ -524,7 +526,7 @@ impl SessionStore for PostgresSessionStore {
              SET steering = COALESCE(steering, '[]'::jsonb) || to_jsonb($3::text),
                  updated_at = now()
              WHERE run_id = $1 AND tenant = $2
-               AND status IN ('pending', 'queued', 'running')",
+               AND status IN ('pending', 'queued', 'running', 'paused')",
         )
         .bind(run_id)
         .bind(tenant)
@@ -652,6 +654,21 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
+    async fn resume_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE runs
+             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
+                 updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'paused'",
+        )
+        .bind(run_id)
+        .bind(tenant)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(&format!(
             "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND run_id = $2"
@@ -672,7 +689,7 @@ impl SessionStore for PostgresSessionStore {
         let row = sqlx::query(&format!(
             "SELECT {RUN_COLUMNS} FROM runs
              WHERE tenant = $1 AND session_id = $2
-               AND status IN ('pending', 'queued', 'running')
+               AND status IN ('pending', 'queued', 'running', 'paused')
              ORDER BY (status = 'running') DESC, created_at DESC
              LIMIT 1"
         ))

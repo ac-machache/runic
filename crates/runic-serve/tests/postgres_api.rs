@@ -14,7 +14,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
+use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{
     ArtifactStore, LocalArtifactStore, PostgresArtifactStore, PostgresSessionStore, SessionStore,
 };
@@ -78,7 +78,6 @@ fn make_router(sessions: Arc<dyn SessionStore>, artifacts: Arc<dyn ArtifactStore
         artifact_store: artifacts,
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,

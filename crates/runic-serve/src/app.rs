@@ -24,7 +24,6 @@ use utoipa::OpenApi;
 
 use crate::executor::{WorkerConfig, spawn_run_workers};
 use crate::factory::BoxedAgentFactory;
-use crate::human::HumanHub;
 use crate::registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
@@ -38,8 +37,6 @@ pub struct AppState {
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agents: Arc<AgentRegistry>,
     pub runs: Arc<RunRegistry>,
-    /// Bridges parked HITL asks (`ask_user`) to the answer endpoint.
-    pub human_hub: Arc<HumanHub>,
     pub queue_runs: bool,
     pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
 }
@@ -53,10 +50,6 @@ pub struct ServeConfig {
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     /// Named agents; run requests pick one via `"agent"` (default: `default`).
     pub agents: HashMap<String, BoxedAgentFactory>,
-    /// Shared HITL hub; the serve crate builds a per-run `HumanChannel` over it
-    /// and installs it on each run's context, so an `ask_user` raised mid-run
-    /// resolves via the HTTP answer endpoint.
-    pub human_hub: Arc<HumanHub>,
     pub limits: RunLimits,
     /// `Some` switches background runs to queued execution: `POST .../runs`
     /// only records the run; polling workers (this instance's and any other
@@ -67,6 +60,56 @@ pub struct ServeConfig {
     pub broker: Option<Arc<dyn crate::broker::EventBroker>>,
     pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
     pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
+}
+
+impl ServeConfig {
+    pub fn new(
+        session_store: Arc<dyn SessionStore>,
+        artifact_store: Arc<dyn ArtifactStore>,
+        agents: HashMap<String, BoxedAgentFactory>,
+    ) -> Self {
+        Self {
+            session_store,
+            artifact_store,
+            transcriber: None,
+            agents,
+            limits: RunLimits::default(),
+            workers: None,
+            broker: None,
+            nudge: None,
+            identity: None,
+        }
+    }
+
+    pub fn transcriber(mut self, transcriber: Option<Arc<dyn SpeechToText>>) -> Self {
+        self.transcriber = transcriber;
+        self
+    }
+
+    pub fn limits(mut self, limits: RunLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn workers(mut self, workers: WorkerConfig) -> Self {
+        self.workers = Some(workers);
+        self
+    }
+
+    pub fn broker(mut self, broker: Arc<dyn crate::broker::EventBroker>) -> Self {
+        self.broker = Some(broker);
+        self
+    }
+
+    pub fn nudge(mut self, nudge: Arc<dyn crate::broker::QueueNudge>) -> Self {
+        self.nudge = Some(nudge);
+        self
+    }
+
+    pub fn identity(mut self, identity: Arc<dyn crate::auth::IdentityResolver>) -> Self {
+        self.identity = Some(identity);
+        self
+    }
 }
 
 pub fn single_agent(
@@ -93,7 +136,6 @@ fn app_state(
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
         runs: Arc::new(registry),
-        human_hub: config.human_hub,
         queue_runs: config.workers.is_some(),
         nudge: config.nudge,
     };

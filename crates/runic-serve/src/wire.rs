@@ -115,6 +115,13 @@ pub enum WireEvent {
         detail: Option<String>,
     },
 
+    ToolDeferred {
+        run_id: String,
+        call_id: String,
+        channel: String,
+        payload: serde_json::Value,
+    },
+
     /// Non-fatal server-side warning (e.g. a run task that failed to join).
     Warning { message: String },
 
@@ -163,6 +170,7 @@ impl WireEvent {
             Self::Usage { .. } => "usage",
             Self::AskRequired { .. } => "ask_required",
             Self::Escalated { .. } => "escalated",
+            Self::ToolDeferred { .. } => "tool_deferred",
             Self::Warning { .. } => "warning",
             Self::RunError { .. } => "run_error",
             Self::Done { .. } => "done",
@@ -216,6 +224,23 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
         AgentEvent::TurnCompleted { turn, stop_reason } => {
             vec![WireEvent::TurnComplete { turn, stop_reason }]
         }
+        AgentEvent::ToolDeferred {
+            run_id,
+            call_id,
+            channel,
+            payload,
+        } => vec![
+            WireEvent::ToolDeferred {
+                run_id,
+                call_id,
+                channel,
+                payload,
+            },
+            WireEvent::Done {
+                total_turns: None,
+                stop_reason: Some("suspended".to_string()),
+            },
+        ],
         AgentEvent::RunCompleted(outcome) => vec![
             WireEvent::Usage {
                 input_tokens: outcome.usage.input_tokens,
@@ -307,6 +332,18 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
         SessionEvent::StateUpdated { run_id, key, .. } => {
             Some(WireEvent::StateUpdated { run_id, key })
         }
+        SessionEvent::ToolDeferred {
+            run_id,
+            call_id,
+            channel,
+            payload,
+            ..
+        } => Some(WireEvent::ToolDeferred {
+            run_id,
+            call_id,
+            channel,
+            payload,
+        }),
         SessionEvent::TurnBoundary { .. } | SessionEvent::StateSnapshot { .. } => None,
     }
 }
@@ -445,5 +482,29 @@ mod tests {
         assert_eq!(hook_name, "guard");
         assert_eq!(lifecycle, "after_tool");
         assert_eq!(outcome, "substitute");
+    }
+
+    #[test]
+    fn tool_deferred_is_visible_on_replay() {
+        let evt = SessionEvent::ToolDeferred {
+            run_id: "r1".into(),
+            call_id: "call-1".into(),
+            channel: "human_ask".into(),
+            payload: serde_json::json!({ "question": "continue?" }),
+            at: Utc::now(),
+        };
+        let Some(WireEvent::ToolDeferred {
+            run_id,
+            call_id,
+            channel,
+            payload,
+        }) = from_session_event(evt)
+        else {
+            panic!()
+        };
+        assert_eq!(run_id, "r1");
+        assert_eq!(call_id, "call-1");
+        assert_eq!(channel, "human_ask");
+        assert_eq!(payload["question"], "continue?");
     }
 }

@@ -45,13 +45,23 @@ impl Agent {
     pub async fn run_message_with(
         &mut self,
         user_msg: Message,
+        ctx: RunContext,
+    ) -> Result<RunOutcome, AgentError> {
+        self.drive(Some(user_msg), ctx).await
+    }
+
+    pub async fn resume(&mut self, ctx: RunContext) -> Result<RunOutcome, AgentError> {
+        self.drive(None, ctx).await
+    }
+
+    async fn drive(
+        &mut self,
+        user_msg: Option<Message>,
         mut ctx: RunContext,
     ) -> Result<RunOutcome, AgentError> {
-        // Per-run config overwrites the map every run, so it can't leak.
         self.state.config = std::mem::take(&mut ctx.config);
-        // Drop any transient tool output a prior run left unconsumed (e.g. it
-        // stopped after dispatch) — it must never swap into this run's history.
         self.clear_transient_tool_outputs();
+        self.pending_deferral = None;
         // Provider override is restored after the run.
         let saved_provider = ctx
             .provider
@@ -115,7 +125,7 @@ impl Agent {
     /// The turn loop proper.
     async fn run_loop(
         &mut self,
-        user_msg: Message,
+        user_msg: Option<Message>,
         run_id: String,
         agent_label: Option<String>,
         cancel: Option<&CancelToken>,
@@ -123,24 +133,25 @@ impl Agent {
     ) -> Result<RunOutcome, AgentError> {
         self.guard.reset();
 
-        let now = Utc::now();
-        self.state.push_event(SessionEvent::RunStart {
-            run_id: run_id.clone(),
-            agent: agent_label,
-            at: now,
-        });
-        self.state.push_event(SessionEvent::Message {
-            run_id: run_id.clone(),
-            msg: user_msg,
-            at: now,
-        });
+        if let Some(user_msg) = user_msg {
+            let now = Utc::now();
+            self.state.push_event(SessionEvent::RunStart {
+                run_id: run_id.clone(),
+                agent: agent_label,
+                at: now,
+            });
+            self.state.push_event(SessionEvent::Message {
+                run_id: run_id.clone(),
+                msg: user_msg,
+                at: now,
+            });
+            self.fire_write(&run_id, Point::BeforeAgent).await?;
+            self.fire_read(&run_id, Point::BeforeAgent).await?;
+        }
         self.emit(crate::AgentEvent::RunStarted {
             run_id: run_id.clone(),
         });
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
-
-        self.fire_write(&run_id, Point::BeforeAgent).await?;
-        self.fire_read(&run_id, Point::BeforeAgent).await?;
 
         let mut total_turns: u32 = 0;
         let mut total_usage = TokenUsage::default();
@@ -254,9 +265,38 @@ impl Agent {
             {
                 break Err(e);
             }
+            if self.pending_deferral.is_some() {
+                break Ok("suspended".to_string());
+            }
         };
 
         match result {
+            Ok(stop_reason) if stop_reason == "suspended" => {
+                let (call_id, deferral) = self
+                    .pending_deferral
+                    .take()
+                    .expect("a suspended run always carries its deferral");
+                self.emit(crate::AgentEvent::ToolDeferred {
+                    run_id: run_id.clone(),
+                    call_id: call_id.clone(),
+                    channel: deferral.kind.clone(),
+                    payload: deferral.payload.clone(),
+                });
+                self.state.push_event(SessionEvent::ToolDeferred {
+                    run_id: run_id.clone(),
+                    call_id,
+                    channel: deferral.kind,
+                    payload: deferral.payload,
+                    at: Utc::now(),
+                });
+                tracing::info!(%run_id, total_turns, "run suspended");
+                Ok(RunOutcome {
+                    total_turns,
+                    stop_reason: Some("suspended".to_string()),
+                    usage: total_usage,
+                    structured: None,
+                })
+            }
             Ok(stop_reason) => {
                 self.fire_write(&run_id, Point::AfterAgent).await?;
                 self.fire_read(&run_id, Point::AfterAgent).await?;

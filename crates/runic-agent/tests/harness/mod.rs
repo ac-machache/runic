@@ -788,6 +788,7 @@ pub fn session_kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
             SessionEvent::TaskSpawned { .. } => "TaskSpawned",
             SessionEvent::TaskFinished { .. } => "TaskFinished",
             SessionEvent::StateUpdated { .. } => "StateUpdated",
+            SessionEvent::ToolDeferred { .. } => "ToolDeferred",
         })
         .collect()
 }

@@ -3,14 +3,14 @@
 //! - `POST /threads/:id/runs/stream` — drive a fresh turn, stream events live.
 //! - `GET  /threads/:id/runs/:run_id/stream` — replay a past run's persisted
 //!   events and, if it's still in flight, attach to the live broadcast.
-//! - `POST /threads/:id/asks/:ask_id` — answer a parked `ask_user` (HITL).
+//! - `POST /threads/:id/asks/:ask_id` — deliver an answer to a deferred
+//!   `ask_user`; the suspended run resumes.
 //!
 //! The wire format is in [`crate::wire`]. Each SSE event carries the
 //! `WireEvent` JSON body, the matching `event:` field, and (for replay) the
 //! `id:` field from the store's seq — that's what `Last-Event-ID` resumes on.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
@@ -31,7 +31,6 @@ use runic_types::{ContentBlock, Message, MessageContent};
 
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
-use crate::human::HumanChannel;
 use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 use crate::tenant::Tenant;
 use crate::wire::{WireEvent, from_agent_event, from_session_event};
@@ -251,14 +250,10 @@ pub async fn create_and_stream_run(
         .build_run_context(&tenant, &thread_id, &ctx_json)
         .await;
 
-    // Live token channel (AgentEvent) + HITL ask channel (WireEvent), merged
-    // into one SSE stream below. Both close when the run ends (the agent drops
-    // its event sender and the human channel).
+    // Live token channel (AgentEvent) + a side channel for the run task to
+    // report a terminal failure, merged into one SSE stream below.
     let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let (ask_tx, mut ask_rx) = mpsc::unbounded_channel::<WireEvent>();
-    // Clone the wire sender so the run task can report a failure on the same
-    // channel the HITL asks use (no third channel needed).
-    let err_tx = ask_tx.clone();
+    let (err_tx, mut ask_rx) = mpsc::unbounded_channel::<WireEvent>();
 
     let run_id = runic_state::new_run_id();
     let run_input = runic_substrate::RunInput {
@@ -279,13 +274,7 @@ pub async fn create_and_stream_run(
         .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_run_id(&run_id)
-        .with_mode("stream")
-        .with_human(Arc::new(HumanChannel::new(
-            state.human_hub.clone(),
-            ask_tx,
-            tenant.clone(),
-            thread_id.clone(),
-        )));
+        .with_mode("stream");
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "run stream accepted");
 
@@ -342,6 +331,7 @@ pub async fn create_and_stream_run(
         claim.release();
         let (status, error) = match &outcome {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
@@ -527,6 +517,7 @@ pub async fn wait_run(
         claim.release();
         let (status, error) = match &result {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
@@ -708,6 +699,7 @@ pub async fn background_run(
         claim.release();
         let (status, error) = match &outcome {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
@@ -1118,8 +1110,8 @@ pub async fn replay_run(
 
 /// `POST /threads/:id/asks/:ask_id`
 ///
-/// Deliver an operator's answer to a parked `ask_user`. The parked tool wakes,
-/// returns the answer into the conversation, and the run streams on.
+/// Deliver an operator's answer to a deferred `ask_user`. The answer is written
+/// as the tool result and the suspended run is re-queued to resume.
 #[utoipa::path(
     post,
     path = "/threads/{thread_id}/asks/{ask_id}",
@@ -1141,7 +1133,7 @@ pub async fn submit_answer(
     Path((thread_id, ask_id)): Path<(String, String)>,
     Json(body): Json<AnswerRequest>,
 ) -> Result<StatusCode, ServeError> {
-    resolve_answer(state, tenant, thread_id, ask_id, body.answer)
+    resolve_answer(state, tenant, thread_id, ask_id, body.answer).await
 }
 
 /// Legacy alias for clients still posting through the old run-shaped path.
@@ -1167,26 +1159,75 @@ pub async fn submit_answer_legacy(
     Path((thread_id, _run_id, ask_id)): Path<(String, String, String)>,
     Json(body): Json<AnswerRequest>,
 ) -> Result<StatusCode, ServeError> {
-    resolve_answer(state, tenant, thread_id, ask_id, body.answer)
+    resolve_answer(state, tenant, thread_id, ask_id, body.answer).await
 }
 
-fn resolve_answer(
+async fn resolve_answer(
     state: AppState,
     tenant: String,
     thread_id: String,
     ask_id: String,
     answer: String,
 ) -> Result<StatusCode, ServeError> {
-    if state
-        .human_hub
-        .resolve(&tenant, &thread_id, &ask_id, answer)
-    {
-        Ok(StatusCode::ACCEPTED)
-    } else {
-        Err(ServeError::BadRequest(format!(
-            "no pending ask for ask_id '{ask_id}'"
-        )))
+    let events = state.session_store.read(&tenant, &thread_id).await?;
+
+    let Some(run_id) = events.iter().rev().find_map(|e| match &e.event {
+        SessionEvent::ToolDeferred {
+            call_id, run_id, ..
+        } if *call_id == ask_id => Some(run_id.clone()),
+        _ => None,
+    }) else {
+        return Err(ServeError::BadRequest(format!(
+            "no deferred call for ask_id '{ask_id}'"
+        )));
+    };
+
+    let Some(tool_name) = events.iter().find_map(|e| match &e.event {
+        SessionEvent::Message {
+            run_id: msg_run,
+            msg,
+            ..
+        } if *msg_run == run_id => match &msg.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolUse { id, name, .. } if *id == ask_id => Some(name.clone()),
+                _ => None,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Err(ServeError::BadRequest(format!(
+            "deferred call '{ask_id}' has no matching tool_use in run '{run_id}'"
+        )));
+    };
+
+    if !state.session_store.resume_run(&tenant, &run_id).await? {
+        return Err(ServeError::BadRequest(format!(
+            "run '{run_id}' is not awaiting an answer"
+        )));
     }
+    state
+        .session_store
+        .append(
+            &tenant,
+            &thread_id,
+            &SessionEvent::Message {
+                run_id: run_id.clone(),
+                msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: ask_id,
+                    tool_name,
+                    content: answer,
+                    is_error: false,
+                }]),
+                at: chrono::Utc::now(),
+            },
+        )
+        .await?;
+
+    if let Some(nudge) = &state.nudge {
+        nudge.nudge().await;
+    }
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn to_sse(wire: &WireEvent, id: Option<u64>) -> SseEvent {

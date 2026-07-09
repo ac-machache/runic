@@ -243,7 +243,6 @@ fn instance_config(
         artifact_store: std::sync::Arc::new(runic_substrate::MemoryArtifactStore::new()),
         transcriber: None,
         agents: runic_serve::single_agent("main", std::sync::Arc::new(EchoFactory)),
-        human_hub: std::sync::Arc::new(runic_serve::HumanHub::new()),
         limits: Default::default(),
         workers: Some(runic_serve::WorkerConfig {
             max_concurrent_runs: 2,

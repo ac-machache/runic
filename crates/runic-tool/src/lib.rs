@@ -6,6 +6,12 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Deferral {
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
 /// Result of executing a tool. Tool-level failures are reported in-band via
 /// `success`/`error`; the `Result` wrapper is for unexpected execution errors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +26,8 @@ pub struct ToolResult {
     /// file) without writing the bytes into history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred: Option<Deferral>,
 }
 
 impl ToolResult {
@@ -29,6 +37,7 @@ impl ToolResult {
             output: output.into(),
             error: None,
             persisted_output: None,
+            deferred: None,
         }
     }
 
@@ -39,6 +48,7 @@ impl ToolResult {
             output: m.clone(),
             error: Some(m),
             persisted_output: None,
+            deferred: None,
         }
     }
 
@@ -46,6 +56,19 @@ impl ToolResult {
     pub fn with_persisted_summary(mut self, summary: impl Into<String>) -> Self {
         self.persisted_output = Some(summary.into());
         self
+    }
+
+    pub fn defer(kind: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            output: String::new(),
+            error: None,
+            persisted_output: None,
+            deferred: Some(Deferral {
+                kind: kind.into(),
+                payload,
+            }),
+        }
     }
 }
 
@@ -312,6 +335,14 @@ mod tests {
         let e = ToolResult::error("boom");
         assert!(!e.success);
         assert_eq!(e.error.as_deref(), Some("boom"));
+
+        let deferred = ToolResult::defer("human_ask", serde_json::json!({ "question": "ok?" }));
+        assert!(deferred.success);
+        assert_eq!(deferred.output, "");
+        assert_eq!(deferred.deferred.as_ref().unwrap().kind, "human_ask");
+        let json = serde_json::to_value(&deferred).unwrap();
+        assert_eq!(json["deferred"]["payload"]["question"], "ok?");
+        assert!(json.get("persisted_output").is_none());
     }
 
     #[test]

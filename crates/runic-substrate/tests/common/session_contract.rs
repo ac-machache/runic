@@ -874,6 +874,118 @@ pub async fn run_rows_lifecycle(store: &dyn SessionStore) {
     assert!(rec.status.is_terminal());
 }
 
+pub async fn pause_resume_cycle(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store
+        .create_run(&t, &s, "r-pause", "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status("r-pause", RunStatus::Running, None)
+        .await
+        .unwrap();
+    store
+        .set_run_status("r-pause", RunStatus::Paused, None)
+        .await
+        .unwrap();
+    assert!(!RunStatus::Paused.is_terminal());
+
+    assert!(store.resume_run(&t, "r-pause").await.unwrap());
+    let rec = store.get_run(&t, "r-pause").await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert!(rec.claimed_by.is_none());
+
+    assert!(!store.resume_run(&t, "r-pause").await.unwrap());
+
+    store
+        .set_run_status("r-pause", RunStatus::Paused, None)
+        .await
+        .unwrap();
+    assert!(!store.resume_run("intruder", "r-pause").await.unwrap());
+    assert_eq!(
+        store.get_run(&t, "r-pause").await.unwrap().unwrap().status,
+        RunStatus::Paused
+    );
+
+    assert!(store.request_cancel_run(&t, "r-pause").await.unwrap());
+
+    assert!(!store.resume_run(&t, "ghost").await.unwrap());
+    store
+        .create_run(&t, &s, "r-done", "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status("r-done", RunStatus::Running, None)
+        .await
+        .unwrap();
+    assert!(!store.resume_run(&t, "r-done").await.unwrap());
+    store
+        .set_run_status("r-done", RunStatus::Success, None)
+        .await
+        .unwrap();
+    assert!(!store.resume_run(&t, "r-done").await.unwrap());
+    assert_eq!(
+        store.get_run(&t, "r-done").await.unwrap().unwrap().status,
+        RunStatus::Success
+    );
+}
+
+pub async fn cancelling_a_paused_run_prevents_resume(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("paused-cancel");
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status(&r, RunStatus::Paused, None)
+        .await
+        .unwrap();
+
+    assert!(store.request_cancel_run(&t, &r).await.unwrap());
+    assert!(
+        !store.resume_run(&t, &r).await.unwrap(),
+        "a user-cancelled paused run must not be resumable"
+    );
+    assert_eq!(
+        store.get_run(&t, &r).await.unwrap().unwrap().status,
+        RunStatus::Cancelled,
+        "cancelling a paused run should make it terminal"
+    );
+}
+
+pub async fn resume_clears_a_stale_paused_lease(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let r = uid("paused-lease");
+    store
+        .create_run(&t, &s, &r, "coral", &Default::default())
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_run(&r, "old-worker", chrono::Duration::seconds(60))
+            .await
+            .unwrap()
+    );
+    store
+        .set_run_status(&r, RunStatus::Paused, None)
+        .await
+        .unwrap();
+
+    assert!(store.resume_run(&t, &r).await.unwrap());
+    let rec = store.get_run(&t, &r).await.unwrap().unwrap();
+    assert_eq!(rec.status, RunStatus::Queued);
+    assert!(rec.claimed_by.is_none());
+    assert!(rec.lease_expires_at.is_none());
+    assert!(
+        store
+            .claim_run(&r, "new-worker", chrono::Duration::seconds(60))
+            .await
+            .unwrap(),
+        "resumed runs should be claimable by a fresh worker"
+    );
+}
+
 pub async fn latest_run_picks_the_newest(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store
@@ -1002,7 +1114,12 @@ pub async fn heartbeat_extends_the_lease_for_the_owner_only(store: &dyn SessionS
 
 pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    let (dead, alive, idle) = (uid("r-dead"), uid("r-alive"), uid("r-idle"));
+    let (dead, alive, idle, paused) = (
+        uid("r-dead"),
+        uid("r-alive"),
+        uid("r-idle"),
+        uid("r-paused"),
+    );
     store
         .create_run(&t, &s, &dead, "coral", &Default::default())
         .await
@@ -1013,6 +1130,14 @@ pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
         .unwrap();
     store
         .create_run(&t, &s, &idle, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .create_run(&t, &s, &paused, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status(&paused, RunStatus::Paused, None)
         .await
         .unwrap();
     store
@@ -1028,6 +1153,10 @@ pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
     assert!(reaped.iter().any(|r| r.run_id == dead));
     assert!(!reaped.iter().any(|r| r.run_id == alive));
     assert!(!reaped.iter().any(|r| r.run_id == idle));
+    assert!(
+        !reaped.iter().any(|r| r.run_id == paused),
+        "the reaper must never touch a paused run"
+    );
 
     let rec = store.get_run(&t, &dead).await.unwrap().unwrap();
     assert_eq!(rec.status, RunStatus::Error);
@@ -1039,6 +1168,10 @@ pub async fn reaping_marks_only_expired_running_runs(store: &dyn SessionStore) {
     assert_eq!(
         store.get_run(&t, &idle).await.unwrap().unwrap().status,
         RunStatus::Pending
+    );
+    assert_eq!(
+        store.get_run(&t, &paused).await.unwrap().unwrap().status,
+        RunStatus::Paused
     );
 
     let again = store.reap_expired_runs().await.unwrap();
@@ -1550,11 +1683,20 @@ pub async fn delete_session_does_not_clear_other_tenant_thread_lease(store: &dyn
     );
 }
 
-pub async fn pending_runs_are_never_dequeued(store: &dyn SessionStore) {
+pub async fn pending_and_paused_runs_are_never_dequeued(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
-    let r = uid("r-local");
+    let pending = uid("r-pending");
+    let paused = uid("r-paused-dq");
     store
-        .create_run(&t, &s, &r, "coral", &Default::default())
+        .create_run(&t, &s, &pending, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .create_run(&t, &s, &paused, "coral", &Default::default())
+        .await
+        .unwrap();
+    store
+        .set_run_status(&paused, RunStatus::Paused, None)
         .await
         .unwrap();
 
@@ -1564,13 +1706,20 @@ pub async fn pending_runs_are_never_dequeued(store: &dyn SessionStore) {
             .await
             .unwrap()
         {
-            Some(rec) => assert_ne!(rec.run_id, r, "a pending (local) run was dequeued"),
+            Some(rec) => {
+                assert_ne!(rec.run_id, pending, "a pending run was dequeued");
+                assert_ne!(rec.run_id, paused, "a paused run was dequeued");
+            }
             None => break,
         }
     }
     assert_eq!(
-        store.get_run(&t, &r).await.unwrap().unwrap().status,
+        store.get_run(&t, &pending).await.unwrap().unwrap().status,
         RunStatus::Pending
+    );
+    assert_eq!(
+        store.get_run(&t, &paused).await.unwrap().unwrap().status,
+        RunStatus::Paused
     );
 }
 

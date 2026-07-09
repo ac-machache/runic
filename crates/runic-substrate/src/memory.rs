@@ -350,7 +350,11 @@ impl SessionStore for MemorySessionStore {
         let Some(rec) = runs.get_mut(run_id) else {
             return Ok(false);
         };
-        if rec.status != crate::RunStatus::Pending {
+        if !matches!(
+            rec.status,
+            crate::RunStatus::Pending | crate::RunStatus::Queued
+        ) || rec.claimed_by.is_some()
+        {
             return Ok(false);
         }
         let now = Utc::now();
@@ -398,7 +402,9 @@ impl SessionStore for MemorySessionStore {
         if rec.tenant != tenant || rec.status.is_terminal() {
             return Ok(false);
         }
-        if rec.status == crate::RunStatus::Queued && rec.claimed_by.is_none() {
+        let dormant = rec.status == crate::RunStatus::Paused
+            || (rec.status == crate::RunStatus::Queued && rec.claimed_by.is_none());
+        if dormant {
             rec.status = crate::RunStatus::Cancelled;
         } else {
             rec.cancel_requested = true;
@@ -527,6 +533,21 @@ impl SessionStore for MemorySessionStore {
             rec.updated_at = Utc::now();
         }
         Ok(())
+    }
+
+    async fn resume_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
+        let mut runs = self.runs.write().await;
+        let Some(rec) = runs.get_mut(run_id) else {
+            return Ok(false);
+        };
+        if rec.tenant != tenant || rec.status != crate::RunStatus::Paused {
+            return Ok(false);
+        }
+        rec.status = crate::RunStatus::Queued;
+        rec.claimed_by = None;
+        rec.lease_expires_at = None;
+        rec.updated_at = Utc::now();
+        Ok(true)
     }
 
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {

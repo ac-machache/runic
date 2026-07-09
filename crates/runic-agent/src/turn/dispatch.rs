@@ -199,6 +199,11 @@ impl Agent {
             let call = plan.call();
             let mut result = results[i].take().expect("every plan produced a result");
 
+            if let Some(deferral) = result.deferred.take() {
+                self.pending_deferral = Some((call.id.clone(), deferral));
+                continue;
+            }
+
             // For actually-dispatched calls: feed the outcome to the guard
             // (so identical call+result streaks escalate) and append any nudge.
             if let CallPlan::Dispatch { warning, .. } = plan {

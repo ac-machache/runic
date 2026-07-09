@@ -11,7 +11,7 @@ use tower::ServiceExt;
 use runic::agent::Agent;
 use runic::subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, ServeConfig, router, single_agent};
+use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_state::SessionEvent;
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -120,7 +120,6 @@ async fn a_background_task_is_durable_without_another_run() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(DelegatingFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,

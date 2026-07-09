@@ -19,7 +19,8 @@ pub(crate) fn event_at(e: &SessionEvent) -> DateTime<Utc> {
         | SessionEvent::StateSnapshot { at, .. }
         | SessionEvent::TaskSpawned { at, .. }
         | SessionEvent::TaskFinished { at, .. }
-        | SessionEvent::StateUpdated { at, .. } => *at,
+        | SessionEvent::StateUpdated { at, .. }
+        | SessionEvent::ToolDeferred { at, .. } => *at,
     }
 }
 
@@ -37,6 +38,7 @@ pub enum RunStatus {
     Pending,
     Queued,
     Running,
+    Paused,
     Success,
     Error,
     Cancelled,
@@ -48,6 +50,7 @@ impl RunStatus {
             RunStatus::Pending => "pending",
             RunStatus::Queued => "queued",
             RunStatus::Running => "running",
+            RunStatus::Paused => "paused",
             RunStatus::Success => "success",
             RunStatus::Error => "error",
             RunStatus::Cancelled => "cancelled",
@@ -59,6 +62,7 @@ impl RunStatus {
             "pending" => Some(RunStatus::Pending),
             "queued" => Some(RunStatus::Queued),
             "running" => Some(RunStatus::Running),
+            "paused" => Some(RunStatus::Paused),
             "success" => Some(RunStatus::Success),
             "error" => Some(RunStatus::Error),
             "cancelled" => Some(RunStatus::Cancelled),
@@ -322,6 +326,10 @@ pub trait SessionStore: Send + Sync {
 
     async fn release_run(&self, _run_id: &str, _claimed_by: &str) -> Result<()> {
         Err(Error::Unsupported("release_run".into()))
+    }
+
+    async fn resume_run(&self, _tenant: &str, _run_id: &str) -> Result<bool> {
+        Err(Error::Unsupported("resume_run".into()))
     }
 
     async fn get_run(&self, _tenant: &str, _run_id: &str) -> Result<Option<RunRecord>> {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use runic_state::SessionEvent;
 use runic_substrate::{RunRecord, RunStatus, SessionStore};
 use runic_types::Message;
 use tokio::sync::{Semaphore, mpsc};
@@ -153,10 +154,15 @@ async fn execute_queued_run(
     }
     let mut agent =
         crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-    let outcome = agent.run_message_with(user_msg, run_ctx).await;
+    let outcome = if resuming(agent.state().events(), &run_id) {
+        agent.resume(run_ctx).await
+    } else {
+        agent.run_message_with(user_msg, run_ctx).await
+    };
     heartbeat.abort();
     let (status, error) = match &outcome {
         Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
+        Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
         Ok(_) => (RunStatus::Success, None),
         Err(e) => (RunStatus::Error, Some(e.to_string())),
     };
@@ -174,6 +180,16 @@ async fn execute_queued_run(
         .end(&tenant, &thread_id, &run_id, begun.persist.clone())
         .await;
     crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+}
+
+fn resuming(events: &[SessionEvent], run_id: &str) -> bool {
+    let started = events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::RunStart { run_id: r, .. } if r == run_id));
+    let ended = events
+        .iter()
+        .any(|e| matches!(e, SessionEvent::RunEnd { run_id: r, .. } if r == run_id));
+    started && !ended
 }
 
 async fn fail(store: &Arc<dyn SessionStore>, run_id: &str, reason: &str) {

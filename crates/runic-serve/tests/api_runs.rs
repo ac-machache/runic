@@ -6,17 +6,18 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, HumanHub, RunLimits, ServeConfig, router, single_agent};
-use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_serve::{AgentFactory, RunLimits, ServeConfig, WorkerConfig, router, single_agent};
+use runic_substrate::{
+    ArtifactStore, MemoryArtifactStore, MemorySessionStore, RunStatus, SessionStore,
+};
 use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
+use runic_types::{ContentBlock, Message, MessageContent, StopReason, TokenUsage, ToolCall};
 
 const TENANT: &str = "alice";
 
@@ -88,24 +89,27 @@ impl Tool for ParkTool {
             "required": ["question"]
         })
     }
-    async fn execute(&self, args: Value, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        let human = ctx.human().expect("serve wires a human channel");
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let question = args["question"].as_str().unwrap_or("proceed?");
-        match human.ask(question, None).await {
-            Ok(answer) => Ok(ToolResult::ok(answer)),
-            Err(e) => Ok(ToolResult::error(e.to_string())),
-        }
+        Ok(ToolResult::defer(
+            "human_ask",
+            json!({ "question": question }),
+        ))
     }
 }
 
-struct AskingProvider {
-    asked: AtomicBool,
-}
+struct AskingProvider;
 
 #[async_trait]
 impl Provider for AskingProvider {
-    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        if self.asked.swap(true, Ordering::SeqCst) {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        let answered = req.messages.iter().any(|m| match &m.content {
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
+            _ => false,
+        });
+        if answered {
             Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
                     text: "done".into(),
@@ -117,7 +121,12 @@ impl Provider for AskingProvider {
             })
         } else {
             Ok(CompletionResponse {
-                content: vec![],
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "ask_user".into(),
+                    input: json!({ "question": "proceed?" }),
+                    provider_metadata: None,
+                }],
                 stop_reason: StopReason::ToolUse,
                 tool_calls: vec![ToolCall {
                     id: "call-1".into(),
@@ -198,16 +207,58 @@ struct AskingFactory;
 #[async_trait]
 impl AgentFactory for AskingFactory {
     async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(
-            Arc::new(AskingProvider {
-                asked: AtomicBool::new(false),
-            }),
-            tenant,
-            session_id,
-        )
-        .system_prompt("test")
-        .tool(Arc::new(ParkTool))
-        .build()
+        Agent::builder(Arc::new(AskingProvider), tenant, session_id)
+            .system_prompt("test")
+            .tool(Arc::new(ParkTool))
+            .build()
+    }
+}
+
+struct DeferringProvider;
+
+#[async_trait]
+impl Provider for DeferringProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        Ok(CompletionResponse {
+            content: vec![],
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ToolCall {
+                id: "defer-1".into(),
+                name: "defer_to_human".into(),
+                input: json!({ "question": "continue?" }),
+            }],
+            usage: TokenUsage::default(),
+        })
+    }
+}
+
+struct DeferTool;
+
+#[async_trait]
+impl Tool for DeferTool {
+    fn name(&self) -> &str {
+        "defer_to_human"
+    }
+    fn description(&self) -> &str {
+        "defers the run"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({ "type": "object" })
+    }
+    async fn execute(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::defer("human_ask", args))
+    }
+}
+
+struct DeferringFactory;
+
+#[async_trait]
+impl AgentFactory for DeferringFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        Agent::builder(Arc::new(DeferringProvider), tenant, session_id)
+            .system_prompt("test")
+            .tool(Arc::new(DeferTool))
+            .build()
     }
 }
 
@@ -221,7 +272,6 @@ fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -237,7 +287,6 @@ fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
         artifact_store: artifacts.clone(),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -253,7 +302,6 @@ fn failing_run_router() -> Router {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -262,13 +310,29 @@ fn failing_run_router() -> Router {
     })
 }
 
-fn asking_router() -> Router {
+fn asking_router(store: Arc<dyn SessionStore>) -> Router {
     router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
+        session_store: store,
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(AskingFactory)),
-        human_hub: Arc::new(HumanHub::new()),
+        limits: Default::default(),
+        workers: Some(WorkerConfig {
+            max_concurrent_runs: 2,
+            poll_every: Duration::from_millis(20),
+        }),
+        broker: None,
+        nudge: None,
+        identity: None,
+    })
+}
+
+fn deferring_router_with_store(store: Arc<dyn SessionStore>) -> Router {
+    router(ServeConfig {
+        session_store: store,
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(DeferringFactory)),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -291,7 +355,6 @@ fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
                 gate: gate.clone(),
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -373,18 +436,6 @@ fn find_run_id(body: &str) -> Option<String> {
         .find_map(|e| (e["type"] == "run_start").then(|| e["run_id"].as_str().unwrap().to_string()))
 }
 
-fn find_ask_id(buf: &str) -> Option<String> {
-    for line in buf.lines() {
-        if let Some(j) = line.strip_prefix("data:")
-            && let Ok(v) = serde_json::from_str::<Value>(j.trim())
-            && v["type"] == "ask_required"
-        {
-            return v["ask_id"].as_str().map(str::to_string);
-        }
-    }
-    None
-}
-
 async fn create_thread(app: &Router, tenant: &str, thread_id: &str) {
     let resp = app
         .clone()
@@ -406,40 +457,6 @@ async fn wait_for_stored_events(store: &dyn SessionStore, tenant: &str, thread: 
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("stored event count did not reach {min}");
-}
-
-async fn park_ask(
-    app: &Router,
-    thread: &str,
-    tenant: &str,
-) -> (String, tokio::task::JoinHandle<String>) {
-    let resp = app
-        .clone()
-        .oneshot(run_request(thread, tenant, "go"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let mut stream = resp.into_body().into_data_stream();
-    let mut buf = String::new();
-    let ask_id = loop {
-        let chunk = stream
-            .next()
-            .await
-            .expect("stream ended before ask_required")
-            .unwrap();
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        if let Some(id) = find_ask_id(&buf) {
-            break id;
-        }
-    };
-    let drain = tokio::spawn(async move {
-        let mut rest = String::new();
-        while let Some(Ok(c)) = stream.next().await {
-            rest.push_str(&String::from_utf8_lossy(&c));
-        }
-        rest
-    });
-    (ask_id, drain)
 }
 
 #[tokio::test]
@@ -550,6 +567,33 @@ async fn provider_failure_emits_run_error_then_done() {
     assert_eq!(kinds.last().unwrap(), "done");
 }
 
+#[tokio::test]
+async fn stream_run_with_deferred_tool_emits_tool_deferred_and_pauses_the_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = deferring_router_with_store(store.clone());
+
+    let resp = app
+        .oneshot(run_request("t1", TENANT, "need approval"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let run_id = find_run_id(&body).expect("stream starts a run");
+    let kinds = sse_kinds(&body);
+    assert!(
+        kinds.contains(&"tool_deferred".to_string()),
+        "stream should surface deferred tool events live: {body}"
+    );
+    let done = sse_data(&body)
+        .into_iter()
+        .find(|e| e["type"] == "done")
+        .expect("stream closes with done");
+    assert_eq!(done["stop_reason"], "suspended");
+
+    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+    assert_eq!(rec.status, runic_substrate::RunStatus::Paused);
+}
+
 fn wait_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
     post_json(
         &format!("/threads/{thread}/runs/wait"),
@@ -576,6 +620,47 @@ async fn wait_run_returns_the_final_answer_as_json() {
 }
 
 #[tokio::test]
+async fn wait_run_with_deferred_tool_pauses_the_run_and_replays_the_deferral() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = deferring_router_with_store(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(wait_request("t1", TENANT, "need approval"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["stop_reason"], "suspended");
+    let run_id = body["run_id"].as_str().unwrap();
+
+    let rec = store.get_run(TENANT, run_id).await.unwrap().unwrap();
+    assert_eq!(
+        rec.status,
+        runic_substrate::RunStatus::Paused,
+        "a deferred tool suspends the HTTP run until an external resume"
+    );
+
+    let replay = app
+        .oneshot(get_with(
+            &format!("/threads/t1/runs/{run_id}/stream"),
+            TENANT,
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay = body_string(replay).await;
+    let deferred = sse_data(&replay)
+        .into_iter()
+        .find(|e| e["type"] == "tool_deferred")
+        .expect("replay exposes deferred tool event");
+    assert_eq!(deferred["call_id"], "defer-1");
+    assert_eq!(deferred["channel"], "human_ask");
+    assert_eq!(deferred["payload"]["question"], "continue?");
+}
+
+#[tokio::test]
 async fn wait_run_provider_failure_is_500_agent_error() {
     let app = failing_run_router();
     let resp = app
@@ -594,16 +679,6 @@ async fn wait_run_rejects_empty_body() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn wait_run_without_human_channel_survives_an_ask() {
-    let app = asking_router();
-    let resp = app.oneshot(wait_request("t1", TENANT, "go")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["text"], "done");
-    assert_eq!(body["total_turns"], 2);
 }
 
 #[tokio::test]
@@ -789,101 +864,569 @@ async fn replay_past_end_emits_only_done() {
     assert_eq!(kinds, vec!["done".to_string()]);
 }
 
+async fn wait_for_run_status(
+    store: &dyn SessionStore,
+    tenant: &str,
+    run_id: &str,
+    want: RunStatus,
+) {
+    for _ in 0..200 {
+        if let Some(rec) = store.get_run(tenant, run_id).await.unwrap()
+            && rec.status == want
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let got = store
+        .get_run(tenant, run_id)
+        .await
+        .unwrap()
+        .map(|r| r.status);
+    panic!("run {run_id} never reached {want:?} (last: {got:?})");
+}
+
+async fn suspend_a_run(app: &Router, store: &Arc<dyn SessionStore>, thread: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(run_request(thread, TENANT, "go"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let run_id = find_run_id(&body).expect("run starts");
+    assert!(
+        sse_kinds(&body).contains(&"tool_deferred".to_string()),
+        "an ask_user run surfaces tool_deferred: {body}"
+    );
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Paused).await;
+    run_id
+}
+
+async fn seed_paused_deferred_run(
+    store: &dyn SessionStore,
+    thread: &str,
+    run_id: &str,
+    call_id: &str,
+    include_tool_use: bool,
+) {
+    store
+        .create_run(
+            TENANT,
+            thread,
+            run_id,
+            "main",
+            &runic_substrate::RunInput::default(),
+        )
+        .await
+        .unwrap();
+    store
+        .set_run_status(run_id, RunStatus::Paused, None)
+        .await
+        .unwrap();
+    if include_tool_use {
+        store
+            .append(
+                TENANT,
+                thread,
+                &runic_state::SessionEvent::Message {
+                    run_id: run_id.to_string(),
+                    msg: Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+                        id: call_id.to_string(),
+                        name: "ask_user".to_string(),
+                        input: json!({ "question": "proceed?" }),
+                        provider_metadata: None,
+                    }]),
+                    at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .append(
+            TENANT,
+            thread,
+            &runic_state::SessionEvent::ToolDeferred {
+                run_id: run_id.to_string(),
+                call_id: call_id.to_string(),
+                channel: "human_ask".to_string(),
+                payload: json!({ "question": "proceed?" }),
+                at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
-async fn ask_answered_through_legacy_route_resumes_run() {
-    let app = asking_router();
+async fn ask_defers_then_answer_resumes_the_run_to_completion() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
     create_thread(&app, TENANT, "hitl").await;
-    let (ask_id, drain) = park_ask(&app, "hitl", TENANT).await;
+    let run_id = suspend_a_run(&app, &store, "hitl").await;
+
+    let resp = app
+        .clone()
+        .oneshot(answer("/threads/hitl/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    let answered = store
+        .read(TENANT, "hitl")
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|e| matches!(&e.event,
+            runic_state::SessionEvent::Message { msg, .. }
+                if matches!(&msg.content, MessageContent::Blocks(b)
+                    if b.iter().any(|blk| matches!(blk, ContentBlock::Text { text, .. } if text == "done")))));
+    assert!(answered, "the resumed run produced its final answer");
+}
+
+#[tokio::test]
+async fn answering_the_legacy_route_also_resumes() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "legacy").await;
+    let run_id = suspend_a_run(&app, &store, "legacy").await;
 
     let resp = app
         .clone()
         .oneshot(answer(
-            &format!("/threads/hitl/runs/any/asks/{ask_id}"),
+            &format!("/threads/legacy/runs/{run_id}/asks/call-1"),
             TENANT,
             "yes",
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let rest = tokio::time::timeout(Duration::from_secs(2), drain)
-        .await
-        .expect("run resumes after answer")
-        .unwrap();
-    assert!(sse_kinds(&rest).contains(&"done".to_string()));
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
 }
 
 #[tokio::test]
-async fn ask_answer_wrong_scope_is_rejected_then_correct_scope_resumes() {
-    let app = asking_router();
+async fn answering_an_unknown_ask_is_400() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store);
+    let resp = app
+        .oneshot(answer("/threads/nothread/asks/ghost", TENANT, "x"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn answering_from_a_wrong_tenant_is_rejected_and_leaves_the_run_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
     create_thread(&app, TENANT, "scoped").await;
-    let (ask_id, drain) = park_ask(&app, "scoped", TENANT).await;
+    let run_id = suspend_a_run(&app, &store, "scoped").await;
 
-    let wrong_tenant = app
+    let wrong = app
         .clone()
-        .oneshot(answer(
-            &format!("/threads/scoped/asks/{ask_id}"),
-            "mallory",
-            "x",
-        ))
+        .oneshot(answer("/threads/scoped/asks/call-1", "mallory", "x"))
         .await
         .unwrap();
-    assert_eq!(wrong_tenant.status(), StatusCode::BAD_REQUEST);
-
-    let wrong_thread = app
-        .clone()
-        .oneshot(answer(
-            &format!("/threads/other/asks/{ask_id}"),
-            TENANT,
-            "x",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(wrong_thread.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_run(TENANT, &run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "a rejected answer must not disturb the paused run"
+    );
 
     let correct = app
-        .clone()
-        .oneshot(answer(
-            &format!("/threads/scoped/asks/{ask_id}"),
-            TENANT,
-            "yes",
-        ))
+        .oneshot(answer("/threads/scoped/asks/call-1", TENANT, "yes"))
         .await
         .unwrap();
     assert_eq!(correct.status(), StatusCode::ACCEPTED);
-
-    let _ = tokio::time::timeout(Duration::from_secs(2), drain)
-        .await
-        .expect("run resumes");
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
 }
 
 #[tokio::test]
-async fn answering_same_ask_twice_is_202_then_400() {
-    let app = asking_router();
-    create_thread(&app, TENANT, "twice").await;
-    let (ask_id, drain) = park_ask(&app, "twice", TENANT).await;
+async fn answering_from_a_wrong_thread_is_rejected_and_leaves_the_run_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "origin").await;
+    create_thread(&app, TENANT, "other").await;
+    let run_id = suspend_a_run(&app, &store, "origin").await;
 
-    let first = app
+    let wrong = app
         .clone()
-        .oneshot(answer(
-            &format!("/threads/twice/asks/{ask_id}"),
+        .oneshot(answer("/threads/other/asks/call-1", TENANT, "x"))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_run(TENANT, &run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "a rejected cross-thread answer must not disturb the paused run"
+    );
+
+    let correct = app
+        .oneshot(answer("/threads/origin/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(correct.status(), StatusCode::ACCEPTED);
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+}
+
+#[tokio::test]
+async fn answering_with_an_invalid_body_is_rejected_and_leaves_the_run_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "bad-body").await;
+    let run_id = suspend_a_run(&app, &store, "bad-body").await;
+
+    let bad = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/bad-body/asks/call-1",
             TENANT,
-            "yes",
+            "{}".into(),
         ))
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        store
+            .get_run(TENANT, &run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "an invalid answer body must not resume the run"
+    );
 
-    let _ = tokio::time::timeout(Duration::from_secs(2), drain)
+    let correct = app
+        .oneshot(answer("/threads/bad-body/asks/call-1", TENANT, "yes"))
         .await
-        .expect("run resumes");
+        .unwrap();
+    assert_eq!(correct.status(), StatusCode::ACCEPTED);
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+}
+
+#[tokio::test]
+async fn answering_with_a_wrong_json_type_is_rejected_and_leaves_the_run_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "bad-type").await;
+    let run_id = suspend_a_run(&app, &store, "bad-type").await;
+
+    let bad = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/bad-type/asks/call-1",
+            TENANT,
+            json!({ "answer": 42 }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        store
+            .get_run(TENANT, &run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "a schema-invalid answer must not resume the run"
+    );
+
+    let correct = app
+        .oneshot(answer("/threads/bad-type/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(correct.status(), StatusCode::ACCEPTED);
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+}
+
+#[tokio::test]
+async fn answering_a_deferred_call_without_matching_tool_use_is_400_and_stays_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    seed_paused_deferred_run(store.as_ref(), "orphaned", "r-orphaned", "call-1", false).await;
+
+    let resp = app
+        .oneshot(answer("/threads/orphaned/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_run(TENANT, "r-orphaned")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "a malformed deferral must not be resumed"
+    );
+    let tool_results = store
+        .read(TENANT, "orphaned")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            matches!(&e.event,
+            runic_state::SessionEvent::Message { msg, .. }
+                if matches!(&msg.content, MessageContent::Blocks(blocks)
+                    if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
+        })
+        .count();
+    assert_eq!(tool_results, 0, "a rejected answer must not dirty the log");
+}
+
+#[tokio::test]
+async fn answering_a_deferred_call_ignores_tool_use_from_another_run() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    seed_paused_deferred_run(store.as_ref(), "same-thread", "r-other", "call-1", true).await;
+    store
+        .set_run_status("r-other", RunStatus::Cancelled, None)
+        .await
+        .unwrap();
+    seed_paused_deferred_run(store.as_ref(), "same-thread", "r-paused", "call-1", false).await;
+
+    let resp = app
+        .oneshot(answer("/threads/same-thread/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_run(TENANT, "r-paused")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Paused,
+        "answer resolution must not borrow a ToolUse from a different run"
+    );
+}
+
+struct RacingResumeStore {
+    inner: MemorySessionStore,
+    resume_barrier: Barrier,
+}
+
+impl RacingResumeStore {
+    fn new() -> Self {
+        Self {
+            inner: MemorySessionStore::new(),
+            resume_barrier: Barrier::new(2),
+        }
+    }
+}
+
+#[async_trait]
+impl SessionStore for RacingResumeStore {
+    async fn append(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        event: &runic_state::SessionEvent,
+    ) -> runic_substrate::Result<u64> {
+        self.inner.append(tenant, session_id, event).await
+    }
+
+    async fn append_batch(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[runic_state::SessionEvent],
+    ) -> runic_substrate::Result<()> {
+        self.inner.append_batch(tenant, session_id, events).await
+    }
+
+    async fn read(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+        self.inner.read(tenant, session_id).await
+    }
+
+    async fn read_after(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        after_seq: u64,
+    ) -> runic_substrate::Result<Vec<runic_substrate::StoredEvent>> {
+        self.inner.read_after(tenant, session_id, after_seq).await
+    }
+
+    async fn list_sessions(
+        &self,
+        tenant: &str,
+    ) -> runic_substrate::Result<Vec<runic_substrate::SessionMeta>> {
+        self.inner.list_sessions(tenant).await
+    }
+
+    async fn session_meta(
+        &self,
+        tenant: &str,
+        session_id: &str,
+    ) -> runic_substrate::Result<Option<runic_substrate::SessionMeta>> {
+        self.inner.session_meta(tenant, session_id).await
+    }
+
+    async fn set_label(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        label: Option<&str>,
+    ) -> runic_substrate::Result<()> {
+        self.inner.set_label(tenant, session_id, label).await
+    }
+
+    async fn delete_session(&self, tenant: &str, session_id: &str) -> runic_substrate::Result<()> {
+        self.inner.delete_session(tenant, session_id).await
+    }
+
+    async fn create_run(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        run_id: &str,
+        agent: &str,
+        input: &runic_substrate::RunInput,
+    ) -> runic_substrate::Result<()> {
+        self.inner
+            .create_run(tenant, session_id, run_id, agent, input)
+            .await
+    }
+
+    async fn set_run_status(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        error: Option<&str>,
+    ) -> runic_substrate::Result<()> {
+        self.inner.set_run_status(run_id, status, error).await
+    }
+
+    async fn get_run(
+        &self,
+        tenant: &str,
+        run_id: &str,
+    ) -> runic_substrate::Result<Option<runic_substrate::RunRecord>> {
+        self.inner.get_run(tenant, run_id).await
+    }
+
+    async fn resume_run(&self, tenant: &str, run_id: &str) -> runic_substrate::Result<bool> {
+        self.resume_barrier.wait().await;
+        self.inner.resume_run(tenant, run_id).await
+    }
+}
+
+#[tokio::test]
+async fn concurrent_answers_to_the_same_deferred_call_accept_only_one() {
+    let store: Arc<dyn SessionStore> = Arc::new(RacingResumeStore::new());
+    let app = asking_router(store.clone());
+    seed_paused_deferred_run(store.as_ref(), "race-answer", "r-race", "call-1", true).await;
+
+    let first = app
+        .clone()
+        .oneshot(answer("/threads/race-answer/asks/call-1", TENANT, "yes"));
+    let second = app
+        .clone()
+        .oneshot(answer("/threads/race-answer/asks/call-1", TENANT, "yes"));
+    let (first, second) = tokio::join!(first, second);
+    let mut statuses = vec![first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+
+    assert_eq!(
+        statuses,
+        vec![StatusCode::ACCEPTED, StatusCode::BAD_REQUEST],
+        "only one answer should win the paused-run resume race"
+    );
+
+    let tool_results = store
+        .read(TENANT, "race-answer")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| {
+            matches!(&e.event,
+            runic_state::SessionEvent::Message { msg, .. }
+                if matches!(&msg.content, MessageContent::Blocks(blocks)
+                    if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
+        })
+        .count();
+    assert_eq!(tool_results, 1, "only one tool result should be appended");
+}
+
+#[tokio::test]
+async fn answering_after_cancelling_a_paused_run_is_400_and_does_not_resume() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "cancel-answer").await;
+    let run_id = suspend_a_run(&app, &store, "cancel-answer").await;
+
+    let cancel = app
+        .clone()
+        .oneshot(post_json(
+            "/threads/cancel-answer/runs/cancel",
+            TENANT,
+            String::new(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Cancelled).await;
+
+    let late = app
+        .oneshot(answer(
+            "/threads/cancel-answer/asks/call-1",
+            TENANT,
+            "too late",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(late.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        store
+            .get_run(TENANT, &run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        RunStatus::Cancelled,
+        "a late answer must not move a cancelled run back to active"
+    );
+}
+
+#[tokio::test]
+async fn answering_a_second_time_is_400_once_the_run_left_paused() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = asking_router(store.clone());
+    create_thread(&app, TENANT, "twice").await;
+    let run_id = suspend_a_run(&app, &store, "twice").await;
+
+    let first = app
+        .clone()
+        .oneshot(answer("/threads/twice/asks/call-1", TENANT, "yes"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
 
     let second = app
-        .oneshot(answer(
-            &format!("/threads/twice/asks/{ask_id}"),
-            TENANT,
-            "yes",
-        ))
+        .oneshot(answer("/threads/twice/asks/call-1", TENANT, "yes"))
         .await
         .unwrap();
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
@@ -1033,7 +1576,6 @@ async fn wait_response_implies_the_run_is_durable() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1067,7 +1609,6 @@ async fn stream_done_implies_the_run_is_durable() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1176,7 +1717,6 @@ async fn steer_lands_at_the_next_turn_boundary() {
                 provider: provider.clone(),
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1254,7 +1794,6 @@ async fn background_run_returns_202_and_completes_detached() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1342,7 +1881,6 @@ async fn background_run_failure_lands_in_the_run_row() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1383,7 +1921,6 @@ fn queued_router(store: Arc<dyn SessionStore>) -> Router {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         broker: None,
         nudge: None,
@@ -1457,7 +1994,6 @@ async fn a_nudge_wakes_workers_without_waiting_out_the_poll_interval() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         broker: None,
         nudge: Some(runic_serve::LocalNudge::new()),
@@ -1495,7 +2031,6 @@ async fn a_burst_of_queued_runs_survives_collapsed_nudges() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         broker: None,
         nudge: Some(runic_serve::LocalNudge::new()),
@@ -1655,7 +2190,6 @@ fn broker_replay_router(
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: Some(broker),
@@ -1677,7 +2211,6 @@ async fn a_viewer_on_another_instance_gets_the_live_tail_via_the_broker() {
             artifact_store: Arc::new(MemoryArtifactStore::new()),
             transcriber: None,
             agents: single_agent("main", factory),
-            human_hub: Arc::new(HumanHub::new()),
             limits: Default::default(),
             workers: None,
             broker: Some(broker.clone()),
@@ -2223,7 +2756,6 @@ async fn cancelling_a_queued_run_before_pickup_drops_it() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -2269,7 +2801,6 @@ async fn run_status_for_an_unknown_or_foreign_run_is_404() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -2317,7 +2848,6 @@ async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
                 gate: gate.clone(),
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         workers: None,
         broker: None,
         nudge: None,
@@ -2392,7 +2922,6 @@ async fn run_rows_track_the_lifecycle_over_http() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(ScriptedFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -2423,7 +2952,6 @@ async fn run_rows_track_the_lifecycle_over_http() {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(FailingFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,

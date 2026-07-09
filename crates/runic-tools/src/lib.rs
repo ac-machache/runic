@@ -6,14 +6,14 @@
 //!   [`web::SearchProvider`]).
 //! - **weather** — `weather` (current + 7-day forecast) and `weather_history`
 //!   (past daily conditions, back to 1940), keyless via Open-Meteo.
-//! - **human-in-the-loop** — `ask_user` + `escalate_to_human`, over the
-//!   per-run [`runic_tool::HumanInterface`] the surface wires in.
+//! - **human-in-the-loop** — `ask_user` + `escalate_to_human`; both defer, so
+//!   the run suspends and resumes when a human delivers the answer.
 //! - **integrations** — `composio`, one meta-tool over Composio's 1000+
 //!   external app actions (needs an API key, so the app constructs it).
 //!
 //! Web and HITL tools are *not* in [`default_tools`]: `web_search` needs a
-//! provider and the HITL tools only do anything once a human channel is wired,
-//! so the app constructs and registers them explicitly.
+//! provider and the HITL tools imply a surface that can deliver answers, so the
+//! app constructs and registers them explicitly.
 //!
 //! Subsystem-bound tools live with their subsystem (`skill_view`,
 //! `delegate`, `tool_search`/MCP, `search_chats`). The app composes those with

@@ -11,8 +11,8 @@ use tower::ServiceExt;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{
-    AgentFactory, HumanHub, Identity, IdentityError, IdentityResolver, ServeConfig, bare_router,
-    router, single_agent,
+    AgentFactory, Identity, IdentityError, IdentityResolver, ServeConfig, bare_router, router,
+    single_agent,
 };
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -74,7 +74,6 @@ fn config(store: Arc<dyn SessionStore>) -> ServeConfig {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents: single_agent("main", Arc::new(EchoFactory)),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,

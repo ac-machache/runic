@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, BoxedAgentFactory, HumanHub, ServeConfig, router};
+use runic_serve::{AgentFactory, BoxedAgentFactory, ServeConfig, router};
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -116,7 +116,6 @@ fn fixture() -> Fixture {
         artifact_store: Arc::new(MemoryArtifactStore::new()),
         transcriber: None,
         agents,
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -238,7 +237,6 @@ async fn missing_agent_on_a_single_agent_server_routes_to_it() {
                 description: "support agent",
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -270,7 +268,6 @@ async fn stateless_agent_is_rebuilt_every_run_and_persists_nothing() {
                 provider: provider.clone(),
             }),
         ),
-        human_hub: Arc::new(HumanHub::new()),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -363,4 +360,33 @@ async fn run_start_event_records_the_agent() {
         _ => None,
     });
     assert_eq!(agent.flatten().as_deref(), Some("coral"));
+}
+
+#[tokio::test]
+async fn serve_config_builder_defaults_the_optional_infra() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let config = ServeConfig::new(
+        store,
+        Arc::new(MemoryArtifactStore::new()),
+        runic_serve::single_agent(
+            "coral",
+            Arc::new(EchoFactory {
+                provider: EchoProvider::new("hi"),
+                description: "support",
+            }),
+        ),
+    );
+    assert!(config.transcriber.is_none());
+    assert!(config.workers.is_none());
+    assert!(config.broker.is_none());
+    assert!(config.nudge.is_none());
+    assert!(config.identity.is_none());
+
+    let app = router(config);
+    let resp = app
+        .oneshot(wait_request("t1", Some("coral"), "hi"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["text"], "hi");
 }

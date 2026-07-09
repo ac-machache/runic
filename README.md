@@ -12,9 +12,9 @@ server, or inside your own surface. State is **event-sourced** (the provider's
 message list is *derived* from an append-only log), tools are panic-isolated,
 and the whole thing is sync-free where it counts and `cargo test`-fast.
 
-The `runic` binary is one reference surface: a Mistral-backed agent with
-Postgres-persisted threads, file-backed memory, and the full toolbox, served
-over SSE.
+`runic-serve` is a batteries-included HTTP surface — Postgres-persisted threads,
+SSE runs, pooling, and durable resume — that you mount in your own binary,
+supplying the provider, tools, and stores.
 
 ## A minimal agent
 
@@ -60,14 +60,21 @@ async fn main() -> anyhow::Result<()> {
 | **Durable suspend/resume** | a tool can defer (`ToolResult::defer`); the run pauses durably and resumes from that exact call on any instance once an answer arrives — HITL (`ask_user`) is the first consumer |
 | **HTTP** | `runic-serve` (axum: threads, SSE runs, pooling, resume/replay, deferred-tool answers) |
 
-## Run the reference server
+## Serve it over HTTP
 
-```sh
-# env: MISTRAL_API_KEY + DATABASE_URL (Postgres). RUNIC_MODEL overrides the model.
-cargo run -p runic                         # serves http://127.0.0.1:8920
+Mount `runic-serve` in your binary — it gives you an axum `Router` via
+`runic_serve::router(config)`, or a one-call `runic_serve::serve(config, addr)`,
+built from a `ServeConfig` that wires your session + artifact stores and an
+`AgentFactory`:
+
+```rust
+use runic_serve::{ServeConfig, serve, single_agent};
+
+let config = ServeConfig::new(session_store, artifact_store, single_agent("main", factory));
+serve(config, "127.0.0.1:8920").await?;
 ```
 
-Drive it over HTTP + SSE:
+Then the surface is threads + SSE runs:
 
 ```sh
 curl -XPOST localhost:8920/threads -H 'x-runic-tenant: alice' -d '{"thread_id":"t1"}'
@@ -97,7 +104,7 @@ runic-substrate   sessions + artifacts persistence (Postgres / local / memory) +
 runic-memory      bounded MEMORY.md / USER.md stores + memory tool + providers
 runic-transcriber speech-to-text trait + Mistral/Voxtral (audio → text preprocess)
 runic-serve       axum HTTP server (threads, SSE runs, pooling, resume, deferred-tool answers)
-runic             binary: the reference Mistral + Postgres server
+runic             umbrella crate — re-exports the whole SDK behind one dependency
 ```
 
 ## Developing

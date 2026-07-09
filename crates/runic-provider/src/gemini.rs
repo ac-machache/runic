@@ -395,11 +395,11 @@ fn sanitize_gemini_turns(contents: Vec<GeminiContent>) -> Vec<GeminiContent> {
     // Step 1: Merge consecutive same-role turns
     let mut merged: Vec<GeminiContent> = Vec::with_capacity(contents.len());
     for entry in contents {
-        if let Some(last) = merged.last_mut() {
-            if last.role == entry.role {
-                last.parts.extend(entry.parts);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.role == entry.role
+        {
+            last.parts.extend(entry.parts);
+            continue;
         }
         merged.push(entry);
     }
@@ -479,11 +479,11 @@ fn sanitize_gemini_turns(contents: Vec<GeminiContent>) -> Vec<GeminiContent> {
     // Step 5: Final merge pass (removing parts may have created new consecutive same-role)
     let mut final_merged: Vec<GeminiContent> = Vec::with_capacity(merged.len());
     for entry in merged {
-        if let Some(last) = final_merged.last_mut() {
-            if last.role == entry.role {
-                last.parts.extend(entry.parts);
-                continue;
-            }
+        if let Some(last) = final_merged.last_mut()
+            && last.role == entry.role
+        {
+            last.parts.extend(entry.parts);
+            continue;
         }
         final_merged.push(entry);
     }
@@ -957,8 +957,8 @@ impl Provider for GeminiDriver {
                                         ));
                                     }
                                     GeminiPart::Thought {
-                                        ref text,
-                                        ref thought_signature,
+                                        text,
+                                        thought_signature,
                                         ..
                                     } => {
                                         // Gemini 2.5+ thinking chunk — emit as
@@ -989,95 +989,85 @@ impl Provider for GeminiDriver {
             // Process any remaining data left in the buffer after the stream
             // ends (e.g. final chunk not terminated by a newline).
             let remaining = buffer.trim();
-            if !remaining.is_empty() {
-                if let Some(data) = remaining.strip_prefix("data:") {
-                    let data = data.trim();
-                    if !data.is_empty() {
-                        if let Ok(json) = serde_json::from_str::<GeminiResponse>(data) {
-                            if let Some(ref u) = json.usage_metadata {
-                                usage.input_tokens = u.prompt_token_count;
-                                usage.output_tokens = u.candidates_token_count;
-                            }
-                            for candidate in &json.candidates {
-                                if let Some(fr) = &candidate.finish_reason {
-                                    finish_reason = Some(fr.clone());
-                                }
-                                if let Some(ref content) = candidate.content {
-                                    for part in &content.parts {
-                                        match part {
-                                            GeminiPart::Text {
-                                                text,
-                                                thought_signature,
-                                            } => {
-                                                if !text.is_empty() {
-                                                    text_content.push_str(text);
-                                                    let _ = tx
-                                                        .send(StreamEvent::TextDelta {
-                                                            text: text.clone(),
-                                                        })
-                                                        .await;
-                                                }
-                                                if thought_signature.is_some() {
-                                                    text_thought_sig = thought_signature.clone();
-                                                }
-                                            }
-                                            GeminiPart::FunctionCall {
-                                                function_call,
-                                                thought_signature,
-                                            } => {
-                                                let id = format!(
-                                                    "call_{}",
-                                                    uuid::Uuid::new_v4().simple()
-                                                );
-                                                let _ = tx
-                                                    .send(StreamEvent::ToolUseStart {
-                                                        id: id.clone(),
-                                                        name: function_call.name.clone(),
-                                                    })
-                                                    .await;
-                                                let args_str =
-                                                    serde_json::to_string(&function_call.args)
-                                                        .unwrap_or_default();
-                                                let _ = tx
-                                                    .send(StreamEvent::ToolInputDelta {
-                                                        text: args_str,
-                                                    })
-                                                    .await;
-                                                let _ = tx
-                                                    .send(StreamEvent::ToolUseEnd {
-                                                        id,
-                                                        name: function_call.name.clone(),
-                                                        input: function_call.args.clone(),
-                                                    })
-                                                    .await;
-                                                fn_calls.push((
-                                                    function_call.name.clone(),
-                                                    function_call.args.clone(),
-                                                    thought_signature.clone(),
-                                                ));
-                                            }
-                                            GeminiPart::Thought {
-                                                ref text,
-                                                ref thought_signature,
-                                                ..
-                                            } if !text.is_empty()
-                                                || thought_signature.is_some() =>
-                                            {
-                                                if !text.is_empty() {
-                                                    thought_text.push_str(text);
-                                                    let _ = tx
-                                                        .send(StreamEvent::ThinkingDelta {
-                                                            text: text.clone(),
-                                                        })
-                                                        .await;
-                                                }
-                                                if thought_signature.is_some() {
-                                                    thought_sig = thought_signature.clone();
-                                                }
-                                            }
-                                            _ => {}
+            if !remaining.is_empty()
+                && let Some(data) = remaining.strip_prefix("data:")
+            {
+                let data = data.trim();
+                if !data.is_empty()
+                    && let Ok(json) = serde_json::from_str::<GeminiResponse>(data)
+                {
+                    if let Some(ref u) = json.usage_metadata {
+                        usage.input_tokens = u.prompt_token_count;
+                        usage.output_tokens = u.candidates_token_count;
+                    }
+                    for candidate in &json.candidates {
+                        if let Some(fr) = &candidate.finish_reason {
+                            finish_reason = Some(fr.clone());
+                        }
+                        if let Some(ref content) = candidate.content {
+                            for part in &content.parts {
+                                match part {
+                                    GeminiPart::Text {
+                                        text,
+                                        thought_signature,
+                                    } => {
+                                        if !text.is_empty() {
+                                            text_content.push_str(text);
+                                            let _ = tx
+                                                .send(StreamEvent::TextDelta { text: text.clone() })
+                                                .await;
+                                        }
+                                        if thought_signature.is_some() {
+                                            text_thought_sig = thought_signature.clone();
                                         }
                                     }
+                                    GeminiPart::FunctionCall {
+                                        function_call,
+                                        thought_signature,
+                                    } => {
+                                        let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                                        let _ = tx
+                                            .send(StreamEvent::ToolUseStart {
+                                                id: id.clone(),
+                                                name: function_call.name.clone(),
+                                            })
+                                            .await;
+                                        let args_str = serde_json::to_string(&function_call.args)
+                                            .unwrap_or_default();
+                                        let _ = tx
+                                            .send(StreamEvent::ToolInputDelta { text: args_str })
+                                            .await;
+                                        let _ = tx
+                                            .send(StreamEvent::ToolUseEnd {
+                                                id,
+                                                name: function_call.name.clone(),
+                                                input: function_call.args.clone(),
+                                            })
+                                            .await;
+                                        fn_calls.push((
+                                            function_call.name.clone(),
+                                            function_call.args.clone(),
+                                            thought_signature.clone(),
+                                        ));
+                                    }
+                                    GeminiPart::Thought {
+                                        text,
+                                        thought_signature,
+                                        ..
+                                    } if !text.is_empty() || thought_signature.is_some() => {
+                                        if !text.is_empty() {
+                                            thought_text.push_str(text);
+                                            let _ = tx
+                                                .send(StreamEvent::ThinkingDelta {
+                                                    text: text.clone(),
+                                                })
+                                                .await;
+                                        }
+                                        if thought_signature.is_some() {
+                                            thought_sig = thought_signature.clone();
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

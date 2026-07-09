@@ -1,9 +1,7 @@
 [package]
 name = "runic-provider"
 version.workspace = true
-# edition 2021 (not the workspace's 2024): the cp'd OpenFang drivers use 2021
-# match-ergonomics; per-crate edition keeps them compiling unchanged.
-edition = "2021"
+edition = "2024"
 authors.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -27,4 +25,5 @@ uuid = { workspace = true, optional = true }
 # Concrete drivers, opt-in (tree-shaking). The trait/contract always compiles.
 anthropic = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize"]
 openai    = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize"]
+mistral   = ["dep:futures", "dep:reqwest", "dep:tracing", "dep:zeroize"]
 gemini    = ["dep:futures", "dep:reqwest", "dep:tracing", "dep:zeroize", "dep:uuid"]

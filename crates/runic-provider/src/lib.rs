@@ -19,8 +19,13 @@ pub use anthropic::AnthropicDriver;
 
 #[cfg(feature = "openai")]
 pub mod openai;
-#[cfg(feature = "openai")]
-mod think_filter; // helper used by the openai driver
+#[cfg(any(feature = "openai", feature = "mistral"))]
+mod think_filter;
+
+#[cfg(feature = "mistral")]
+pub mod mistral;
+#[cfg(feature = "mistral")]
+pub use mistral::MistralDriver;
 
 #[cfg(feature = "gemini")]
 pub mod gemini;

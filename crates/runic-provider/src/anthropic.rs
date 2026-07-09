@@ -535,7 +535,7 @@ impl Provider for AnthropicDriver {
                             match delta["type"].as_str().unwrap_or("") {
                                 "text_delta" => {
                                     if let Some(text) = delta["text"].as_str() {
-                                        if let Some(ContentBlockAccum::Text(ref mut t)) =
+                                        if let Some(ContentBlockAccum::Text(t)) =
                                             blocks.get_mut(block_idx)
                                         {
                                             t.push_str(text);
@@ -550,8 +550,7 @@ impl Provider for AnthropicDriver {
                                 "input_json_delta" => {
                                     if let Some(partial) = delta["partial_json"].as_str() {
                                         if let Some(ContentBlockAccum::ToolUse {
-                                            ref mut input_json,
-                                            ..
+                                            input_json, ..
                                         }) = blocks.get_mut(block_idx)
                                         {
                                             input_json.push_str(partial);
@@ -566,7 +565,7 @@ impl Provider for AnthropicDriver {
                                 "thinking_delta" => {
                                     if let Some(t) = delta["thinking"].as_str() {
                                         if let Some(ContentBlockAccum::Thinking {
-                                            thinking: ref mut buf,
+                                            thinking: buf,
                                             ..
                                         }) = blocks.get_mut(block_idx)
                                         {
@@ -584,14 +583,12 @@ impl Provider for AnthropicDriver {
                                     // Anthropic streams the thinking signature
                                     // as its own delta type; concatenate any
                                     // partial pieces into the accumulator.
-                                    if let Some(sig) = delta["signature"].as_str() {
-                                        if let Some(ContentBlockAccum::Thinking {
-                                            ref mut signature,
-                                            ..
+                                    if let Some(sig) = delta["signature"].as_str()
+                                        && let Some(ContentBlockAccum::Thinking {
+                                            signature, ..
                                         }) = blocks.get_mut(block_idx)
-                                        {
-                                            signature.push_str(sig);
-                                        }
+                                    {
+                                        signature.push_str(sig);
                                     }
                                 }
                                 _ => {}
@@ -1120,9 +1117,11 @@ mod tests {
             );
         }
         // The text part is still preserved.
-        assert!(blocks
-            .iter()
-            .any(|b| matches!(b, ApiContentBlock::Text { .. })));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, ApiContentBlock::Text { .. }))
+        );
     }
 
     /// Streaming path: signature_delta events accumulate into the final block.
@@ -1259,9 +1258,11 @@ mod tests {
                 "empty redacted_thinking block must be dropped"
             );
         }
-        assert!(blocks
-            .iter()
-            .any(|b| matches!(b, ApiContentBlock::Text { .. })));
+        assert!(
+            blocks
+                .iter()
+                .any(|b| matches!(b, ApiContentBlock::Text { .. }))
+        );
     }
 
     #[test]

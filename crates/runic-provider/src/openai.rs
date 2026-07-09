@@ -790,52 +790,52 @@ impl Provider for OpenAIDriver {
             // Capture reasoning text from models that use a separate field.
             // Issue #1098 (legacy `reasoning_content`) + #1157 (vLLM ≥ 0.19
             // renamed it to `reasoning`). Accept either.
-            if let Some(reasoning) = choice.message.reasoning_text() {
-                if !reasoning.is_empty() {
-                    debug!(len = reasoning.len(), "Captured reasoning from response");
-                    // Mark the format so the outbound path knows to re-emit
-                    // this on the reasoning field rather than as inline
-                    // `<think>` tags. The outbound assembler writes BOTH
-                    // `reasoning` and `reasoning_content` for cross-server
-                    // compat.
-                    content.push(ContentBlock::Thinking {
-                        thinking: reasoning.to_string(),
-                        signature: None,
-                        provider_metadata: Some(serde_json::json!({
-                            "format": "reasoning_content"
-                        })),
-                    });
-                }
+            if let Some(reasoning) = choice.message.reasoning_text()
+                && !reasoning.is_empty()
+            {
+                debug!(len = reasoning.len(), "Captured reasoning from response");
+                // Mark the format so the outbound path knows to re-emit
+                // this on the reasoning field rather than as inline
+                // `<think>` tags. The outbound assembler writes BOTH
+                // `reasoning` and `reasoning_content` for cross-server
+                // compat.
+                content.push(ContentBlock::Thinking {
+                    thinking: reasoning.to_string(),
+                    signature: None,
+                    provider_metadata: Some(serde_json::json!({
+                        "format": "reasoning_content"
+                    })),
+                });
             }
 
             let already_has_reasoning = choice.message.reasoning_text().is_some();
-            if let Some(text) = choice.message.content {
-                if !text.is_empty() {
-                    // Extract <think>...</think> blocks that some local models
-                    // embed directly in the content field.
-                    let (cleaned, thinking) = extract_think_tags(&text);
-                    if let Some(think_text) = thinking {
-                        // Only add if we didn't already get a reasoning field
-                        // (either legacy `reasoning_content` or new vLLM 0.19+
-                        // `reasoning`). Issue #1157.
-                        if !already_has_reasoning {
-                            // Mark the format so we re-emit as inline `<think>`
-                            // tags on the next turn (MiniMax/M2.5 style).
-                            content.push(ContentBlock::Thinking {
-                                thinking: think_text,
-                                signature: None,
-                                provider_metadata: Some(serde_json::json!({
-                                    "format": "inline_think"
-                                })),
-                            });
-                        }
-                    }
-                    if !cleaned.is_empty() {
-                        content.push(ContentBlock::Text {
-                            text: cleaned,
-                            provider_metadata: None,
+            if let Some(text) = choice.message.content
+                && !text.is_empty()
+            {
+                // Extract <think>...</think> blocks that some local models
+                // embed directly in the content field.
+                let (cleaned, thinking) = extract_think_tags(&text);
+                if let Some(think_text) = thinking {
+                    // Only add if we didn't already get a reasoning field
+                    // (either legacy `reasoning_content` or new vLLM 0.19+
+                    // `reasoning`). Issue #1157.
+                    if !already_has_reasoning {
+                        // Mark the format so we re-emit as inline `<think>`
+                        // tags on the next turn (MiniMax/M2.5 style).
+                        content.push(ContentBlock::Thinking {
+                            thinking: think_text,
+                            signature: None,
+                            provider_metadata: Some(serde_json::json!({
+                                "format": "inline_think"
+                            })),
                         });
                     }
+                }
+                if !cleaned.is_empty() {
+                    content.push(ContentBlock::Text {
+                        text: cleaned,
+                        provider_metadata: None,
+                    });
                 }
             }
 
@@ -1270,22 +1270,20 @@ impl Provider for OpenAIDriver {
 
                         // Text content delta â€” route through think filter to
                         // strip <think>...</think> tags before they reach the client.
-                        if let Some(text) = delta["content"].as_str() {
-                            if !text.is_empty() {
-                                text_content.push_str(text);
-                                for action in think_filter.process(text) {
-                                    match action {
-                                        FilterAction::EmitText(t) => {
-                                            let _ =
-                                                tx.send(StreamEvent::TextDelta { text: t }).await;
-                                        }
-                                        FilterAction::EmitThinking(t) => {
-                                            // Route think content the same way as
-                                            // reasoning_content deltas.
-                                            let _ = tx
-                                                .send(StreamEvent::ThinkingDelta { text: t })
-                                                .await;
-                                        }
+                        if let Some(text) = delta["content"].as_str()
+                            && !text.is_empty()
+                        {
+                            text_content.push_str(text);
+                            for action in think_filter.process(text) {
+                                match action {
+                                    FilterAction::EmitText(t) => {
+                                        let _ = tx.send(StreamEvent::TextDelta { text: t }).await;
+                                    }
+                                    FilterAction::EmitThinking(t) => {
+                                        // Route think content the same way as
+                                        // reasoning_content deltas.
+                                        let _ =
+                                            tx.send(StreamEvent::ThinkingDelta { text: t }).await;
                                     }
                                 }
                             }
@@ -1295,15 +1293,14 @@ impl Provider for OpenAIDriver {
                         if let Some(reasoning) = delta["reasoning_content"]
                             .as_str()
                             .or_else(|| delta["reasoning"].as_str())
+                            && !reasoning.is_empty()
                         {
-                            if !reasoning.is_empty() {
-                                reasoning_content.push_str(reasoning);
-                                let _ = tx
-                                    .send(StreamEvent::ThinkingDelta {
-                                        text: reasoning.to_string(),
-                                    })
-                                    .await;
-                            }
+                            reasoning_content.push_str(reasoning);
+                            let _ = tx
+                                .send(StreamEvent::ThinkingDelta {
+                                    text: reasoning.to_string(),
+                                })
+                                .await;
                         }
 
                         // Tool call deltas
@@ -1672,7 +1669,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 
     while let Some(start) = remaining.find("<function=") {
         remaining = &remaining[start + 10..]; // skip "<function="
-                                              // Find the end tag
+        // Find the end tag
         let end = remaining.find("</function>")?;
         let mut call_content = &remaining[..end];
         remaining = &remaining[end + 11..]; // skip "</function>"
@@ -1751,10 +1748,12 @@ mod tests {
         let resp = result.unwrap();
         assert_eq!(resp.tool_calls.len(), 1);
         assert_eq!(resp.tool_calls[0].name, "web_fetch");
-        assert!(resp.tool_calls[0]
-            .input
-            .to_string()
-            .contains("https://example.com"));
+        assert!(
+            resp.tool_calls[0]
+                .input
+                .to_string()
+                .contains("https://example.com")
+        );
     }
 
     #[test]

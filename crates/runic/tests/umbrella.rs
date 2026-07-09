@@ -38,3 +38,12 @@ fn assert_types_reachable() {
 fn umbrella_surface_compiles() {
     assert_types_reachable();
 }
+
+#[cfg(feature = "anthropic")]
+fn _anthropic_reachable(_: runic::provider::AnthropicDriver) {}
+#[cfg(feature = "openai")]
+fn _openai_reachable(_: runic::provider::openai::OpenAIDriver) {}
+#[cfg(feature = "mistral")]
+fn _mistral_reachable(_: runic::provider::MistralDriver) {}
+#[cfg(feature = "gemini")]
+fn _gemini_reachable(_: runic::provider::gemini::GeminiDriver) {}

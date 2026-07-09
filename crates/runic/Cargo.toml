@@ -37,4 +37,5 @@ tempfile = { workspace = true }
 [features]
 anthropic = ["runic-provider/anthropic"]
 openai = ["runic-provider/openai"]
+mistral = ["runic-provider/mistral"]
 gemini = ["runic-provider/gemini"]

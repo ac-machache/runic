@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "runic-agent"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1709,6 +1709,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "chrono",
  "http-body-util",
  "proptest",
  "runic-agent",
@@ -1730,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "runic-hook"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "runic-state",
@@ -1740,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "runic-provider"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "futures",
@@ -1756,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "runic-serve"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1786,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "runic-skills"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1800,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "runic-state"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "chrono",
  "runic-types",
@@ -1812,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "runic-subagent"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1833,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "runic-substrate"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1853,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "runic-tool"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1863,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "runic-tools"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1879,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "runic-transcriber"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -1892,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "runic-types"
-version = "0.8.1"
+version = "0.8.3"
 dependencies = [
  "serde",
  "serde_json",

@@ -521,13 +521,13 @@ pub async fn wait_run(
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
+        flush_persist(&begun.persist).await;
         if let Err(e) = store
             .set_run_status(&run_id, status, error.as_deref())
             .await
         {
             tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
         }
-        flush_persist(&begun.persist).await;
         registry
             .end(&tenant, &thread_id, &run_id, begun.persist.clone())
             .await;
@@ -703,16 +703,16 @@ pub async fn background_run(
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
+        if let Err(e) = &outcome {
+            tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
+        }
+        flush_persist(&begun.persist).await;
         if let Err(e) = store
             .set_run_status(&run_id, status, error.as_deref())
             .await
         {
             tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
         }
-        if let Err(e) = &outcome {
-            tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
-        }
-        flush_persist(&begun.persist).await;
         registry
             .end(&tenant, &thread_id, &run_id, begun.persist.clone())
             .await;

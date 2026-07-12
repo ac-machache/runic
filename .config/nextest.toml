@@ -1,3 +1,6 @@
+[test-groups]
+pg-global-queue = { max-threads = 1 }
+
 [profile.default]
 fail-fast = false
 failure-output = "immediate-final"
@@ -7,6 +10,10 @@ slow-timeout = { period = "45s", terminate-after = 2 }
 status-level = "fail"
 success-output = "never"
 test-threads = "num-cpus"
+
+[[profile.default.overrides]]
+filter = 'binary(postgres_contract) & test(/queue/)'
+test-group = 'pg-global-queue'
 
 [profile.ci]
 fail-fast = false

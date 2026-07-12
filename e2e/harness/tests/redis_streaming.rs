@@ -82,8 +82,13 @@ fn redis_broker_round_trips_an_event() {
 #[test]
 fn cross_tenant_channels_do_not_leak() {
     rt().block_on(async {
-        let Some(b) = broker(&unique("iso")).await else { return };
-        let mut rx = b.subscribe("tenantX", "th").await.expect("subscribe failed");
+        let Some(b) = broker(&unique("iso")).await else {
+            return;
+        };
+        let mut rx = b
+            .subscribe("tenantX", "th")
+            .await
+            .expect("subscribe failed");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         b.publish(
@@ -111,7 +116,10 @@ fn cross_tenant_channels_do_not_leak() {
             .expect("broker channel closed");
         match got {
             SessionEvent::TurnBoundary { run_id, .. } => {
-                assert_eq!(run_id, "mine", "received an event from another tenant's channel");
+                assert_eq!(
+                    run_id, "mine",
+                    "received an event from another tenant's channel"
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -121,7 +129,9 @@ fn cross_tenant_channels_do_not_leak() {
 #[test]
 fn run_events_fan_out_across_instances_via_redis() {
     rt().block_on(async {
-        let Some(b) = broker(&unique("fan")).await else { return };
+        let Some(b) = broker(&unique("fan")).await else {
+            return;
+        };
         let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
         let artifacts: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
         let mk = || {
@@ -162,7 +172,9 @@ fn run_events_fan_out_across_instances_via_redis() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
         while tokio::time::Instant::now() < deadline && !(saw_start && saw_end) {
             match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
-                Ok(Some(SessionEvent::RunStart { run_id: r, .. })) if r == run_id => saw_start = true,
+                Ok(Some(SessionEvent::RunStart { run_id: r, .. })) if r == run_id => {
+                    saw_start = true
+                }
                 Ok(Some(SessionEvent::RunEnd { run_id: r, .. })) if r == run_id => saw_end = true,
                 Ok(Some(_)) => {}
                 Ok(None) => break,

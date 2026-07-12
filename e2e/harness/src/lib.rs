@@ -1,15 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use runic::ability::ability;
+use runic::composer::Composer;
 use runic_agent::Agent;
 use runic_hook::{HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, BoxedAgentFactory, single_agent};
+use runic_skills::SkillSet;
 use runic_state::AgentState;
+use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage, ToolCall};
+use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
+
+const ECHO_ABILITY: &str = "echo-pack";
+const DOCS_ABILITY: &str = "docs-pack";
+const DOCS_SKILL_ID: &str = "docs:task";
+const DOCS_WORKER: &str = "docs-worker";
 
 pub fn dummy_agents(real_mistral: bool) -> HashMap<String, BoxedAgentFactory> {
     single_agent("main", Arc::new(DummyFactory { real_mistral }))
@@ -29,16 +38,85 @@ impl AgentFactory for DummyFactory {
             Arc::new(ScriptedProvider)
         };
         let model = std::env::var("RUNIC_MODEL").unwrap_or_else(|_| "mistral-medium-latest".into());
-        Agent::builder(provider, tenant, session_id)
-            .model(model)
-            .system_prompt("e2e harness agent")
-            .tool(Arc::new(AddTool))
-            .tool(Arc::new(SlowTool))
-            .tool(Arc::new(EchoTool))
-            .tool(Arc::new(FailTool))
-            .tool(Arc::new(runic_tools::AskUserTool))
-            .write_hook(Arc::new(MarkerHook))
-            .build()
+        Composer::new(provider, model)
+            .instructions("e2e harness agent")
+            .with(
+                ability("core")
+                    .tool(AddTool)
+                    .tool(SlowTool)
+                    .tool(FailTool)
+                    .tool(runic_tools::AskUserTool)
+                    .hook(MarkerHook),
+            )
+            .with(
+                ability(ECHO_ABILITY)
+                    .describe("echoes text back verbatim")
+                    .deferred()
+                    .tool(EchoTool),
+            )
+            .with(
+                ability(DOCS_ABILITY)
+                    .describe("a task skill and a worker subagent")
+                    .deferred()
+                    .skills(docs_skill().await)
+                    .subagent(docs_worker()),
+            )
+            .subagent_builder(Arc::new(ChildBuilder))
+            .build(tenant, session_id)
+            .await
+            .expect("harness composer build")
+    }
+}
+
+async fn docs_skill() -> Arc<SkillSet> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join("task");
+    std::fs::create_dir_all(&skill_dir).expect("skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: task\ndescription: a gated harness skill\n---\nDo the task carefully.",
+    )
+    .expect("skill file");
+    Arc::new(SkillSet::load_dir("docs", dir.path()).await)
+}
+
+fn docs_worker() -> AgentDef {
+    AgentDef {
+        name: DOCS_WORKER.to_string(),
+        description: "a gated harness worker".to_string(),
+        provider: None,
+        model: None,
+        allowed_tools: vec![],
+        skills: vec![],
+        max_turns: Some(3),
+        system_prompt: "you are a harness worker".to_string(),
+    }
+}
+
+struct ChildProvider;
+
+#[async_trait]
+impl Provider for ChildProvider {
+    fn name(&self) -> &str {
+        "child"
+    }
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        Ok(text_response("child done".to_string()))
+    }
+}
+
+struct ChildBuilder;
+
+#[async_trait]
+impl SubagentBuilder for ChildBuilder {
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        Arc::new(ChildProvider)
+    }
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        "child-model".to_string()
+    }
+    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
+        vec![]
     }
 }
 
@@ -64,43 +142,97 @@ impl Provider for ScriptedProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        let just_ran_tool = req.messages.last().and_then(|m| match &m.content {
-            MessageContent::Blocks(b) => b.iter().rev().find_map(|x| match x {
-                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
-                _ => None,
-            }),
-            _ => None,
-        });
-        if let Some(result) = just_ran_tool {
-            return Ok(text_response(format!("done: {result}")));
-        }
-
-        let directive = req
+        // `req.messages` is the WHOLE thread's history, not just this run's —
+        // a new run on a reused thread starts with every prior run's turns
+        // still in front of it. So the directive is the LAST Text-bearing
+        // user message, and "what happened this run" is only what follows it;
+        // scanning the full history would see a previous run's tool results
+        // (e.g. a prior `ask_user` answer) and short-circuit before this run
+        // ever calls its own tools.
+        let Some(directive_idx) = req
             .messages
             .iter()
-            .rev()
-            .find_map(|m| match (&m.role, &m.content) {
-                (Role::User, MessageContent::Text(t)) => Some(t.clone()),
-                (Role::User, MessageContent::Blocks(b)) => b.iter().find_map(|x| match x {
-                    ContentBlock::Text { text, .. } => Some(text.clone()),
-                    _ => None,
-                }),
-                _ => None,
-            })
-            .unwrap_or_default();
+            .rposition(|m| matches!(m.role, Role::User) && directive_text(m).is_some())
+        else {
+            return Ok(text_response("ok".to_string()));
+        };
+        let directive = directive_text(&req.messages[directive_idx]).unwrap_or_default();
+        let this_run = &req.messages[directive_idx + 1..];
 
-        Ok(interpret(directive.trim()))
+        let completed = completed_tool_names(this_run);
+        Ok(respond(plan(directive.trim()), &completed, this_run))
     }
 }
 
-fn interpret(directive: &str) -> CompletionResponse {
+fn directive_text(message: &Message) -> Option<String> {
+    match &message.content {
+        MessageContent::Text(text) => Some(text.clone()),
+        MessageContent::Blocks(blocks) => blocks.iter().find_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        }),
+    }
+}
+
+fn completed_tool_names(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn result_content_for<'a>(messages: &'a [Message], tool_name: &str) -> Option<&'a str> {
+    messages
+        .iter()
+        .rev()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            _ => None,
+        })
+        .flatten()
+        .find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_name: name,
+                content,
+                ..
+            } if name == tool_name => Some(content.as_str()),
+            _ => None,
+        })
+}
+
+enum Step {
+    Idle(String),
+    Direct(&'static str, serde_json::Value),
+    Deferred {
+        ability: &'static str,
+        tool: &'static str,
+        args: serde_json::Value,
+    },
+}
+
+fn plan(directive: &str) -> Step {
     if directive == "fail" {
-        return tool_call("fail", serde_json::json!({}));
+        return Step::Direct("fail", serde_json::json!({}));
+    }
+    if directive == "delegate" {
+        return Step::Deferred {
+            ability: DOCS_ABILITY,
+            tool: "delegate",
+            args: serde_json::json!({ "agent": DOCS_WORKER, "prompt": "go" }),
+        };
     }
     match directive.split_once(':') {
         Some(("add", rest)) => {
             let (a, b) = rest.split_once(',').unwrap_or(("0", "0"));
-            tool_call(
+            Step::Direct(
                 "add",
                 serde_json::json!({
                     "a": a.trim().parse::<i64>().unwrap_or(0),
@@ -108,20 +240,57 @@ fn interpret(directive: &str) -> CompletionResponse {
                 }),
             )
         }
-        Some(("slow", ms)) => tool_call(
+        Some(("slow", ms)) => Step::Direct(
             "slow",
             serde_json::json!({ "ms": ms.trim().parse::<u64>().unwrap_or(0) }),
         ),
-        Some(("echo", text)) => tool_call("echo", serde_json::json!({ "text": text })),
+        Some(("echo", text)) => Step::Deferred {
+            ability: ECHO_ABILITY,
+            tool: "echo",
+            args: serde_json::json!({ "text": text }),
+        },
+        Some(("skill", _)) => Step::Deferred {
+            ability: DOCS_ABILITY,
+            tool: "skill_view",
+            args: serde_json::json!({ "name": DOCS_SKILL_ID }),
+        },
         Some(("ask", question)) => {
-            tool_call("ask_user", serde_json::json!({ "question": question }))
+            Step::Direct("ask_user", serde_json::json!({ "question": question }))
         }
-        Some(("say", text)) => text_response(text.to_string()),
-        _ => text_response(if directive.is_empty() {
+        Some(("say", text)) => Step::Idle(text.to_string()),
+        _ => Step::Idle(if directive.is_empty() {
             "ok".to_string()
         } else {
             directive.to_string()
         }),
+    }
+}
+
+fn respond(step: Step, completed: &HashSet<String>, this_run: &[Message]) -> CompletionResponse {
+    match step {
+        Step::Idle(text) => text_response(text),
+        Step::Direct(name, args) => {
+            if completed.contains(name) {
+                let result = result_content_for(this_run, name).unwrap_or_default();
+                text_response(format!("done: {result}"))
+            } else {
+                tool_call(name, args)
+            }
+        }
+        Step::Deferred {
+            ability,
+            tool,
+            args,
+        } => {
+            if completed.contains(tool) {
+                let result = result_content_for(this_run, tool).unwrap_or_default();
+                text_response(format!("done: {result}"))
+            } else if completed.contains("load_ability") {
+                tool_call(tool, args)
+            } else {
+                tool_call("load_ability", serde_json::json!({ "id": ability }))
+            }
+        }
     }
 }
 

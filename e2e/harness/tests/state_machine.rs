@@ -21,6 +21,8 @@ enum Directive {
     Fail,
     Slow(u16),
     Ask(String),
+    Skill,
+    Delegate,
 }
 
 impl Directive {
@@ -32,6 +34,8 @@ impl Directive {
             Directive::Fail => "fail".to_string(),
             Directive::Slow(ms) => format!("slow:{ms}"),
             Directive::Ask(q) => format!("ask:{q}"),
+            Directive::Skill => "skill:task".to_string(),
+            Directive::Delegate => "delegate".to_string(),
         }
     }
 }
@@ -72,6 +76,8 @@ fn simple_directive() -> impl Strategy<Value = Directive> {
         "[a-z]{1,6}".prop_map(Directive::Echo),
         Just(Directive::Fail),
         (0u16..40).prop_map(Directive::Slow),
+        Just(Directive::Skill),
+        Just(Directive::Delegate),
     ]
 }
 

@@ -21,6 +21,8 @@ enum Directive {
     Echo(String),
     Fail,
     Slow(u16),
+    Skill,
+    Delegate,
 }
 
 impl Directive {
@@ -31,6 +33,8 @@ impl Directive {
             Directive::Echo(s) => format!("echo:{s}"),
             Directive::Fail => "fail".to_string(),
             Directive::Slow(ms) => format!("slow:{ms}"),
+            Directive::Skill => "skill:task".to_string(),
+            Directive::Delegate => "delegate".to_string(),
         }
     }
 }
@@ -42,6 +46,8 @@ fn simple_directive() -> impl Strategy<Value = Directive> {
         "[a-z]{1,6}".prop_map(Directive::Echo),
         Just(Directive::Fail),
         (0u16..30).prop_map(Directive::Slow),
+        Just(Directive::Skill),
+        Just(Directive::Delegate),
     ]
 }
 
@@ -53,8 +59,11 @@ struct Job {
 }
 
 fn job() -> impl Strategy<Value = Job> {
-    (0u8..2, simple_directive(), any::<bool>())
-        .prop_map(|(tenant, dir, on_b)| Job { tenant, dir, on_b })
+    (0u8..2, simple_directive(), any::<bool>()).prop_map(|(tenant, dir, on_b)| Job {
+        tenant,
+        dir,
+        on_b,
+    })
 }
 
 fn tenant_id(prefix: &str, t: u8) -> String {
@@ -168,13 +177,21 @@ async fn run_concurrent(
 
     let mut handles = Vec::new();
     for (i, job) in jobs.iter().enumerate() {
-        let app = if job.on_b { app_b.clone() } else { app_a.clone() };
+        let app = if job.on_b {
+            app_b.clone()
+        } else {
+            app_a.clone()
+        };
         let t = tenant_id(prefix, job.tenant);
         let th = format!("{prefix}cth{i}");
         let text = job.dir.to_text();
         handles.push(tokio::spawn(async move {
             let resp = app
-                .oneshot(post(&format!("/threads/{th}/runs"), &t, json!({ "message": text })))
+                .oneshot(post(
+                    &format!("/threads/{th}/runs"),
+                    &t,
+                    json!({ "message": text }),
+                ))
                 .await
                 .unwrap();
             let status = resp.status();
@@ -206,8 +223,20 @@ async fn run_concurrent(
         let evs = store.read(t, th).await.unwrap();
         let starts = count_starts(&evs, run_id);
         let ends = count_ends(&evs, run_id);
-        prop_assert_eq!(starts, 1, "run {} started {} times (double claim)", run_id, starts);
-        prop_assert_eq!(ends, 1, "run {} ended {} times (double execute)", run_id, ends);
+        prop_assert_eq!(
+            starts,
+            1,
+            "run {} started {} times (double claim)",
+            run_id,
+            starts
+        );
+        prop_assert_eq!(
+            ends,
+            1,
+            "run {} ended {} times (double execute)",
+            run_id,
+            ends
+        );
         assert_gapless(&evs, th)?;
 
         let other = tenant_id(prefix, (job.tenant + 1) % 2);
@@ -284,8 +313,16 @@ async fn resume_across_instances(
     );
 
     let evs = store.read(&t, &th).await.unwrap();
-    prop_assert_eq!(count_starts(&evs, &run_id), 1, "resumed run has a second RunStart");
-    prop_assert_eq!(count_ends(&evs, &run_id), 1, "resumed run RunEnd count wrong");
+    prop_assert_eq!(
+        count_starts(&evs, &run_id),
+        1,
+        "resumed run has a second RunStart"
+    );
+    prop_assert_eq!(
+        count_ends(&evs, &run_id),
+        1,
+        "resumed run RunEnd count wrong"
+    );
     assert_gapless(&evs, &th)?;
     Ok(())
 }
@@ -303,11 +340,19 @@ async fn run_same_thread(
 
     let mut handles = Vec::new();
     for (i, dir) in dirs.iter().enumerate() {
-        let app = if i % 2 == 0 { app_a.clone() } else { app_b.clone() };
+        let app = if i % 2 == 0 {
+            app_a.clone()
+        } else {
+            app_b.clone()
+        };
         let (t, th, text) = (t.clone(), th.clone(), dir.to_text());
         handles.push(tokio::spawn(async move {
             let resp = app
-                .oneshot(post(&format!("/threads/{th}/runs"), &t, json!({ "message": text })))
+                .oneshot(post(
+                    &format!("/threads/{th}/runs"),
+                    &t,
+                    json!({ "message": text }),
+                ))
                 .await
                 .unwrap();
             let status = resp.status();
@@ -329,7 +374,12 @@ async fn run_same_thread(
 
     for run_id in &run_ids {
         let final_status = wait_until(store.as_ref(), &t, run_id, |s| s.is_terminal()).await;
-        prop_assert_eq!(final_status, Some(RunStatus::Success), "run {} not Success", run_id);
+        prop_assert_eq!(
+            final_status,
+            Some(RunStatus::Success),
+            "run {} not Success",
+            run_id
+        );
     }
 
     let evs = store.read(&t, &th).await.unwrap();
@@ -405,17 +455,26 @@ async fn run_cancel_race(
 
     let status = wait_until(store.as_ref(), &t, &run_id, |s| s.is_terminal()).await;
     prop_assert!(
-        matches!(status, Some(RunStatus::Success) | Some(RunStatus::Cancelled)),
+        matches!(
+            status,
+            Some(RunStatus::Success) | Some(RunStatus::Cancelled)
+        ),
         "cancel race left run in {:?}, not a terminal state",
         status
     );
 
     let evs = store.read(&t, &th).await.unwrap();
     assert_gapless(&evs, &th)?;
-    prop_assert!(count_starts(&evs, &run_id) <= 1, "run started more than once");
+    prop_assert!(
+        count_starts(&evs, &run_id) <= 1,
+        "run started more than once"
+    );
     prop_assert!(count_ends(&evs, &run_id) <= 1, "run ended more than once");
     if status == Some(RunStatus::Success) {
-        prop_assert!(!has_dangling(&evs), "successful run left a dangling tool call");
+        prop_assert!(
+            !has_dangling(&evs),
+            "successful run left a dangling tool call"
+        );
     }
     Ok(())
 }
@@ -491,10 +550,26 @@ mod pg {
 
     fn jobs() -> Vec<Job> {
         vec![
-            Job { tenant: 0, dir: Directive::Add(2, 3), on_b: false },
-            Job { tenant: 1, dir: Directive::Echo("x".into()), on_b: true },
-            Job { tenant: 0, dir: Directive::Fail, on_b: true },
-            Job { tenant: 1, dir: Directive::Slow(20), on_b: false },
+            Job {
+                tenant: 0,
+                dir: Directive::Add(2, 3),
+                on_b: false,
+            },
+            Job {
+                tenant: 1,
+                dir: Directive::Echo("x".into()),
+                on_b: true,
+            },
+            Job {
+                tenant: 0,
+                dir: Directive::Fail,
+                on_b: true,
+            },
+            Job {
+                tenant: 1,
+                dir: Directive::Slow(20),
+                on_b: false,
+            },
         ]
     }
 
@@ -546,7 +621,10 @@ mod pg {
                 .claim_run(&rid, "dead-inst", chrono::Duration::milliseconds(50))
                 .await
                 .unwrap();
-            assert!(claimed, "could not claim the run for the dead-worker scenario");
+            assert!(
+                claimed,
+                "could not claim the run for the dead-worker scenario"
+            );
 
             let reaper = runic_serve::spawn_lease_reaper(s.clone(), Duration::from_millis(20));
             let mut final_status = None;

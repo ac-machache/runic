@@ -20,7 +20,9 @@ use std::time::Duration;
 use runic_hook::{ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
 use runic_state::{AgentState, HookLifecycle};
-use runic_tool::{ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, ToolCatalog};
+use runic_tool::{
+    ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, ToolCatalog, ToolSpec,
+};
 use tokio::sync::mpsc;
 
 mod external;
@@ -310,6 +312,25 @@ pub struct Agent {
 }
 
 impl Agent {
+    pub fn model(&self) -> &str {
+        &self.config.model
+    }
+
+    pub fn max_turns(&self) -> u32 {
+        self.config.max_turns
+    }
+
+    pub fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.tools.values().map(|tool| tool.spec()).collect()
+    }
+
+    pub fn write_hook_names(&self) -> Vec<String> {
+        self.write_hooks
+            .iter()
+            .map(|hook| hook.name().to_string())
+            .collect()
+    }
+
     /// Emit a live event if a streaming sink is attached for this run.
     pub(crate) fn emit(&self, event: AgentEvent) {
         if let Some(sink) = &self.events {

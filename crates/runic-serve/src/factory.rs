@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use runic_agent::{Agent, RunContext};
 
+use crate::routes::agents::AgentOverview;
+
 #[async_trait]
 pub trait AgentFactory: Send + Sync {
     async fn build(&self, tenant: &str, session_id: &str) -> Agent;
@@ -22,6 +24,10 @@ pub trait AgentFactory: Send + Sync {
 
     fn stateless(&self) -> bool {
         false
+    }
+
+    async fn overview(&self, _tenant: &str, _session_id: &str) -> Option<AgentOverview> {
+        None
     }
 
     async fn build_run_context(

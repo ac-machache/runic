@@ -8,10 +8,17 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use runic::ability::ability;
+use runic::composer::Composer;
+use runic::subagent::{AgentDef, SubagentBuilder, SubagentReq};
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_serve::routes::agents::{
+    AbilityOverview, AgentOverview, SkillOverview, SubagentOverview, ToolOverview,
+};
 use runic_serve::{AgentFactory, BoxedAgentFactory, ServeConfig, router};
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 const TENANT: &str = "alice";
@@ -82,6 +89,173 @@ impl AgentFactory for StatelessEchoFactory {
 
     fn stateless(&self) -> bool {
         true
+    }
+}
+
+struct AddTool;
+
+#[async_trait]
+impl Tool for AddTool {
+    fn name(&self) -> &str {
+        "add"
+    }
+    fn description(&self) -> &str {
+        "add two numbers"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("2"))
+    }
+}
+
+struct RefundTool;
+
+#[async_trait]
+impl Tool for RefundTool {
+    fn name(&self) -> &str {
+        "refund"
+    }
+    fn description(&self) -> &str {
+        "issue a refund"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("refunded"))
+    }
+}
+
+struct ChildBuilder;
+
+#[async_trait]
+impl SubagentBuilder for ChildBuilder {
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        EchoProvider::new("child done")
+    }
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        "child-model".into()
+    }
+    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
+        vec![]
+    }
+}
+
+async fn billing_skills() -> Arc<runic::skills::SkillSet> {
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join("dispute");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: dispute\ndescription: how to handle a billing dispute\n---\nBe polite.",
+    )
+    .unwrap();
+    Arc::new(runic::skills::SkillSet::load_dir("billing", dir.path()).await)
+}
+
+async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
+    Composer::new(provider, "test-model")
+        .instructions("root")
+        .with(
+            ability("core")
+                .describe("always-on core tools")
+                .tool(AddTool),
+        )
+        .with(
+            ability("billing")
+                .describe("invoices and refunds")
+                .deferred()
+                .tool(RefundTool)
+                .skills(billing_skills().await)
+                .subagent(AgentDef {
+                    name: "billing-worker".into(),
+                    description: "handles billing disputes".into(),
+                    provider: None,
+                    model: None,
+                    allowed_tools: vec![],
+                    skills: vec![],
+                    max_turns: Some(3),
+                    system_prompt: "you are a billing worker".into(),
+                }),
+        )
+        .subagent_builder(Arc::new(ChildBuilder))
+}
+
+fn map_overview(name: &str, views: Vec<runic::composer::AbilityView>) -> AgentOverview {
+    AgentOverview {
+        name: name.to_string(),
+        model: None,
+        max_turns: None,
+        abilities: views
+            .into_iter()
+            .map(|view| AbilityOverview {
+                id: view.id,
+                name: view.name,
+                description: view.description,
+                deferred: view.deferred,
+                activated: view.activated,
+                tools: view
+                    .tools
+                    .into_iter()
+                    .map(|spec| ToolOverview {
+                        name: spec.name,
+                        description: spec.description,
+                        parameters: spec.parameters,
+                    })
+                    .collect(),
+                skills: view
+                    .skills
+                    .into_iter()
+                    .map(|skill| SkillOverview {
+                        id: skill.id,
+                        description: skill.description,
+                    })
+                    .collect(),
+                subagents: view
+                    .subagents
+                    .into_iter()
+                    .map(|subagent| SubagentOverview {
+                        name: subagent.name,
+                        description: subagent.description,
+                    })
+                    .collect(),
+                hooks: view.hooks,
+            })
+            .collect(),
+    }
+}
+
+struct RichFactory {
+    provider: Arc<EchoProvider>,
+}
+
+#[async_trait]
+impl AgentFactory for RichFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+        rich_composer(self.provider.clone())
+            .await
+            .build(tenant, session_id)
+            .await
+            .unwrap()
+    }
+
+    async fn overview(&self, tenant: &str, session_id: &str) -> Option<AgentOverview> {
+        let views = rich_composer(self.provider.clone())
+            .await
+            .describe(tenant, session_id)
+            .await
+            .ok()?;
+        Some(map_overview("rich", views))
     }
 }
 
@@ -389,4 +563,86 @@ async fn serve_config_builder_defaults_the_optional_infra() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["text"], "hi");
+}
+
+fn get_agent(name: &str) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/agents/{name}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn overview_app() -> Router {
+    router(ServeConfig {
+        session_store: Arc::new(MemorySessionStore::new()),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: runic_serve::single_agent(
+            "rich",
+            Arc::new(RichFactory {
+                provider: EchoProvider::new("unused"),
+            }),
+        ),
+        limits: Default::default(),
+        workers: None,
+        broker: None,
+        nudge: None,
+        identity: None,
+    })
+}
+
+#[tokio::test]
+async fn overview_groups_tools_skills_and_subagents_by_ability() {
+    let resp = overview_app().oneshot(get_agent("rich")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    let abilities = body["abilities"].as_array().unwrap();
+    assert_eq!(abilities.len(), 2);
+
+    let core = abilities.iter().find(|a| a["name"] == "core").unwrap();
+    assert_eq!(core["deferred"], false);
+    assert_eq!(core["activated"], true);
+    assert_eq!(core["tools"][0]["name"], "add");
+    assert!(core["skills"].as_array().unwrap().is_empty());
+    assert!(core["subagents"].as_array().unwrap().is_empty());
+
+    let billing = abilities.iter().find(|a| a["name"] == "billing").unwrap();
+    assert_eq!(billing["id"], "billing");
+    assert_eq!(billing["description"], "invoices and refunds");
+    assert_eq!(billing["deferred"], true);
+    assert_eq!(billing["activated"], false);
+    assert_eq!(billing["tools"][0]["name"], "refund");
+    assert_eq!(billing["skills"][0]["id"], "billing:dispute");
+    assert_eq!(
+        billing["skills"][0]["description"],
+        "how to handle a billing dispute"
+    );
+    assert_eq!(billing["subagents"][0]["name"], "billing-worker");
+    assert_eq!(
+        billing["subagents"][0]["description"],
+        "handles billing disputes"
+    );
+}
+
+#[tokio::test]
+async fn overview_falls_back_to_a_flat_view_for_a_non_composer_factory() {
+    let f = fixture();
+    let resp = f.app.oneshot(get_agent("coral")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    let abilities = body["abilities"].as_array().unwrap();
+    assert_eq!(abilities.len(), 1);
+    assert_eq!(abilities[0]["name"], "agent");
+    assert!(abilities[0]["id"].is_null());
+    assert!(abilities[0]["tools"].as_array().unwrap().is_empty());
+    assert!(abilities[0]["hooks"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn overview_of_an_unknown_agent_is_404() {
+    let f = fixture();
+    let resp = f.app.oneshot(get_agent("ghost")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

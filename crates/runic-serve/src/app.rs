@@ -152,6 +152,7 @@ fn routes(state: AppState) -> Router {
         .route("/healthz", get(health::healthz))
         .route("/openapi.json", get(crate::openapi::openapi_json))
         .route("/agents", get(agents::list_agents))
+        .route("/agents/{name}", get(agents::agent_overview))
         .route(
             "/threads",
             post(threads::create_thread).get(threads::list_threads),

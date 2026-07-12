@@ -7,6 +7,7 @@ pub mod deferred;
 pub mod hooks;
 mod models;
 pub mod output;
+pub mod tools;
 
 pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
@@ -56,9 +57,6 @@ pub mod substrate {
 }
 pub mod tool {
     pub use runic_tool::*;
-}
-pub mod tools {
-    pub use runic_tools::*;
 }
 pub mod transcriber {
     pub use runic_transcriber::*;

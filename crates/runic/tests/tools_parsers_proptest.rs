@@ -57,17 +57,17 @@ proptest! {
 
     #[test]
     fn decode_entities_never_panics(s in any::<String>()) {
-        let _ = runic_tools::decode_entities(&s);
+        let _ = runic::tools::decode_entities(&s);
     }
 
     #[test]
     fn html_to_text_never_panics(s in any::<String>()) {
-        let _ = runic_tools::html_to_text(&s);
+        let _ = runic::tools::html_to_text(&s);
     }
 
     #[test]
     fn eval_never_panics(s in any::<String>()) {
-        let _ = runic_tools::eval_calc(&s);
+        let _ = runic::tools::eval_calc(&s);
     }
 
     // ── correctness ─────────────────────────────────────────────────────────
@@ -75,14 +75,14 @@ proptest! {
     /// A string with no `&` is returned unchanged (incl. multibyte text).
     #[test]
     fn decode_entities_noop_without_amp(s in "[^&]{0,120}") {
-        prop_assert_eq!(runic_tools::decode_entities(&s), s);
+        prop_assert_eq!(runic::tools::decode_entities(&s), s);
     }
 
     /// The calculator evaluates any generated expression tree to its reference
     /// value (validates parsing + arithmetic over arbitrary nesting).
     #[test]
     fn eval_matches_reference(e in expr()) {
-        let got = runic_tools::eval_calc(&e.render()).expect("generated expr is valid");
+        let got = runic::tools::eval_calc(&e.render()).expect("generated expr is valid");
         prop_assert!((got - e.value() as f64).abs() < 1e-9, "{} → {got}, want {}", e.render(), e.value());
     }
 }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use runic::ability::{Delegation, Memory, Skills, Toolset};
+use runic::ability::{Delegation, Memory, Skills, basics};
 use runic::composer::Composer;
 use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -98,7 +98,7 @@ fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
         ))
         .with(Skills(skills))
         .with(Delegation(runic_subagent::subagents(fx.agent_dir.path())))
-        .with(Toolset(runic_tools::tools()))
+        .with(basics())
 }
 
 async fn timed<F, Fut>(label: &str, iters: u32, mut f: F) -> Duration

@@ -1745,6 +1745,8 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "chrono-tz",
+ "reqwest",
  "runic-agent",
  "runic-commands",
  "runic-hook",
@@ -1757,7 +1759,6 @@ dependencies = [
  "runic-subagent",
  "runic-substrate",
  "runic-tool",
- "runic-tools",
  "runic-transcriber",
  "runic-types",
  "schemars",
@@ -1816,7 +1817,6 @@ dependencies = [
  "runic-subagent",
  "runic-substrate",
  "runic-tool",
- "runic-tools",
  "runic-types",
  "serde_json",
  "tempfile",
@@ -2002,22 +2002,6 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "runic-tools"
-version = "0.8.3"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "reqwest",
- "runic-tool",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]

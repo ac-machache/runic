@@ -2,7 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::ability::{
-    Compaction as CompactionAbility, Delegation, Memory, Sessions, Skills, Tools, Toolset,
+    Compaction as CompactionAbility, Delegation, Memory, Sessions, Skills, Tools, ask_user, basics,
+    weather, web_fetch,
 };
 use runic::composer::Composer;
 use runic_memory::{Target, memory};
@@ -11,7 +12,6 @@ use runic_skills::SkillSet;
 use runic_subagent::subagents;
 use runic_substrate::sessions_memory;
 use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_tools::tools;
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 #[derive(Default)]
@@ -137,7 +137,10 @@ async fn registers_enabled_tool_surfaces() {
     write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let mut agent = base(provider.clone())
-        .with(Toolset(tools().web().weather().hitl()))
+        .with(basics())
+        .with(ask_user())
+        .with(web_fetch())
+        .with(weather())
         .with(Memory(
             memory(memory_dir.path()).init().include_memory_tool(),
         ))
@@ -146,6 +149,7 @@ async fn registers_enabled_tool_surfaces() {
         )))
         .with(Delegation(subagents(agent_dir.path())))
         .with(Sessions(sessions_memory()))
+        .activated(["web-fetch", "weather"])
         .build("alice", "s1")
         .await
         .unwrap();
@@ -166,7 +170,6 @@ async fn registers_enabled_tool_surfaces() {
         "weather",
         "weather_history",
         "ask_user",
-        "escalate_to_human",
         "memory",
         "skill_view",
         "delegate",
@@ -178,6 +181,7 @@ async fn registers_enabled_tool_surfaces() {
         );
     }
     for absent in [
+        "escalate_to_human",
         "read_file",
         "write_file",
         "edit_file",

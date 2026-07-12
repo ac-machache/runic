@@ -8,10 +8,13 @@ use runic_skills::SkillSet;
 use runic_subagent::Subagents;
 use runic_substrate::Sessions as SessionsConfig;
 use runic_tool::Tool;
-use runic_tools::Tools as StdTools;
 
-use super::{Ability, AbilityBundle, BuildCtx, Layer};
+use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, Layer, ability};
 use crate::hooks::{Compaction as CompactionConfig, CompactionHook, MemoryCurator};
+use crate::tools::{
+    AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
+    WeatherTool, WebFetchTool, WebSearchTool,
+};
 
 pub struct Skills(pub Arc<SkillSet>);
 
@@ -81,20 +84,41 @@ impl Ability for Sessions {
     }
 }
 
-pub struct Toolset(pub StdTools);
+pub fn basics() -> AbilityDraft {
+    ability("basics").tool(CalculatorTool).tool(SystemTimeTool)
+}
 
-#[async_trait]
-impl Ability for Toolset {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        for tool in self.0.collect() {
-            bundle.tool(tool);
-        }
-        Ok(())
-    }
+pub fn ask_user() -> AbilityDraft {
+    ability("ask-user").tool(AskUserTool)
+}
+
+pub fn web_fetch() -> AbilityDraft {
+    ability("web-fetch")
+        .describe("fetch a URL (SSRF-guarded)")
+        .deferred()
+        .tool(WebFetchTool::new())
+}
+
+pub fn web_search(provider: Arc<dyn SearchProvider>) -> AbilityDraft {
+    ability("web-search")
+        .describe("search the web via an injected provider")
+        .deferred()
+        .tool(WebSearchTool::new(provider))
+}
+
+pub fn weather() -> AbilityDraft {
+    ability("weather")
+        .describe("current + historical weather, keyless")
+        .deferred()
+        .tool(WeatherTool::new())
+        .tool(WeatherHistoryTool::new())
+}
+
+pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> AbilityDraft {
+    ability("composio")
+        .describe("1000+ external app actions via Composio")
+        .deferred()
+        .tool(ComposioTool::new(api_key, entity_id))
 }
 
 pub struct Tools(pub Vec<Arc<dyn Tool>>);

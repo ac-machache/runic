@@ -45,7 +45,7 @@ impl AgentFactory for DummyFactory {
                     .tool(AddTool)
                     .tool(SlowTool)
                     .tool(FailTool)
-                    .tool(runic_tools::AskUserTool)
+                    .tool(runic::tools::AskUserTool)
                     .hook(MarkerHook),
             )
             .with(

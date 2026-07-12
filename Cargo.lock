@@ -1791,13 +1791,15 @@ dependencies = [
 
 [[package]]
 name = "runic"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64",
  "chrono",
+ "chrono-tz",
  "proptest",
+ "reqwest",
  "runic-agent",
  "runic-commands",
  "runic-hook",
@@ -1810,7 +1812,6 @@ dependencies = [
  "runic-subagent",
  "runic-substrate",
  "runic-tool",
- "runic-tools",
  "runic-transcriber",
  "runic-types",
  "schemars",
@@ -1824,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "runic-agent"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1845,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "runic-commands"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1856,7 +1857,7 @@ dependencies = [
 
 [[package]]
 name = "runic-hook"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "runic-state",
@@ -1868,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "runic-macros"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1877,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "runic-mcp"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1897,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "runic-memory"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1916,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "runic-provider"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1934,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "runic-serve"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1969,7 +1970,7 @@ dependencies = [
 
 [[package]]
 name = "runic-skills"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1984,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "runic-state"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -1997,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "runic-subagent"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2020,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "runic-substrate"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2042,36 +2043,18 @@ dependencies = [
 
 [[package]]
 name = "runic-tool"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "runic-tools"
-version = "0.8.3"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "proptest",
- "reqwest",
- "runic-tool",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "runic-transcriber"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2084,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "runic-types"
-version = "0.8.3"
+version = "0.9.0"
 dependencies = [
  "proptest",
  "rmp-serde",

@@ -31,5 +31,7 @@ When in doubt, leave it out.
   an unrelated existing module; a new domain gets a new module.
 - In the `runic` umbrella crate: `ability/` (the ability model), `composer/`
   (the build pipeline), `deferred/` (activation machinery), `models.rs`
-  (provider-string inference), `context.rs` (prompt layering). `lib.rs`
-  re-exports the hot path (`Composer`, `Compose`, `ability`, `ComposeError`).
+  (provider-string inference), `context.rs` (prompt layering), `tools/`
+  (the built-in `Tool` impls — calc/time/web/weather/composio/hitl; there is
+  no separate `runic-tools` crate). `lib.rs` re-exports the hot path
+  (`Composer`, `Compose`, `ability`, `ComposeError`).

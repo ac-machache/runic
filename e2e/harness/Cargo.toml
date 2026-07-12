@@ -18,7 +18,6 @@ runic = { path = "../../crates/runic", features = ["mistral"] }
 runic-agent = { path = "../../crates/runic-agent" }
 runic-provider = { path = "../../crates/runic-provider", features = ["mistral"] }
 runic-tool = { path = "../../crates/runic-tool" }
-runic-tools = { path = "../../crates/runic-tools" }
 runic-hook = { path = "../../crates/runic-hook" }
 runic-state = { path = "../../crates/runic-state" }
 runic-subagent = { path = "../../crates/runic-subagent" }

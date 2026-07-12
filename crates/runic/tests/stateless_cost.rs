@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use runic::compose::{Compose, Composer, Delegation, Memory, Skills, Toolset};
-use runic_agent::Agent;
+use runic::ability::{Delegation, Memory, Skills, Toolset};
+use runic::composer::Composer;
 use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -91,15 +91,13 @@ async fn fixture() -> Fixture {
 }
 
 fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
-    Agent::compose(Arc::new(NoopProvider), "bench")
+    Composer::new(Arc::new(NoopProvider), "bench")
         .instructions("you are the bench agent ".repeat(50))
         .with(Memory(
             memory(fx.memory_dir.path()).init().scope_per_tenant(),
         ))
         .with(Skills(skills))
-        .with(Delegation::new(runic_subagent::subagents(
-            fx.agent_dir.path(),
-        )))
+        .with(Delegation(runic_subagent::subagents(fx.agent_dir.path())))
         .with(Toolset(runic_tools::tools()))
 }
 
@@ -138,7 +136,7 @@ async fn cost_of_pure_stateless_rebuild() {
             async move {
                 let skills = Arc::new(SkillSet::load_dir("", fx.skill_dir.path()).await);
                 let a = assembly(fx, skills);
-                let agent = a.build("bench-tenant", "t1").await;
+                let agent = a.build("bench-tenant", "t1").await.unwrap();
                 std::hint::black_box(agent);
             }
         },
@@ -152,7 +150,7 @@ async fn cost_of_pure_stateless_rebuild() {
         || {
             let a = &shared;
             async move {
-                let agent = a.build("bench-tenant", "t1").await;
+                let agent = a.build("bench-tenant", "t1").await.unwrap();
                 std::hint::black_box(agent);
             }
         },

@@ -140,6 +140,28 @@ impl SkillSet {
     }
 
     /// Narrow to an allow-list of ids — a finer per-agent filter.
+    pub fn merge<Sets>(sets: Sets) -> SkillSet
+    where
+        Sets: IntoIterator<Item = Arc<SkillSet>>,
+    {
+        let mut skills: Vec<Skill> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut sources: HashMap<String, Arc<dyn SkillSource>> = HashMap::new();
+        for set in sets {
+            for skill in &set.skills {
+                if seen.insert(skill.id()) {
+                    skills.push(skill.clone());
+                }
+            }
+            for (namespace, source) in &set.sources {
+                sources
+                    .entry(namespace.clone())
+                    .or_insert_with(|| source.clone());
+            }
+        }
+        SkillSet { skills, sources }
+    }
+
     pub fn scope<S: AsRef<str>>(&self, allowed: &[S]) -> SkillSet {
         let allow: Vec<&str> = allowed.iter().map(|s| s.as_ref()).collect();
         let skills: Vec<Skill> = self

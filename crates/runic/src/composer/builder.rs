@@ -1,0 +1,454 @@
+use runic_agent::Agent;
+use runic_provider::Provider;
+use runic_skills::SkillSet;
+use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, roster_prompt_section};
+use runic_substrate::ArtifactStore;
+use runic_tool::{Tool, ToolCatalog};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+use super::view::{AbilityView, SkillInfo, SubagentInfo};
+use super::{ComposeError, Composition};
+use crate::ability::{Ability, AbilityBundle, ActivationPolicy, BuildCtx, Layer};
+use crate::artifact_resolver::ArtifactResolver;
+use crate::child::FoundrySubagentBuilder;
+use crate::deferred::{
+    AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
+    LoadedAbilities, delegate_subjects, skill_subjects,
+};
+use crate::models;
+
+fn validate_ability_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && valid_edge(bytes[0])
+        && valid_edge(bytes[bytes.len() - 1])
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'-' | b'_' | b'.')
+        })
+}
+
+fn validate_ability_descriptors(abilities: &[Arc<dyn Ability>]) -> Result<(), ComposeError> {
+    let mut to_track_ids: HashMap<String, String> = HashMap::new();
+    for ability in abilities {
+        let ability_description = ability.descriptor();
+        let ability_name = ability.name();
+        if ability_description.activation == ActivationPolicy::Deferred
+            && ability_description.id.is_none()
+        {
+            return Err(ComposeError::DeferredAbilityMissingId {
+                ability: ability_name.to_string(),
+            });
+        }
+        let Some(id) = ability_description.id else {
+            continue;
+        };
+        if !validate_ability_id(&id) {
+            return Err(ComposeError::InvalidAbilityId {
+                ability: ability_name.to_string(),
+                id,
+            });
+        }
+        if let Some(first_ability) = to_track_ids.get(&id) {
+            return Err(ComposeError::DuplicateAbilityId {
+                first_ability: first_ability.clone(),
+                second_ability: ability_name.to_string(),
+                id,
+            });
+        }
+        to_track_ids.insert(id, ability_name.to_string());
+    }
+    Ok(())
+}
+
+struct ChainCatalog(Vec<Arc<dyn ToolCatalog>>);
+
+impl ToolCatalog for ChainCatalog {
+    fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.0.iter().find_map(|catalog| catalog.resolve(name))
+    }
+}
+
+fn into_catalog(mut catalogs: Vec<Arc<dyn ToolCatalog>>) -> Option<Arc<dyn ToolCatalog>> {
+    match catalogs.len() {
+        0 => None,
+        1 => catalogs.pop(),
+        _ => Some(Arc::new(ChainCatalog(catalogs))),
+    }
+}
+
+pub trait Compose {
+    fn compose(spec: &str) -> Result<Composer, ComposeError>;
+}
+
+impl Compose for Agent {
+    fn compose(spec: &str) -> Result<Composer, ComposeError> {
+        Composer::from_spec(spec)
+    }
+}
+
+pub struct Composer {
+    provider: Arc<dyn Provider>,
+    model: String,
+    instructions: String,
+    abilities: Vec<Arc<dyn Ability>>,
+    activated: HashSet<String>,
+    artifact_store: Option<Arc<dyn ArtifactStore>>,
+    subagent_builder: Option<Arc<dyn SubagentBuilder>>,
+    output_schema: Option<serde_json::Value>,
+    max_turns: Option<u32>,
+}
+
+impl Composer {
+    pub fn new(provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            instructions: String::new(),
+            abilities: Vec::new(),
+            activated: HashSet::new(),
+            artifact_store: None,
+            subagent_builder: None,
+            output_schema: None,
+            max_turns: None,
+        }
+    }
+
+    pub fn from_spec(spec: &str) -> Result<Self, ComposeError> {
+        let (provider, model) = models::infer(spec)?;
+        Ok(Self::new(provider, model))
+    }
+
+    pub fn instructions(mut self, text: impl Into<String>) -> Self {
+        self.instructions = text.into();
+        self
+    }
+
+    pub fn with(mut self, ability: impl Ability + 'static) -> Self {
+        self.abilities.push(Arc::new(ability));
+        self
+    }
+
+    pub fn activated<Ids, Id>(mut self, ids: Ids) -> Self
+    where
+        Ids: IntoIterator<Item = Id>,
+        Id: Into<String>,
+    {
+        self.activated.extend(ids.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
+        self
+    }
+
+    pub fn subagent_builder(mut self, builder: Arc<dyn SubagentBuilder>) -> Self {
+        self.subagent_builder = Some(builder);
+        self
+    }
+
+    pub fn output<T: schemars::JsonSchema>(self) -> Self {
+        let schema = crate::output::schema_of::<T>();
+        self.output_schema(schema)
+    }
+
+    pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+
+    pub async fn build(&self, tenant: &str, session: &str) -> Result<Agent, ComposeError> {
+        validate_ability_descriptors(&self.abilities)?;
+        let reserve_loader_name = self
+            .abilities
+            .iter()
+            .any(|ability| ability.descriptor().activation == ActivationPolicy::Deferred);
+        let ctx = BuildCtx {
+            tenant,
+            session,
+            provider: &self.provider,
+            model: &self.model,
+        };
+        let mut composition = Composition::default();
+        composition.prompt.instructions(&self.instructions);
+        let mut registry = AbilityRegistry {
+            entries: Vec::new(),
+        };
+        let loaded = LoadedAbilities::seeded(&self.activated);
+        let mut eager_owners: HashMap<String, String> = HashMap::new();
+        let mut deferred_owners: HashMap<String, String> = HashMap::new();
+        let mut skill_owner_names: HashMap<String, String> = HashMap::new();
+        let mut subagent_owner_names: HashMap<String, String> = HashMap::new();
+        let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
+        let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
+        for ability in &self.abilities {
+            let ability_name = ability.name().to_string();
+            let descriptor = ability.descriptor();
+            let mut bundle = AbilityBundle::default();
+            ability
+                .contribute(&mut bundle, &ctx)
+                .await
+                .map_err(|source| ComposeError::Ability {
+                    ability: ability_name.clone(),
+                    source,
+                })?;
+            let deferred_id = match descriptor.activation {
+                ActivationPolicy::Deferred => descriptor
+                    .id
+                    .filter(|id| !self.activated.contains(id.as_str())),
+                ActivationPolicy::Eager => None,
+            };
+            for tool in &bundle.tools {
+                let tool_name = tool.name().to_string();
+                if reserve_loader_name && tool_name == LOAD_ABILITY_TOOL_NAME {
+                    return Err(ComposeError::ReservedToolName {
+                        ability: ability_name,
+                    });
+                }
+                let colliding_owner = if deferred_id.is_some() {
+                    eager_owners
+                        .get(&tool_name)
+                        .or_else(|| deferred_owners.get(&tool_name))
+                } else {
+                    deferred_owners.get(&tool_name)
+                };
+                if let Some(first_ability) = colliding_owner {
+                    return Err(ComposeError::DuplicateToolName {
+                        first_ability: first_ability.clone(),
+                        second_ability: ability_name,
+                        tool: tool_name,
+                    });
+                }
+                if deferred_id.is_some() {
+                    deferred_owners.insert(tool_name, ability_name.clone());
+                } else {
+                    eager_owners.insert(tool_name, ability_name.clone());
+                }
+            }
+            for set in &bundle.skills {
+                for skill_id in set.ids() {
+                    if let Some(first_ability) = skill_owner_names.get(&skill_id) {
+                        return Err(ComposeError::DuplicateSkillId {
+                            first_ability: first_ability.clone(),
+                            second_ability: ability_name,
+                            id: skill_id,
+                        });
+                    }
+                    skill_owner_names.insert(skill_id.clone(), ability_name.clone());
+                    if let Some(id) = &deferred_id {
+                        deferred_skill_owners.insert(skill_id, id.clone());
+                    }
+                }
+            }
+            for def in &bundle.subagents {
+                if let Some(first_ability) = subagent_owner_names.get(&def.name) {
+                    return Err(ComposeError::DuplicateSubagentName {
+                        first_ability: first_ability.clone(),
+                        second_ability: ability_name,
+                        name: def.name.clone(),
+                    });
+                }
+                subagent_owner_names.insert(def.name.clone(), ability_name.clone());
+                if let Some(id) = &deferred_id {
+                    deferred_subagent_owners.insert(def.name.clone(), id.clone());
+                }
+            }
+            match deferred_id {
+                Some(id) => registry.entries.push(DeferredEntry {
+                    id,
+                    description: descriptor.description.unwrap_or_default(),
+                    bundle,
+                }),
+                None => composition.merge(bundle),
+            }
+        }
+
+        let deferred_skills: Vec<Arc<SkillSet>> = registry
+            .entries
+            .iter()
+            .flat_map(|entry| entry.bundle.skills.iter().cloned())
+            .collect();
+        if !composition.skills.is_empty() || !deferred_skills.is_empty() {
+            let visible = SkillSet::merge(composition.skills.iter().cloned());
+            if !visible.is_empty() {
+                composition
+                    .prompt
+                    .fragment(Layer::Stable, visible.prompt_section());
+            }
+            let full = Arc::new(SkillSet::merge(
+                composition.skills.iter().cloned().chain(deferred_skills),
+            ));
+            if let Some(view) = full.view_tool() {
+                composition.tools.push(Arc::new(GatedTool::new(
+                    view,
+                    loaded.clone(),
+                    deferred_skill_owners,
+                    "Skill",
+                    skill_subjects,
+                )));
+            }
+        }
+
+        let deferred_defs: Vec<AgentDef> = registry
+            .entries
+            .iter()
+            .flat_map(|entry| entry.bundle.subagents.iter().cloned())
+            .collect();
+        if !composition.subagents.is_empty() || !deferred_defs.is_empty() {
+            if !composition.subagents.is_empty() {
+                composition.prompt.fragment(
+                    Layer::Stable,
+                    roster_prompt_section(&AgentRoster::new(composition.subagents.clone())),
+                );
+            }
+            let full_roster = Arc::new(AgentRoster::new(
+                composition
+                    .subagents
+                    .iter()
+                    .cloned()
+                    .chain(deferred_defs)
+                    .collect(),
+            ));
+            let builder = self.subagent_builder.clone().unwrap_or_else(|| {
+                Arc::new(FoundrySubagentBuilder {
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    skills: None,
+                })
+            });
+            let delegate: Arc<dyn Tool> = Arc::new(DelegateTool::new(full_roster, builder));
+            composition.tools.push(Arc::new(GatedTool::new(
+                delegate,
+                loaded.clone(),
+                deferred_subagent_owners,
+                "Subagent",
+                delegate_subjects,
+            )));
+        }
+
+        if reserve_loader_name {
+            if !registry.entries.is_empty() {
+                composition
+                    .prompt
+                    .fragment(Layer::Stable, registry.catalog_section());
+            }
+            let registry = Arc::new(registry);
+            composition
+                .tools
+                .push(Arc::new(LoadAbilityTool::new(registry.clone(), loaded)));
+            composition.tool_catalogs.push(registry);
+        }
+
+        let mut agent_builder = Agent::builder(self.provider.clone(), tenant, session)
+            .model(&self.model)
+            .system_prompt(composition.prompt.render());
+        for tool in composition.tools {
+            agent_builder = agent_builder.tool(tool);
+        }
+        for hook in composition.write_hooks {
+            agent_builder = agent_builder.write_hook(hook);
+        }
+        if let Some(store) = &self.artifact_store {
+            agent_builder = agent_builder.media_resolver(Arc::new(ArtifactResolver::new(
+                store.clone(),
+                tenant,
+                session,
+            )));
+        }
+        if let Some(catalog) = into_catalog(composition.tool_catalogs) {
+            agent_builder = agent_builder.tool_catalog(catalog);
+        }
+        if let Some(schema) = &self.output_schema {
+            agent_builder = agent_builder.output_schema(schema.clone());
+        }
+        if let Some(turns) = self.max_turns {
+            agent_builder = agent_builder.max_turns(turns);
+        }
+        Ok(agent_builder.build())
+    }
+
+    pub async fn describe(
+        &self,
+        tenant: &str,
+        session: &str,
+    ) -> Result<Vec<AbilityView>, ComposeError> {
+        validate_ability_descriptors(&self.abilities)?;
+        let ctx = BuildCtx {
+            tenant,
+            session,
+            provider: &self.provider,
+            model: &self.model,
+        };
+        let mut views = Vec::new();
+        for ability in &self.abilities {
+            let ability_name = ability.name().to_string();
+            let descriptor = ability.descriptor();
+            let mut bundle = AbilityBundle::default();
+            ability
+                .contribute(&mut bundle, &ctx)
+                .await
+                .map_err(|source| ComposeError::Ability {
+                    ability: ability_name.clone(),
+                    source,
+                })?;
+            let activated = match descriptor.activation {
+                ActivationPolicy::Eager => true,
+                ActivationPolicy::Deferred => descriptor
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| self.activated.contains(id)),
+            };
+            let skills: Vec<SkillInfo> = bundle
+                .skills
+                .iter()
+                .flat_map(|set| {
+                    set.ids().into_iter().filter_map(move |id| {
+                        set.get(&id).map(|skill| SkillInfo {
+                            id,
+                            description: skill.description.clone(),
+                        })
+                    })
+                })
+                .collect();
+            let subagents: Vec<SubagentInfo> = bundle
+                .subagents
+                .iter()
+                .map(|def| SubagentInfo {
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                })
+                .collect();
+            let hooks: Vec<String> = bundle
+                .write_hooks
+                .iter()
+                .map(|hook| hook.name().to_string())
+                .collect();
+            views.push(AbilityView {
+                id: descriptor.id,
+                name: ability_name,
+                description: descriptor.description,
+                deferred: descriptor.activation == ActivationPolicy::Deferred,
+                activated,
+                prompt: bundle.prompt,
+                tools: bundle.tools.iter().map(|tool| tool.spec()).collect(),
+                skills,
+                subagents,
+                hooks,
+            });
+        }
+        Ok(views)
+    }
+}

@@ -12,11 +12,11 @@ members = [
     "crates/runic-skills",
     "crates/runic-commands",
     "crates/runic-mcp",
-    "crates/runic-plugins",
     "crates/runic-substrate",
     "crates/runic-memory",
     "crates/runic-serve",
     "crates/runic",
+    "crates/runic-macros",
     "crates/runic-transcriber",
 ]
 
@@ -58,14 +58,18 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 async-stream = "0.3"
 proptest = "1"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+schemars = "1"
 
 runic-skills = { path = "crates/runic-skills" }
 runic-commands = { path = "crates/runic-commands" }
 runic-mcp = { path = "crates/runic-mcp" }
-runic-plugins = { path = "crates/runic-plugins" }
 runic-substrate = { path = "crates/runic-substrate" }
 runic-memory = { path = "crates/runic-memory" }
 runic-serve = { path = "crates/runic-serve" }
+runic-macros = { path = "crates/runic-macros" }
 runic = { path = "crates/runic" }
 
 [profile.release]

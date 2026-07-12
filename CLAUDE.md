@@ -13,5 +13,23 @@ Code should read on its own. Don't narrate it.
 - Prefer a clear name or a small refactor over a comment that explains a bad one.
 - No section-divider banners or restating-the-obvious doc comments just to fill
   space.
+- Removing an existing comment that adds nothing is an improvement, not a risk.
 
 When in doubt, leave it out.
+
+## Naming
+
+- **No one-letter variable names.** Name every binding after its role
+  (`bundle`, `catalog`, `hook`, `entry`) — including closure params and short
+  scopes. Existing one-letter names in code being touched get upgraded.
+
+## Module layout
+
+- **`mod.rs` files contain ONLY `mod` declarations and `pub use` re-exports.**
+  No types, no functions, no logic. Content lives in named sibling files.
+- **Organize by domain, one module per concern.** Never pile a new feature into
+  an unrelated existing module; a new domain gets a new module.
+- In the `runic` umbrella crate: `ability/` (the ability model), `composer/`
+  (the build pipeline), `deferred/` (activation machinery), `models.rs`
+  (provider-string inference), `context.rs` (prompt layering). `lib.rs`
+  re-exports the hot path (`Composer`, `Compose`, `ability`, `ComposeError`).

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6e5f9d15b4726c60086341755ea2aebf3237aab3090fce26ad9d314fe6b65f15 # shrinks to specs = [AbilitySpec { id: "ab0", deferred: true, activated: true, tool_count: 0 }]
+cc cbce5601c02e986987f437e6b5b904974af960f225f3cc4b28b41c897e1ab9a2 # shrinks to specs = [GatedSpec { id: "gs0", activated: true }]

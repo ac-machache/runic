@@ -35,3 +35,4 @@ crates/runic-agent/target/rust-analyzer/flycheck0/
 /NOTES.md
 docs/design/
 client-python
+pydantic-ai

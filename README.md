@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 | **Structured output** | `AgentBuilder::output_schema(schema)` — provider-agnostic, via a synthetic `final_answer` tool → `RunOutcome.structured` |
 | **Memory** | bounded `MEMORY.md` / `USER.md` stores + a `memory` tool, provider/manager seam (hermes-style) |
 | **Subagents** | a single `delegate` tool over an `AGENT.md` roster |
-| **Skills / commands / plugins** | `SKILL.md` (progressive disclosure), `COMMAND.md` templates, folder-bundle plugins |
+| **Skills / commands** | `SKILL.md` progressive disclosure and `COMMAND.md` slash-command templates |
 | **MCP** | client over stdio + Streamable HTTP, with reconnect, deferred activation, and `tool_search` |
 | **Persistence** | `runic-substrate`: Postgres / in-memory session stores, artifacts, event-sourced, full-text `search_chats` |
 | **Durable suspend/resume** | a tool can defer (`ToolResult::defer`); the run pauses durably and resumes from that exact call on any instance once an answer arrives — HITL (`ask_user`) is the first consumer |
@@ -99,7 +99,6 @@ runic-tools       the native toolbox (calc, time, web, weather, composio, hitl)
 runic-skills      SKILL.md registry + skill_view tool
 runic-commands    COMMAND.md slash-command templates
 runic-mcp         MCP client (stdio + Streamable HTTP)
-runic-plugins     folder-bundle plugin discovery
 runic-substrate   sessions + artifacts persistence (Postgres / local / memory) + search_chats
 runic-memory      bounded MEMORY.md / USER.md stores + memory tool + providers
 runic-transcriber speech-to-text trait + Mistral/Voxtral (audio → text preprocess)

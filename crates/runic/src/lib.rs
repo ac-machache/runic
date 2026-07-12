@@ -1,13 +1,28 @@
+pub mod ability;
 mod artifact_resolver;
 mod child;
-pub mod compose;
+pub mod composer;
 mod context;
+pub mod deferred;
 pub mod hooks;
+mod models;
+pub mod output;
 
+pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
 pub use child::FoundrySubagentBuilder;
+pub use composer::{Compose, ComposeError, Composer};
 pub use context::Context;
 pub use hooks::Compaction;
+pub use output::StructuredOutput;
+pub use runic_macros::tool;
+
+#[doc(hidden)]
+pub mod __private {
+    pub use anyhow;
+    pub use async_trait::async_trait;
+    pub use serde_json;
+}
 
 pub mod agent {
     pub use runic_agent::*;
@@ -23,9 +38,6 @@ pub mod mcp {
 }
 pub mod memory {
     pub use runic_memory::*;
-}
-pub mod plugins {
-    pub use runic_plugins::*;
 }
 pub mod provider {
     pub use runic_provider::*;

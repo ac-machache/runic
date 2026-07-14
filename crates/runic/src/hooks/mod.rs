@@ -1,5 +1,4 @@
 mod compaction;
-mod forward_context;
 mod hook_agent;
 mod memory_curator;
 mod reminders;
@@ -8,7 +7,6 @@ mod tool_limit;
 
 pub(crate) use compaction::CompactionHook;
 pub use compaction::{Compaction, DEFAULT_SUMMARY_GUIDANCE};
-pub use forward_context::ForwardContext;
 pub use hook_agent::HookAgent;
 pub use memory_curator::MemoryCurator;
 pub use reminders::ReminderHook;

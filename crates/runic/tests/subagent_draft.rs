@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use runic::ability::{ability, subagent};
 use runic::composer::Composer;
 use runic_agent::RunContext;
+use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_state::AgentState;
 use runic_subagent::AgentDef;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -194,8 +196,34 @@ async fn draft_owned_tools_are_isolated_and_models_resolve() {
     assert_eq!(request_b.model, "custom-child");
 }
 
+struct InjectUserId;
+
+#[async_trait]
+impl WriteHook for InjectUserId {
+    fn name(&self) -> &str {
+        "inject-user-id"
+    }
+
+    fn points(&self) -> &'static [HookLifecycle] {
+        &[HookLifecycle::BeforeTool]
+    }
+
+    async fn before_tool(&self, state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        if !call.name.starts_with("mcp__") {
+            return HookOutcome::Noop;
+        }
+        let Some(value) = state.config.get("user_id").cloned() else {
+            return HookOutcome::Cancel("user_id is not set for this run".into());
+        };
+        if let Some(input) = call.input.as_object_mut() {
+            input.insert("user_id".into(), value);
+        }
+        HookOutcome::Continue
+    }
+}
+
 #[tokio::test]
-async fn forward_context_injects_run_config_into_mcp_tool_args() {
+async fn a_consumer_hook_on_the_draft_reaches_the_childs_tool_calls() {
     let seen = Arc::new(Mutex::new(None));
     let child = ScriptedProvider::new(vec![
         call(
@@ -216,7 +244,7 @@ async fn forward_context_injects_run_config_into_mcp_tool_args() {
                     name: "mcp__crm__lookup",
                     seen: seen.clone(),
                 })
-                .forward_context(["user_id"]),
+                .hook(InjectUserId),
         )
         .build("alice", "s1")
         .await
@@ -270,7 +298,7 @@ async fn child_abilities_see_the_child_model_not_the_parents() {
 }
 
 #[tokio::test]
-async fn forward_context_blocks_mcp_tools_when_context_is_missing() {
+async fn a_consumer_hook_can_block_the_childs_tool_calls() {
     let seen = Arc::new(Mutex::new(None));
     let child = ScriptedProvider::new(vec![
         call(
@@ -291,7 +319,7 @@ async fn forward_context_blocks_mcp_tools_when_context_is_missing() {
                     name: "mcp__crm__lookup",
                     seen: seen.clone(),
                 })
-                .forward_context(["user_id"]),
+                .hook(InjectUserId),
         )
         .build("alice", "s1")
         .await
@@ -300,46 +328,6 @@ async fn forward_context_blocks_mcp_tools_when_context_is_missing() {
     agent.run("start").await.unwrap();
 
     assert!(seen.lock().unwrap().is_none());
-}
-
-#[tokio::test]
-async fn forward_context_to_scopes_by_server() {
-    let crm_seen = Arc::new(Mutex::new(None));
-    let docs_seen = Arc::new(Mutex::new(None));
-    let child = ScriptedProvider::new(vec![
-        call("t1", "mcp__crm__lookup", serde_json::json!({})),
-        call("t2", "mcp__docs__read", serde_json::json!({})),
-        text("child done"),
-    ]);
-    let main_provider = ScriptedProvider::new(vec![delegate_to("expert"), text("done")]);
-
-    let mut agent = Composer::new(main_provider, "main-model")
-        .with(
-            subagent("expert", "digs")
-                .prompt("dig")
-                .provider(child.clone())
-                .tool(RecordingTool {
-                    name: "mcp__crm__lookup",
-                    seen: crm_seen.clone(),
-                })
-                .tool(RecordingTool {
-                    name: "mcp__docs__read",
-                    seen: docs_seen.clone(),
-                })
-                .forward_context_to("crm", ["user_id"]),
-        )
-        .build("alice", "s1")
-        .await
-        .unwrap();
-
-    let ctx = RunContext::new().config_value("user_id", serde_json::json!("u-42"));
-    agent.run_with("start", ctx).await.unwrap();
-
-    let crm_args = crm_seen.lock().unwrap().clone().unwrap();
-    assert_eq!(crm_args["user_id"], serde_json::json!("u-42"));
-
-    let docs_args = docs_seen.lock().unwrap().clone().unwrap();
-    assert!(docs_args.get("user_id").is_none());
 }
 
 #[tokio::test]
@@ -477,7 +465,7 @@ async fn markdown_allowed_tools_with_other_owned_config_is_a_build_error() {
         "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig";
     let draft = runic::subagent::from_markdown(markdown)
         .unwrap()
-        .forward_context(["user_id"]);
+        .hook(InjectUserId);
 
     let provider = ScriptedProvider::new(vec![]);
     let Err(err) = Composer::new(provider, "main-model")

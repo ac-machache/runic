@@ -10,7 +10,6 @@ use runic_tool::{Tool, ToolCatalog};
 
 use super::builtin::{Hooks, Skills, Tools};
 use super::{Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx};
-use crate::hooks::ForwardContext;
 use crate::models;
 
 pub fn subagent(name: impl Into<String>, description: impl Into<String>) -> SubagentDraft {
@@ -28,7 +27,6 @@ pub fn subagent(name: impl Into<String>, description: impl Into<String>) -> Suba
         activation: ActivationPolicy::Eager,
         abilities: Vec::new(),
         provider: None,
-        forward_context: Vec::new(),
     }
 }
 
@@ -38,7 +36,6 @@ pub fn from_markdown(src: &str) -> anyhow::Result<SubagentDraft> {
         activation: ActivationPolicy::Eager,
         abilities: Vec::new(),
         provider: None,
-        forward_context: Vec::new(),
     })
 }
 
@@ -47,7 +44,6 @@ pub struct SubagentDraft {
     activation: ActivationPolicy,
     abilities: Vec<Arc<dyn Ability>>,
     provider: Option<Arc<dyn Provider>>,
-    forward_context: Vec<(String, Vec<String>)>,
 }
 
 impl SubagentDraft {
@@ -96,26 +92,6 @@ impl SubagentDraft {
 
     pub fn skills(self, set: Arc<SkillSet>) -> Self {
         self.with(Skills(set))
-    }
-
-    pub fn forward_context(mut self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.forward_context.push((
-            "mcp__".to_string(),
-            keys.into_iter().map(Into::into).collect(),
-        ));
-        self
-    }
-
-    pub fn forward_context_to(
-        mut self,
-        server: impl AsRef<str>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
-        self.forward_context.push((
-            format!("mcp__{}__", server.as_ref()),
-            keys.into_iter().map(Into::into).collect(),
-        ));
-        self
     }
 }
 
@@ -189,8 +165,7 @@ impl Ability for SubagentDraft {
             && child.prompt.is_empty()
             && child.tool_catalog.is_none()
             && self.provider.is_none()
-            && self.def.provider.is_none()
-            && self.forward_context.is_empty();
+            && self.def.provider.is_none();
         if owns_nothing {
             bundle.subagent(self.def.clone());
             return Ok(());
@@ -236,19 +211,12 @@ impl Ability for SubagentDraft {
             };
         }
 
-        let mut hooks = child.write_hooks.clone();
-        for (prefix, keys) in &self.forward_context {
-            hooks.push(Arc::new(
-                ForwardContext::new(keys.clone()).with_prefix(prefix.clone()),
-            ));
-        }
-
         let builder = ComposedSubagentBuilder {
             provider,
             model,
             tools: child.tools,
             skills,
-            hooks,
+            hooks: child.write_hooks,
             tool_catalog: child.tool_catalog,
         };
         bundle.subagent_with(def, Arc::new(builder));

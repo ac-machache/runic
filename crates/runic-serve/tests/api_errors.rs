@@ -22,7 +22,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> Agent {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
         panic!("agent path must not run here");
     }
 }
@@ -40,10 +40,12 @@ struct FailingAgentFactory;
 
 #[async_trait]
 impl AgentFactory for FailingAgentFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(FailingProvider), tenant, session_id)
-            .system_prompt("test")
-            .build()
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::builder(Arc::new(FailingProvider), tenant, session_id)
+                .system_prompt("test")
+                .build(),
+        )
     }
 }
 

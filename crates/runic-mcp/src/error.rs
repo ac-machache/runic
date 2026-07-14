@@ -44,6 +44,13 @@ pub enum McpError {
     /// The handshake completed but the server's response shape was unexpected.
     #[error("protocol error: {0}")]
     Protocol(String),
+
+    #[error("server '{server}' failed to connect: {source}")]
+    ConnectFailed {
+        server: String,
+        #[source]
+        source: Box<McpError>,
+    },
 }
 
 impl McpError {

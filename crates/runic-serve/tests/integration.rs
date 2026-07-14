@@ -27,7 +27,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> Agent {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
         panic!("PanicFactory: tests must not invoke the agent path");
     }
 }
@@ -75,10 +75,12 @@ struct ScriptedFactory;
 
 #[async_trait]
 impl AgentFactory for ScriptedFactory {
-    async fn build(&self, _tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(ScriptedProvider), "alice", session_id)
-            .system_prompt("test")
-            .build()
+    async fn build(&self, _tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::builder(Arc::new(ScriptedProvider), "alice", session_id)
+                .system_prompt("test")
+                .build(),
+        )
     }
 }
 
@@ -1108,8 +1110,8 @@ struct ResolvingFactory {
 
 #[async_trait]
 impl AgentFactory for ResolvingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(
             Arc::new(RecordingProvider {
                 last: self.last.clone(),
             }),
@@ -1122,7 +1124,7 @@ impl AgentFactory for ResolvingFactory {
             tenant,
             session_id,
         )))
-        .build()
+        .build())
     }
 }
 

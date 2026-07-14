@@ -64,10 +64,10 @@ struct EchoFactory {
 
 #[async_trait]
 impl AgentFactory for EchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(self.provider.clone(), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(self.provider.clone(), tenant, session_id)
             .system_prompt("test")
-            .build()
+            .build())
     }
 
     fn describe(&self) -> Option<&str> {
@@ -81,10 +81,10 @@ struct StatelessEchoFactory {
 
 #[async_trait]
 impl AgentFactory for StatelessEchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(self.provider.clone(), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(self.provider.clone(), tenant, session_id)
             .system_prompt("test")
-            .build()
+            .build())
     }
 
     fn stateless(&self) -> bool {
@@ -177,7 +177,7 @@ async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
                 .deferred()
                 .tool(RefundTool)
                 .skills(billing_skills().await)
-                .subagent(AgentDef {
+                .subagent_def(AgentDef {
                     name: "billing-worker".into(),
                     description: "handles billing disputes".into(),
                     provider: None,
@@ -241,12 +241,11 @@ struct RichFactory {
 
 #[async_trait]
 impl AgentFactory for RichFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        rich_composer(self.provider.clone())
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(rich_composer(self.provider.clone())
             .await
             .build(tenant, session_id)
-            .await
-            .unwrap()
+            .await?)
     }
 
     async fn overview(&self, tenant: &str, session_id: &str) -> Option<AgentOverview> {

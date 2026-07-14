@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use runic_hook::WriteHook;
-use runic_mcp::McpConnection;
 use runic_memory::Memory as MemoryConfig;
 use runic_skills::SkillSet;
 use runic_subagent::Subagents;
@@ -48,26 +47,6 @@ impl Ability for Delegation {
     }
 }
 
-pub struct Mcp(pub McpConnection);
-
-#[async_trait]
-impl Ability for Mcp {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        if let Some(section) = self.0.section() {
-            bundle.prompt(Layer::Stable, section.to_string());
-        }
-        if let Some(tool) = self.0.tools() {
-            bundle.tool(tool);
-        }
-        bundle.tool_catalog(self.0.catalog());
-        Ok(())
-    }
-}
-
 pub struct Sessions(pub SessionsConfig);
 
 #[async_trait]
@@ -95,21 +74,18 @@ pub fn ask_user() -> AbilityDraft {
 pub fn web_fetch() -> AbilityDraft {
     ability("web-fetch")
         .describe("fetch a URL (SSRF-guarded)")
-        .deferred()
         .tool(WebFetchTool::new())
 }
 
 pub fn web_search(provider: Arc<dyn SearchProvider>) -> AbilityDraft {
     ability("web-search")
-        .describe("search the web via an injected provider")
-        .deferred()
+        .describe("search the web")
         .tool(WebSearchTool::new(provider))
 }
 
 pub fn weather() -> AbilityDraft {
     ability("weather")
         .describe("current + historical weather, keyless")
-        .deferred()
         .tool(WeatherTool::new())
         .tool(WeatherHistoryTool::new())
 }
@@ -117,7 +93,6 @@ pub fn weather() -> AbilityDraft {
 pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> AbilityDraft {
     ability("composio")
         .describe("1000+ external app actions via Composio")
-        .deferred()
         .tool(ComposioTool::new(api_key, entity_id))
 }
 

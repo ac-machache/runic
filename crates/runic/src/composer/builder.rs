@@ -1,7 +1,9 @@
-use runic_agent::Agent;
+use runic_agent::{Agent, AgentBuilder};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, roster_prompt_section};
+use runic_subagent::{
+    AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq, roster_prompt_section,
+};
 use runic_substrate::ArtifactStore;
 use runic_tool::{Tool, ToolCatalog};
 use std::{
@@ -81,6 +83,44 @@ fn into_catalog(mut catalogs: Vec<Arc<dyn ToolCatalog>>) -> Option<Arc<dyn ToolC
         0 => None,
         1 => catalogs.pop(),
         _ => Some(Arc::new(ChainCatalog(catalogs))),
+    }
+}
+
+struct DispatchingSubagentBuilder {
+    by_name: HashMap<String, Arc<dyn SubagentBuilder>>,
+    default: Arc<dyn SubagentBuilder>,
+}
+
+impl DispatchingSubagentBuilder {
+    fn for_req(&self, req: &SubagentReq<'_>) -> &Arc<dyn SubagentBuilder> {
+        self.by_name.get(&req.def.name).unwrap_or(&self.default)
+    }
+}
+
+#[async_trait::async_trait]
+impl SubagentBuilder for DispatchingSubagentBuilder {
+    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        self.for_req(req).provider(req).await
+    }
+
+    fn default_model(&self, req: &SubagentReq<'_>) -> String {
+        self.for_req(req).default_model(req)
+    }
+
+    async fn tool_pool(&self, req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
+        self.for_req(req).tool_pool(req).await
+    }
+
+    fn skill_catalog(&self, req: &SubagentReq<'_>) -> Option<Arc<SkillSet>> {
+        self.for_req(req).skill_catalog(req)
+    }
+
+    fn identity(&self, req: &SubagentReq<'_>) -> (String, String) {
+        self.for_req(req).identity(req)
+    }
+
+    fn decorate(&self, b: AgentBuilder, req: &SubagentReq<'_>) -> AgentBuilder {
+        self.for_req(req).decorate(b, req)
     }
 }
 
@@ -194,6 +234,7 @@ impl Composer {
         let mut subagent_owner_names: HashMap<String, String> = HashMap::new();
         let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
         let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
+        let mut subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>> = HashMap::new();
         for ability in &self.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
@@ -266,6 +307,7 @@ impl Composer {
                     deferred_subagent_owners.insert(def.name.clone(), id.clone());
                 }
             }
+            subagent_builders.extend(bundle.subagent_builders.clone());
             match deferred_id {
                 Some(id) => registry.entries.push(DeferredEntry {
                     id,
@@ -322,13 +364,21 @@ impl Composer {
                     .chain(deferred_defs)
                     .collect(),
             ));
-            let builder = self.subagent_builder.clone().unwrap_or_else(|| {
+            let default_builder = self.subagent_builder.clone().unwrap_or_else(|| {
                 Arc::new(FoundrySubagentBuilder {
                     provider: self.provider.clone(),
                     model: self.model.clone(),
                     skills: None,
                 })
             });
+            let builder: Arc<dyn SubagentBuilder> = if subagent_builders.is_empty() {
+                default_builder
+            } else {
+                Arc::new(DispatchingSubagentBuilder {
+                    by_name: subagent_builders,
+                    default: default_builder,
+                })
+            };
             let delegate: Arc<dyn Tool> = Arc::new(DelegateTool::new(full_roster, builder));
             composition.tools.push(Arc::new(GatedTool::new(
                 delegate,

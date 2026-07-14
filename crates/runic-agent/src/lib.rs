@@ -262,6 +262,8 @@ pub enum AgentError {
     CircuitBreak(String),
     #[error("media resolution failed: {0}")]
     Media(String),
+    #[error("agent build failed: {0}")]
+    Build(String),
 }
 
 /// Rewrites a request before the model call (e.g. swapping `artifact_ref` for

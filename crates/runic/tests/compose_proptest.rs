@@ -427,7 +427,7 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
                 .describe(format!("desc-{}", spec.id))
                 .deferred()
                 .skills(skill_for(&spec.id).await)
-                .subagent(worker_def(&spec.id)),
+                .subagent_def(worker_def(&spec.id)),
         );
     }
     let activated_ids: Vec<String> = specs

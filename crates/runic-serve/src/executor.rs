@@ -152,14 +152,20 @@ async fn execute_queued_run(
             .await;
         return;
     }
-    let mut agent =
-        crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-    let log = store.read(&tenant, &thread_id).await.unwrap_or_default();
-    let outcome = if resuming(&log, &run_id) {
-        agent.resume(run_ctx).await
-    } else {
-        agent.run_message_with(user_msg, run_ctx).await
-    };
+    let outcome =
+        match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
+            .await
+        {
+            Ok(mut agent) => {
+                let log = store.read(&tenant, &thread_id).await.unwrap_or_default();
+                if resuming(&log, &run_id) {
+                    agent.resume(run_ctx).await
+                } else {
+                    agent.run_message_with(user_msg, run_ctx).await
+                }
+            }
+            Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+        };
     heartbeat.abort();
     let (status, error) = match &outcome {
         Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),

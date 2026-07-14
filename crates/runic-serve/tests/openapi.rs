@@ -15,7 +15,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> Agent {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
         panic!("openapi tests never drive the agent");
     }
 }

@@ -6,6 +6,7 @@ use runic_skills::SkillSet;
 use runic_subagent::AgentDef;
 use runic_tool::{Tool, ToolCatalog};
 
+use super::subagent::SubagentDraft;
 use super::{Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, Layer};
 
 pub fn ability(id: impl Into<String>) -> AbilityDraft {
@@ -18,6 +19,7 @@ pub fn ability(id: impl Into<String>) -> AbilityDraft {
         hooks: Vec::new(),
         skills: Vec::new(),
         subagents: Vec::new(),
+        nested: Vec::new(),
         tool_catalog: None,
     }
 }
@@ -31,6 +33,7 @@ pub struct AbilityDraft {
     hooks: Vec<Arc<dyn WriteHook>>,
     skills: Vec<Arc<SkillSet>>,
     subagents: Vec<AgentDef>,
+    nested: Vec<Arc<dyn Ability>>,
     tool_catalog: Option<Arc<dyn ToolCatalog>>,
 }
 
@@ -80,7 +83,12 @@ impl AbilityDraft {
         self
     }
 
-    pub fn subagent(mut self, def: AgentDef) -> Self {
+    pub fn subagent(mut self, draft: SubagentDraft) -> Self {
+        self.nested.push(Arc::new(draft));
+        self
+    }
+
+    pub fn subagent_def(mut self, def: AgentDef) -> Self {
         self.subagents.push(def);
         self
     }
@@ -113,7 +121,7 @@ impl Ability for AbilityDraft {
     async fn contribute(
         &self,
         bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
+        ctx: &BuildCtx<'_>,
     ) -> anyhow::Result<()> {
         for (layer, text) in &self.prompt {
             bundle.prompt(*layer, text.clone());
@@ -129,6 +137,16 @@ impl Ability for AbilityDraft {
         }
         for def in &self.subagents {
             bundle.subagent(def.clone());
+        }
+        for nested in &self.nested {
+            if nested.descriptor().activation == ActivationPolicy::Deferred {
+                anyhow::bail!(
+                    "ability `{}`: nested subagent `{}` must not be deferred — the outer ability controls activation",
+                    self.id,
+                    nested.name()
+                );
+            }
+            nested.contribute(bundle, ctx).await?;
         }
         if let Some(catalog) = &self.tool_catalog {
             bundle.tool_catalog(catalog.clone());

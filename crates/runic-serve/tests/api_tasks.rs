@@ -89,7 +89,7 @@ struct DelegatingFactory;
 
 #[async_trait]
 impl AgentFactory for DelegatingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
         let provider = Arc::new(ScriptedProvider {
             responses: Mutex::new(
                 vec![delegate_background_response(), text_response("spawned")].into(),
@@ -105,10 +105,10 @@ impl AgentFactory for DelegatingFactory {
             max_turns: None,
             system_prompt: "dig".into(),
         }]));
-        Agent::builder(provider, tenant, session_id)
+        Ok(Agent::builder(provider, tenant, session_id)
             .system_prompt("sys")
             .tool(Arc::new(DelegateTool::new(roster, Arc::new(StubBuilder))))
-            .build()
+            .build())
     }
 }
 

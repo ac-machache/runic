@@ -34,10 +34,10 @@ struct EchoFactory;
 
 #[async_trait]
 impl AgentFactory for EchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(EchoProvider), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(Arc::new(EchoProvider), tenant, session_id)
             .system_prompt("test")
-            .build()
+            .build())
     }
 }
 

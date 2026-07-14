@@ -45,10 +45,12 @@ struct ScriptedFactory;
 
 #[async_trait]
 impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(ScriptedProvider), tenant, session_id)
-            .system_prompt("test")
-            .build()
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::builder(Arc::new(ScriptedProvider), tenant, session_id)
+                .system_prompt("test")
+                .build(),
+        )
     }
 }
 
@@ -65,10 +67,12 @@ struct FailingFactory;
 
 #[async_trait]
 impl AgentFactory for FailingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(FailingProvider), tenant, session_id)
-            .system_prompt("test")
-            .build()
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::builder(Arc::new(FailingProvider), tenant, session_id)
+                .system_prompt("test")
+                .build(),
+        )
     }
 }
 
@@ -187,8 +191,8 @@ struct GatedFactory {
 
 #[async_trait]
 impl AgentFactory for GatedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(
             Arc::new(GatedProvider {
                 entered: self.entered.clone(),
                 gate: self.gate.clone(),
@@ -198,7 +202,7 @@ impl AgentFactory for GatedFactory {
         )
         .system_prompt("test")
         .tool(Arc::new(NoopTool))
-        .build()
+        .build())
     }
 }
 
@@ -206,11 +210,11 @@ struct AskingFactory;
 
 #[async_trait]
 impl AgentFactory for AskingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(AskingProvider), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(Arc::new(AskingProvider), tenant, session_id)
             .system_prompt("test")
             .tool(Arc::new(ParkTool))
-            .build()
+            .build())
     }
 }
 
@@ -254,11 +258,13 @@ struct DeferringFactory;
 
 #[async_trait]
 impl AgentFactory for DeferringFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(Arc::new(DeferringProvider), tenant, session_id)
-            .system_prompt("test")
-            .tool(Arc::new(DeferTool))
-            .build()
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::builder(Arc::new(DeferringProvider), tenant, session_id)
+                .system_prompt("test")
+                .tool(Arc::new(DeferTool))
+                .build(),
+        )
     }
 }
 
@@ -565,6 +571,192 @@ async fn provider_failure_emits_run_error_then_done() {
     let kinds = sse_kinds(&body);
     assert!(kinds.contains(&"run_error".to_string()), "{kinds:?}");
     assert_eq!(kinds.last().unwrap(), "done");
+}
+
+struct BrokenFactory;
+
+#[async_trait]
+impl AgentFactory for BrokenFactory {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
+        Err(anyhow::anyhow!("mcp backend unreachable"))
+    }
+}
+
+fn broken_router_with_store(store: Arc<dyn SessionStore>) -> Router {
+    router(ServeConfig {
+        session_store: store,
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(BrokenFactory)),
+        limits: Default::default(),
+        workers: None,
+        broker: None,
+        nudge: None,
+        identity: None,
+    })
+}
+
+async fn run_status_settles(
+    store: &Arc<dyn SessionStore>,
+    tenant: &str,
+    run_id: &str,
+) -> runic_substrate::RunStatus {
+    for _ in 0..200 {
+        if let Ok(Some(rec)) = store.get_run(tenant, run_id).await
+            && rec.status.is_terminal()
+        {
+            return rec.status;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run_id} never reached a terminal status");
+}
+
+#[tokio::test]
+async fn factory_build_failure_fails_the_run_and_releases_the_thread() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = broken_router_with_store(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(run_request("t1", TENANT, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let run_id = errored_run_id(&body).expect("stream reports the failed run");
+    let kinds = sse_kinds(&body);
+    assert!(body.contains("agent build failed"), "{body}");
+    assert_eq!(kinds.last().unwrap(), "done");
+    assert_eq!(
+        run_status_settles(&store, TENANT, &run_id).await,
+        runic_substrate::RunStatus::Error
+    );
+
+    let resp = app
+        .oneshot(run_request("t1", TENANT, "again"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    let second_run = errored_run_id(&body).expect("second run starts despite first failure");
+    assert_ne!(second_run, run_id);
+    assert_eq!(
+        run_status_settles(&store, TENANT, &second_run).await,
+        runic_substrate::RunStatus::Error
+    );
+}
+
+fn errored_run_id(body: &str) -> Option<String> {
+    sse_data(body).into_iter().find_map(|e| {
+        (e["type"] == "run_error").then(|| e["run_id"].as_str().map(str::to_string))?
+    })
+}
+
+async fn accepted_run_id(app: &Router, thread: &str, message: &str) -> String {
+    let resp = app
+        .clone()
+        .oneshot(post_json(
+            &format!("/threads/{thread}/runs"),
+            TENANT,
+            json!({ "message": message }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn factory_build_failure_on_background_run_lands_in_the_run_row() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = broken_router_with_store(store.clone());
+
+    let run_id = accepted_run_id(&app, "t1", "hello").await;
+    assert_eq!(
+        run_status_settles(&store, TENANT, &run_id).await,
+        runic_substrate::RunStatus::Error
+    );
+    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+    assert!(rec.error.unwrap().contains("agent build failed"));
+
+    let second = accepted_run_id(&app, "t1", "again").await;
+    assert_ne!(second, run_id);
+    assert_eq!(
+        run_status_settles(&store, TENANT, &second).await,
+        runic_substrate::RunStatus::Error
+    );
+}
+
+#[tokio::test]
+async fn factory_build_failure_in_queued_mode_lands_in_the_run_row() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = router(ServeConfig {
+        session_store: store.clone(),
+        artifact_store: Arc::new(MemoryArtifactStore::new()),
+        transcriber: None,
+        agents: single_agent("main", Arc::new(BrokenFactory)),
+        limits: Default::default(),
+        broker: None,
+        nudge: None,
+        identity: None,
+        workers: Some(WorkerConfig {
+            max_concurrent_runs: 2,
+            poll_every: Duration::from_millis(20),
+        }),
+    });
+
+    let run_id = accepted_run_id(&app, "t1", "hello").await;
+    assert_eq!(
+        run_status_settles(&store, TENANT, &run_id).await,
+        runic_substrate::RunStatus::Error
+    );
+    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
+    assert!(rec.error.unwrap().contains("agent build failed"));
+
+    let second = accepted_run_id(&app, "t1", "again").await;
+    assert_eq!(
+        run_status_settles(&store, TENANT, &second).await,
+        runic_substrate::RunStatus::Error
+    );
+}
+
+#[tokio::test]
+async fn factory_build_failure_on_overview_is_an_agent_error() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = broken_router_with_store(store);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/agents/main")
+                .header("x-runic-tenant", TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_string(resp).await;
+    assert!(body.contains("mcp backend unreachable"), "{body}");
+}
+
+#[tokio::test]
+async fn factory_build_failure_on_wait_is_an_agent_error() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = broken_router_with_store(store.clone());
+
+    let resp = app
+        .oneshot(wait_request("t1", TENANT, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = body_string(resp).await;
+    assert!(body.contains("agent build failed"), "{body}");
 }
 
 #[tokio::test]
@@ -1685,11 +1877,11 @@ struct SteerableFactory {
 
 #[async_trait]
 impl AgentFactory for SteerableFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-        Agent::builder(self.provider.clone(), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+        Ok(Agent::builder(self.provider.clone(), tenant, session_id)
             .system_prompt("test")
             .tool(Arc::new(NoopTool))
-            .build()
+            .build())
     }
 }
 

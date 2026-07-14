@@ -1,7 +1,8 @@
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::AgentDef;
+use runic_subagent::{AgentDef, SubagentBuilder};
 use runic_tool::{Tool, ToolCatalog};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::Layer;
@@ -14,6 +15,7 @@ pub struct AbilityBundle {
     pub tool_catalog: Option<Arc<dyn ToolCatalog>>,
     pub skills: Vec<Arc<SkillSet>>,
     pub subagents: Vec<AgentDef>,
+    pub subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>>,
 }
 
 impl AbilityBundle {
@@ -38,6 +40,11 @@ impl AbilityBundle {
     }
 
     pub fn subagent(&mut self, def: AgentDef) {
+        self.subagents.push(def);
+    }
+
+    pub fn subagent_with(&mut self, def: AgentDef, builder: Arc<dyn SubagentBuilder>) {
+        self.subagent_builders.insert(def.name.clone(), builder);
         self.subagents.push(def);
     }
 }

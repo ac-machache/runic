@@ -18,7 +18,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> Agent {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
         panic!("agent path must not run here");
     }
 }

@@ -143,7 +143,8 @@ pub async fn agent_overview(
         None => {
             let agent = factory
                 .build(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
-                .await;
+                .await
+                .map_err(|e| ServeError::Agent(e.to_string()))?;
             fallback_overview(&name, &agent)
         }
     };

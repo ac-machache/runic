@@ -325,9 +325,13 @@ pub async fn create_and_stream_run(
             crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return;
         }
-        let mut agent =
-            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-        let outcome = agent.run_message_with(user_msg, run_ctx).await;
+        let outcome =
+            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
+                .await
+            {
+                Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
+                Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+            };
         claim.release();
         let (status, error) = match &outcome {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
@@ -511,9 +515,16 @@ pub async fn wait_run(
             crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return Err("run was claimed by another instance".to_string());
         }
-        let mut agent =
-            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-        let result = agent.run_message_with(user_msg, run_ctx).await;
+        let (agent, result) =
+            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
+                .await
+            {
+                Ok(mut agent) => {
+                    let result = agent.run_message_with(user_msg, run_ctx).await;
+                    (Some(agent), result)
+                }
+                Err(e) => (None, Err(runic_agent::AgentError::Build(e.to_string()))),
+            };
         claim.release();
         let (status, error) = match &result {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
@@ -534,7 +545,10 @@ pub async fn wait_run(
         crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
         match result {
             Ok(outcome) => {
-                let text = agent.state().last_assistant_text().unwrap_or_default();
+                let text = agent
+                    .as_ref()
+                    .and_then(|agent| agent.state().last_assistant_text())
+                    .unwrap_or_default();
                 Ok(WaitRunResponse {
                     run_id,
                     text,
@@ -693,9 +707,13 @@ pub async fn background_run(
             crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
             return;
         }
-        let mut agent =
-            crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun).await;
-        let outcome = agent.run_message_with(user_msg, run_ctx).await;
+        let outcome =
+            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
+                .await
+            {
+                Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
+                Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+            };
         claim.release();
         let (status, error) = match &outcome {
             Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),

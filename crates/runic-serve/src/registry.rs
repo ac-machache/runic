@@ -357,7 +357,7 @@ pub async fn hydrate_agent(
     tenant: &str,
     thread_id: &str,
     begun: &mut BegunRun,
-) -> Agent {
+) -> anyhow::Result<Agent> {
     let span = tracing::info_span!(
         "hydrate",
         tenant = %tenant,
@@ -377,12 +377,12 @@ async fn hydrate_agent_inner(
     thread_id: &str,
     begun: &mut BegunRun,
     span: &tracing::Span,
-) -> Agent {
-    let mut agent = factory.build(tenant, thread_id).await;
+) -> anyhow::Result<Agent> {
+    let mut agent = factory.build(tenant, thread_id).await?;
 
     if factory.stateless() {
         agent.state_mut().set_events_tx(begun.events_tx.clone());
-        return agent;
+        return Ok(agent);
     }
 
     if let Ok(Some(meta)) = store.session_meta(tenant, thread_id).await {
@@ -425,7 +425,7 @@ async fn hydrate_agent_inner(
         begun.persist.clone(),
     );
 
-    agent
+    Ok(agent)
 }
 
 pub enum Claim {
@@ -680,10 +680,10 @@ mod tests {
 
     #[async_trait]
     impl AgentFactory for TestFactory {
-        async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-            Agent::builder(Arc::new(TestProvider), tenant, session_id)
+        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+            Ok(Agent::builder(Arc::new(TestProvider), tenant, session_id)
                 .system_prompt("test")
-                .build()
+                .build())
         }
     }
 
@@ -691,10 +691,10 @@ mod tests {
 
     #[async_trait]
     impl AgentFactory for StatelessTestFactory {
-        async fn build(&self, tenant: &str, session_id: &str) -> Agent {
-            Agent::builder(Arc::new(TestProvider), tenant, session_id)
+        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+            Ok(Agent::builder(Arc::new(TestProvider), tenant, session_id)
                 .system_prompt("test")
-                .build()
+                .build())
         }
 
         fn stateless(&self) -> bool {
@@ -1017,7 +1017,9 @@ mod tests {
         let registry = RunRegistry::new();
         let mut begun = registry.begin("t", "s", "r-9").await.unwrap();
         let factory: BoxedAgentFactory = Arc::new(TestFactory);
-        let agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
+        let agent = hydrate_agent(&store, &factory, "t", "s", &mut begun)
+            .await
+            .unwrap();
 
         assert_eq!(agent.state().stats().runs, 8);
         assert_eq!(agent.state().stats().total_tool_calls, 12);
@@ -1034,7 +1036,9 @@ mod tests {
         let registry = RunRegistry::new();
         let mut begun = registry.begin("t", "s", "r-1").await.unwrap();
         let factory: BoxedAgentFactory = Arc::new(StatelessTestFactory);
-        let mut agent = hydrate_agent(&store, &factory, "t", "s", &mut begun).await;
+        let mut agent = hydrate_agent(&store, &factory, "t", "s", &mut begun)
+            .await
+            .unwrap();
 
         assert!(agent.state().messages_for_provider().is_empty());
         agent.state_mut().push_event(message_event(9));

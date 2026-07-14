@@ -1,0 +1,510 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use runic::ability::{ability, subagent};
+use runic::composer::Composer;
+use runic_agent::RunContext;
+use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_subagent::AgentDef;
+use runic_tool::{Tool, ToolContext, ToolResult};
+use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
+
+struct ScriptedProvider {
+    responses: Mutex<VecDeque<CompletionResponse>>,
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+impl ScriptedProvider {
+    fn new(responses: Vec<CompletionResponse>) -> Arc<Self> {
+        Arc::new(Self {
+            responses: Mutex::new(responses.into()),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn last_request(&self) -> CompletionRequest {
+        self.requests.lock().unwrap().last().unwrap().clone()
+    }
+
+    fn request_tool_names(&self, index: usize) -> Vec<String> {
+        self.requests.lock().unwrap()[index]
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Parse("scripted provider exhausted".into()))
+    }
+}
+
+fn text(content: &str) -> CompletionResponse {
+    CompletionResponse {
+        content: vec![ContentBlock::Text {
+            text: content.into(),
+            provider_metadata: None,
+        }],
+        stop_reason: StopReason::EndTurn,
+        tool_calls: vec![],
+        usage: TokenUsage::default(),
+    }
+}
+
+fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionResponse {
+    CompletionResponse {
+        content: vec![ContentBlock::ToolUse {
+            id: call_id.into(),
+            name: name.into(),
+            input: input.clone(),
+            provider_metadata: None,
+        }],
+        stop_reason: StopReason::ToolUse,
+        tool_calls: vec![ToolCall {
+            id: call_id.into(),
+            name: name.into(),
+            input,
+        }],
+        usage: TokenUsage::default(),
+    }
+}
+
+fn delegate_to(agent: &str) -> CompletionResponse {
+    call(
+        "c1",
+        "delegate",
+        serde_json::json!({ "agent": agent, "prompt": "go" }),
+    )
+}
+
+struct NamedTool(&'static str);
+
+#[async_trait]
+impl Tool for NamedTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "test tool"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("ok"))
+    }
+}
+
+struct RecordingTool {
+    name: &'static str,
+    seen: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait]
+impl Tool for RecordingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "records its args"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        *self.seen.lock().unwrap() = Some(args);
+        Ok(ToolResult::ok("recorded"))
+    }
+}
+
+#[tokio::test]
+async fn draft_owned_tools_are_isolated_and_models_resolve() {
+    let child_a = ScriptedProvider::new(vec![text("a done")]);
+    let child_b = ScriptedProvider::new(vec![text("b done")]);
+    let main_provider = ScriptedProvider::new(vec![
+        delegate_to("sub-a"),
+        call(
+            "c2",
+            "delegate",
+            serde_json::json!({ "agent": "sub-b", "prompt": "go" }),
+        ),
+        text("done"),
+    ]);
+
+    let mut agent = Composer::new(main_provider.clone(), "main-model")
+        .with(runic::ability::Tools(vec![Arc::new(NamedTool(
+            "main-tool",
+        ))]))
+        .with(
+            subagent("sub-a", "a expert")
+                .prompt("you are a")
+                .provider(child_a.clone())
+                .tool(NamedTool("only-a")),
+        )
+        .with(
+            subagent("sub-b", "b expert")
+                .prompt("you are b")
+                .provider(child_b.clone())
+                .model("custom-child")
+                .tool(NamedTool("only-b")),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    let main_tools = main_provider.request_tool_names(0);
+    assert!(main_tools.iter().any(|name| name == "main-tool"));
+    assert!(!main_tools.iter().any(|name| name == "only-a"));
+    assert!(!main_tools.iter().any(|name| name == "only-b"));
+
+    let request_a = child_a.last_request();
+    assert_eq!(
+        request_a
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["only-a"]
+    );
+    assert_eq!(request_a.model, "main-model");
+
+    let request_b = child_b.last_request();
+    assert_eq!(request_b.model, "custom-child");
+}
+
+#[tokio::test]
+async fn forward_context_injects_run_config_into_mcp_tool_args() {
+    let seen = Arc::new(Mutex::new(None));
+    let child = ScriptedProvider::new(vec![
+        call(
+            "t1",
+            "mcp__crm__lookup",
+            serde_json::json!({ "query": "dupont" }),
+        ),
+        text("child done"),
+    ]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("crm-expert", "crm digger")
+                .prompt("dig")
+                .provider(child.clone())
+                .tool(RecordingTool {
+                    name: "mcp__crm__lookup",
+                    seen: seen.clone(),
+                })
+                .forward_context(["user_id"]),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    let ctx = RunContext::new().config_value("user_id", serde_json::json!("u-42"));
+    agent.run_with("start", ctx).await.unwrap();
+
+    let args = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(args["user_id"], serde_json::json!("u-42"));
+    assert_eq!(args["query"], serde_json::json!("dupont"));
+}
+
+struct CtxProbe(Arc<Mutex<Option<String>>>);
+
+#[async_trait]
+impl runic::ability::Ability for CtxProbe {
+    async fn contribute(
+        &self,
+        _bundle: &mut runic::ability::AbilityBundle,
+        ctx: &runic::ability::BuildCtx<'_>,
+    ) -> anyhow::Result<()> {
+        *self.0.lock().unwrap() = Some(ctx.model.to_string());
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn child_abilities_see_the_child_model_not_the_parents() {
+    let seen_model = Arc::new(Mutex::new(None));
+    let child = ScriptedProvider::new(vec![]);
+    let provider = ScriptedProvider::new(vec![]);
+
+    Composer::new(provider, "main-model")
+        .with(
+            subagent("expert", "digs")
+                .prompt("dig")
+                .provider(child)
+                .model("child-override")
+                .with(CtxProbe(seen_model.clone()))
+                .tool(NamedTool("t")),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        seen_model.lock().unwrap().as_deref(),
+        Some("child-override")
+    );
+}
+
+#[tokio::test]
+async fn forward_context_blocks_mcp_tools_when_context_is_missing() {
+    let seen = Arc::new(Mutex::new(None));
+    let child = ScriptedProvider::new(vec![
+        call(
+            "t1",
+            "mcp__crm__lookup",
+            serde_json::json!({ "query": "dupont" }),
+        ),
+        text("child done"),
+    ]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("crm-expert", "crm digger")
+                .prompt("dig")
+                .provider(child.clone())
+                .tool(RecordingTool {
+                    name: "mcp__crm__lookup",
+                    seen: seen.clone(),
+                })
+                .forward_context(["user_id"]),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    assert!(seen.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn forward_context_to_scopes_by_server() {
+    let crm_seen = Arc::new(Mutex::new(None));
+    let docs_seen = Arc::new(Mutex::new(None));
+    let child = ScriptedProvider::new(vec![
+        call("t1", "mcp__crm__lookup", serde_json::json!({})),
+        call("t2", "mcp__docs__read", serde_json::json!({})),
+        text("child done"),
+    ]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("expert"), text("done")]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("expert", "digs")
+                .prompt("dig")
+                .provider(child.clone())
+                .tool(RecordingTool {
+                    name: "mcp__crm__lookup",
+                    seen: crm_seen.clone(),
+                })
+                .tool(RecordingTool {
+                    name: "mcp__docs__read",
+                    seen: docs_seen.clone(),
+                })
+                .forward_context_to("crm", ["user_id"]),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    let ctx = RunContext::new().config_value("user_id", serde_json::json!("u-42"));
+    agent.run_with("start", ctx).await.unwrap();
+
+    let crm_args = crm_seen.lock().unwrap().clone().unwrap();
+    assert_eq!(crm_args["user_id"], serde_json::json!("u-42"));
+
+    let docs_args = docs_seen.lock().unwrap().clone().unwrap();
+    assert!(docs_args.get("user_id").is_none());
+}
+
+#[tokio::test]
+async fn owned_tools_with_allowed_tools_list_is_a_build_error() {
+    let markdown = "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig purchases";
+    let draft = runic::subagent::from_markdown(markdown)
+        .unwrap()
+        .tool(NamedTool("query"));
+
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(draft)
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("owned tools + allowed-tools must not compose");
+    };
+    assert!(err.to_string().contains("purchase-expert"));
+    assert!(format!("{err:#}").contains("owned tools"));
+}
+
+#[tokio::test]
+async fn nested_subagents_inside_a_draft_are_rejected() {
+    let def = AgentDef {
+        name: "inner".into(),
+        description: "inner".into(),
+        provider: None,
+        model: None,
+        allowed_tools: vec![],
+        skills: vec![],
+        max_turns: None,
+        system_prompt: "inner".into(),
+    };
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(def)))
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("nested subagents must not compose");
+    };
+    assert!(format!("{err:#}").contains("nested subagents"));
+}
+
+#[tokio::test]
+async fn deferred_abilities_inside_a_draft_are_rejected() {
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(subagent("outer", "outer").with(ability("gated").describe("gated stuff").deferred()))
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("deferred child abilities must not compose");
+    };
+    assert!(format!("{err:#}").contains("always eager"));
+}
+
+#[tokio::test]
+async fn ability_prompts_reach_the_child_system_prompt() {
+    let child = ScriptedProvider::new(vec![text("done")]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("writer"), text("done")]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("writer", "writes")
+                .prompt("you are the writer")
+                .provider(child.clone())
+                .with(ability("style").prompt("EXTRA-SECTION"))
+                .tool(NamedTool("pen")),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    let system = child.last_request().system.unwrap_or_default();
+    assert!(system.contains("you are the writer"));
+    assert!(system.contains("EXTRA-SECTION"));
+}
+
+#[tokio::test]
+async fn grouped_ability_can_own_a_draft() {
+    let child = ScriptedProvider::new(vec![text("done")]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("analyst"), text("done")]);
+
+    let mut agent = Composer::new(main_provider.clone(), "main-model")
+        .with(
+            ability("commerce").describe("commerce pack").subagent(
+                subagent("analyst", "analyzes")
+                    .prompt("analyze")
+                    .provider(child.clone())
+                    .tool(NamedTool("cube")),
+            ),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    assert_eq!(
+        child
+            .last_request()
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["cube"]
+    );
+}
+
+#[tokio::test]
+async fn grouped_deferred_draft_is_rejected() {
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(
+            ability("commerce").describe("commerce pack").subagent(
+                subagent("analyst", "analyzes")
+                    .deferred()
+                    .tool(NamedTool("cube")),
+            ),
+        )
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("a deferred draft nested in an ability must not compose");
+    };
+    assert!(format!("{err:#}").contains("outer ability controls activation"));
+}
+
+#[tokio::test]
+async fn markdown_allowed_tools_with_other_owned_config_is_a_build_error() {
+    let markdown =
+        "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig";
+    let draft = runic::subagent::from_markdown(markdown)
+        .unwrap()
+        .forward_context(["user_id"]);
+
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(draft)
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("pool-scoped tools must not silently vanish on a composed draft");
+    };
+    assert!(format!("{err:#}").contains("no shared pool"));
+}
+
+#[tokio::test]
+async fn markdown_skills_without_owned_skills_is_a_build_error() {
+    let markdown =
+        "---\nname: purchase-expert\ndescription: purchases\nskills: [pricing]\n---\nyou dig";
+    let draft = runic::subagent::from_markdown(markdown)
+        .unwrap()
+        .tool(NamedTool("query"));
+
+    let provider = ScriptedProvider::new(vec![]);
+    let Err(err) = Composer::new(provider, "main-model")
+        .with(draft)
+        .build("alice", "s1")
+        .await
+    else {
+        panic!("skill scoping without owned skills must not silently vanish");
+    };
+    assert!(format!("{err:#}").contains("owns no skill sets"));
+}

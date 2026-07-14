@@ -35,6 +35,7 @@ pub mod hook {
     pub use runic_hook::*;
 }
 pub mod mcp {
+    pub use crate::ability::mcp::{deferred, direct};
     pub use runic_mcp::*;
 }
 pub mod memory {
@@ -50,6 +51,7 @@ pub mod state {
     pub use runic_state::*;
 }
 pub mod subagent {
+    pub use crate::ability::subagent::{SubagentDraft, from_markdown, subagent};
     pub use runic_subagent::*;
 }
 pub mod substrate {

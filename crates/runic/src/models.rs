@@ -32,7 +32,7 @@ fn api_key(provider: &'static str, env_var: &'static str) -> Result<String, Comp
         .ok_or(ComposeError::MissingApiKey { provider, env_var })
 }
 
-fn build_provider(name: &str) -> Result<Arc<dyn Provider>, ComposeError> {
+pub(crate) fn build_provider(name: &str) -> Result<Arc<dyn Provider>, ComposeError> {
     match name {
         #[cfg(feature = "mistral")]
         "mistral" => Ok(Arc::new(runic_provider::mistral::MistralDriver::new(

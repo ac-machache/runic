@@ -149,7 +149,6 @@ async fn registers_enabled_tool_surfaces() {
         )))
         .with(Delegation(subagents(agent_dir.path())))
         .with(Sessions(sessions_memory()))
-        .activated(["web-fetch", "weather"])
         .build("alice", "s1")
         .await
         .unwrap();

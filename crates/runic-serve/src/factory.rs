@@ -16,7 +16,7 @@ use crate::routes::agents::AgentOverview;
 
 #[async_trait]
 pub trait AgentFactory: Send + Sync {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent;
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent>;
 
     fn describe(&self) -> Option<&str> {
         None

@@ -82,6 +82,8 @@ fn ctx() -> DelegationCtx {
         max_depth: 3,
         cancel: runic_agent::CancelToken::new(),
         config: serde_json::Map::new(),
+        tenant: "alice".into(),
+        session: "s1".into(),
     }
 }
 
@@ -95,6 +97,19 @@ fn builder(provider: Arc<dyn Provider>) -> FoundrySubagentBuilder {
 
 async fn assemble(b: &dyn SubagentBuilder, def: &AgentDef) -> Agent {
     assemble_subagent(b, &SubagentReq { def, dctx: &ctx() }).await
+}
+
+#[tokio::test]
+async fn children_inherit_the_parent_tenant() {
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    let agent = assemble(
+        &builder(provider),
+        &def("---\nname: worker\ndescription: d\n---\nbody"),
+    )
+    .await;
+
+    assert_eq!(agent.state().user_id, "alice");
+    assert_eq!(agent.state().session_id, "s1:worker");
 }
 
 async fn crm_catalog() -> Arc<SkillSet> {

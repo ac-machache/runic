@@ -72,11 +72,22 @@ pub struct ThreadStateResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ThreadStatsView {
     pub runs: u64,
+    pub errored_runs: u64,
+    pub cancelled_runs: u64,
     pub turns: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub model_ms: u64,
+    pub last_prompt_tokens: u64,
     pub total_tool_calls: u64,
-    pub tool_calls: std::collections::HashMap<String, u64>,
+    #[schema(value_type = Object)]
+    pub tools: std::collections::HashMap<String, runic_state::ToolStat>,
+    pub delegations: u64,
+    pub delegation_errors: u64,
+    pub delegated_input_tokens: u64,
+    pub delegated_output_tokens: u64,
     pub tasks_spawned: u64,
     pub tasks_finished: u64,
     pub tasks_failed: u64,
@@ -86,11 +97,21 @@ impl From<&runic_state::ThreadStats> for ThreadStatsView {
     fn from(s: &runic_state::ThreadStats) -> Self {
         Self {
             runs: s.runs,
+            errored_runs: s.errored_runs,
+            cancelled_runs: s.cancelled_runs,
             turns: s.turns,
             input_tokens: s.input_tokens,
             output_tokens: s.output_tokens,
+            cache_read_tokens: s.cache_read_tokens,
+            cache_write_tokens: s.cache_write_tokens,
+            model_ms: s.model_ms,
+            last_prompt_tokens: s.last_prompt_tokens,
             total_tool_calls: s.total_tool_calls,
-            tool_calls: s.tool_calls.clone(),
+            tools: s.tools.clone(),
+            delegations: s.delegations,
+            delegation_errors: s.delegation_errors,
+            delegated_input_tokens: s.delegated_usage.input_tokens,
+            delegated_output_tokens: s.delegated_usage.output_tokens,
             tasks_spawned: s.tasks_spawned,
             tasks_finished: s.tasks_finished,
             tasks_failed: s.tasks_failed,
@@ -143,6 +164,14 @@ pub struct ThreadSummary {
     pub thread_id: String,
     pub label: Option<String>,
     pub event_count: u64,
+    pub run_count: u64,
+    pub errored_runs: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Deserialize, Default, ToSchema)]
@@ -273,6 +302,12 @@ pub async fn list_threads(
             thread_id: m.session_id,
             label: m.label,
             event_count: m.event_count,
+            run_count: m.run_count,
+            errored_runs: m.errored_runs,
+            input_tokens: m.input_tokens,
+            output_tokens: m.output_tokens,
+            last_run_status: m.last_run_status,
+            last_run_at: m.last_run_at,
         })
         .collect();
     Ok(Json(ThreadList {

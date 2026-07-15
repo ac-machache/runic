@@ -9,12 +9,18 @@ use runic_types::Message;
 use crate::{Agent, TurnRecord};
 
 impl Agent {
-    pub(crate) fn interpret_response(response: CompletionResponse) -> (Message, TurnRecord) {
+    pub(crate) fn interpret_response(
+        response: CompletionResponse,
+        model: String,
+        model_ms: u64,
+    ) -> (Message, TurnRecord) {
         let assistant = Message::assistant_with_blocks(response.content);
         let turn = TurnRecord {
             tool_calls: response.tool_calls,
             stop_reason: response.stop_reason,
             usage: response.usage,
+            model,
+            model_ms,
         };
         (assistant, turn)
     }

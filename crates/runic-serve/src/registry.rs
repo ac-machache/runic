@@ -389,24 +389,15 @@ async fn hydrate_agent_inner(
         agent.state_mut().label = meta.label;
     }
 
-    // Replay the working set (last snapshot + tail) into the fresh state.
-    // RunEnd rebuilds stats; RunStart is skipped so an orphaned run can't
-    // look in-flight on a fresh agent.
+    // Replay the working set (last snapshot + tail) into the fresh state —
+    // a pure fold of the full log. A crashed run's dangling RunStart stays
+    // visible as in-flight; that's the truth, and run rows own orphan
+    // handling.
     match store.read_tail(tenant, thread_id).await {
         Ok(stored) => {
             span.record("events", stored.len());
             for entry in stored {
-                if matches!(
-                    entry.event,
-                    SessionEvent::Message { .. }
-                        | SessionEvent::StateSnapshot { .. }
-                        | SessionEvent::RunEnd { .. }
-                        | SessionEvent::TaskSpawned { .. }
-                        | SessionEvent::TaskFinished { .. }
-                        | SessionEvent::StateUpdated { .. }
-                ) {
-                    agent.state_mut().fold_event(entry.event);
-                }
+                agent.state_mut().fold_event(entry.event);
             }
         }
         Err(e) => {
@@ -995,14 +986,37 @@ mod tests {
                         messages: vec![runic_types::Message::assistant("summary")],
                         system_prompt: "sys".into(),
                         reason: "compaction".into(),
-                        stats: Some(snapshot_stats),
+                        stats: Some(Box::new(snapshot_stats)),
                         open_tasks: None,
                         data: None,
                         at: chrono::Utc::now(),
                     },
+                    SessionEvent::RunStart {
+                        run_id: "r8".into(),
+                        agent: None,
+                        audit: None,
+                        at: chrono::Utc::now(),
+                    },
                     message_event(0),
+                    SessionEvent::TurnEnd {
+                        run_id: "r8".into(),
+                        turn: 1,
+                        model: "m".into(),
+                        usage: runic_types::TokenUsage::default(),
+                        model_ms: 1,
+                        at: chrono::Utc::now(),
+                    },
+                    SessionEvent::TurnEnd {
+                        run_id: "r8".into(),
+                        turn: 2,
+                        model: "m".into(),
+                        usage: runic_types::TokenUsage::default(),
+                        model_ms: 1,
+                        at: chrono::Utc::now(),
+                    },
                     SessionEvent::RunEnd {
                         run_id: "r8".into(),
+                        status: runic_state::RunEndStatus::Completed,
                         outcome: runic_state::RunOutcome {
                             total_turns: 2,
                             ..Default::default()

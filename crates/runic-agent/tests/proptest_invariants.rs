@@ -61,10 +61,10 @@ proptest! {
             let evs = drain_session(&mut events);
             let starts = evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count();
             let ends = evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count();
-            let boundaries = evs.iter().filter(|e| matches!(e, SessionEvent::TurnBoundary { .. })).count();
+            let boundaries = evs.iter().filter(|e| matches!(e, SessionEvent::TurnEnd { .. })).count();
             prop_assert_eq!(starts, 1, "exactly one RunStart");
             prop_assert_eq!(ends, 1, "exactly one RunEnd");
-            prop_assert_eq!(boundaries as u32, expected_turns, "a TurnBoundary per turn");
+            prop_assert_eq!(boundaries as u32, expected_turns, "a TurnEnd per turn");
             prop_assert!(
                 matches!(evs.first(), Some(SessionEvent::RunStart { .. })),
                 "first event is RunStart"

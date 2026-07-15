@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use proptest::prelude::*;
 
 use runic_state::{AgentState, RunOutcome, SessionEvent};
-use runic_types::Message;
+use runic_state::{DelegationMode, DelegationStatus, RunEndStatus, ToolStatus};
+use runic_types::{Message, TokenUsage};
 
 /// A fixed timestamp — replay doesn't depend on time, so determinism > realism.
 fn ts() -> DateTime<Utc> {
@@ -30,26 +31,128 @@ fn message() -> impl Strategy<Value = Message> {
     ]
 }
 
+fn run_end_status() -> impl Strategy<Value = RunEndStatus> {
+    prop_oneof![
+        Just(RunEndStatus::Completed),
+        Just(RunEndStatus::Cancelled),
+        "[a-z ]{0,12}".prop_map(RunEndStatus::Failed),
+    ]
+}
+
+fn tool_status() -> impl Strategy<Value = ToolStatus> {
+    prop::sample::select(vec![
+        ToolStatus::Ok,
+        ToolStatus::ToolError,
+        ToolStatus::ExecError,
+        ToolStatus::Panic,
+        ToolStatus::Timeout,
+        ToolStatus::Cancelled,
+        ToolStatus::UnknownTool,
+        ToolStatus::GuardBlocked,
+        ToolStatus::Substituted,
+    ])
+}
+
+fn usage() -> impl Strategy<Value = TokenUsage> {
+    (0..500u64, 0..500u64, 0..100u64, 0..100u64).prop_map(
+        |(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)| TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        },
+    )
+}
+
 /// Any event variant. `at` is Copy, so each branch gets its own copy.
 fn event() -> impl Strategy<Value = SessionEvent> {
     let at = ts();
     prop_oneof![
-        run_id().prop_map(move |run_id| SessionEvent::RunStart {
-            run_id,
-            agent: None,
-            at
+        (run_id(), prop::option::of("[a-z]{1,8}")).prop_map(move |(run_id, actor)| {
+            SessionEvent::RunStart {
+                run_id,
+                agent: None,
+                audit: actor.map(|actor| runic_state::AuditStamp {
+                    model: Some("m".into()),
+                    actor: Some(actor),
+                }),
+                at,
+            }
         }),
         (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
             run_id,
             msg,
             at
         }),
-        run_id().prop_map(move |run_id| SessionEvent::TurnBoundary { run_id, at }),
-        run_id().prop_map(move |run_id| SessionEvent::RunEnd {
+        (run_id(), 1..20u32, usage(), 0..5_000u64).prop_map(
+            move |(run_id, turn, usage, model_ms)| SessionEvent::TurnEnd {
+                run_id,
+                turn,
+                model: "test-model".into(),
+                usage,
+                model_ms,
+                at,
+            }
+        ),
+        (run_id(), run_end_status()).prop_map(move |(run_id, status)| SessionEvent::RunEnd {
             run_id,
+            status,
             outcome: RunOutcome::default(),
             at,
         }),
+        (run_id(), 1..20u32, "[a-z]{1,6}").prop_map(move |(run_id, turn, call_id)| {
+            SessionEvent::ToolStarted {
+                run_id,
+                turn,
+                call_id,
+                tool: "hammer".into(),
+                at,
+            }
+        }),
+        (
+            run_id(),
+            1..20u32,
+            "[a-z]{1,6}",
+            tool_status(),
+            0..10_000u64
+        )
+            .prop_map(move |(run_id, turn, call_id, status, duration_ms)| {
+                SessionEvent::ToolFinished {
+                    run_id,
+                    turn,
+                    call_id,
+                    tool: "hammer".into(),
+                    status,
+                    duration_ms,
+                    at,
+                }
+            }),
+        (run_id(), 1..20u32, "[a-z]{1,6}").prop_map(move |(run_id, turn, call_id)| {
+            SessionEvent::DelegationStarted {
+                run_id,
+                turn,
+                call_id,
+                agent: "scout".into(),
+                mode: DelegationMode::Sync,
+                child_session: None,
+                at,
+            }
+        }),
+        (run_id(), 1..20u32, "[a-z]{1,6}", usage(), 0..60_000u64).prop_map(
+            move |(run_id, turn, call_id, usage, duration_ms)| {
+                SessionEvent::DelegationFinished {
+                    run_id,
+                    turn,
+                    call_id,
+                    agent: "scout".into(),
+                    status: DelegationStatus::Ok,
+                    usage,
+                    model: None,
+                    duration_ms,
+                    at,
+                }
+            }
+        ),
         (run_id(), prop::collection::vec(message(), 0..4)).prop_map(move |(run_id, messages)| {
             SessionEvent::StateSnapshot {
                 run_id,
@@ -76,6 +179,7 @@ fn event() -> impl Strategy<Value = SessionEvent> {
                 task_id,
                 agent: "scout".into(),
                 prompt: "dig".into(),
+                child_session: None,
                 at,
             }
         }),
@@ -98,6 +202,7 @@ fn event_no_snapshot() -> impl Strategy<Value = SessionEvent> {
         run_id().prop_map(move |run_id| SessionEvent::RunStart {
             run_id,
             agent: None,
+            audit: None,
             at
         }),
         (run_id(), message()).prop_map(move |(run_id, msg)| SessionEvent::Message {
@@ -105,9 +210,19 @@ fn event_no_snapshot() -> impl Strategy<Value = SessionEvent> {
             msg,
             at
         }),
-        run_id().prop_map(move |run_id| SessionEvent::TurnBoundary { run_id, at }),
-        run_id().prop_map(move |run_id| SessionEvent::RunEnd {
+        (run_id(), 1..20u32, usage(), 0..5_000u64).prop_map(
+            move |(run_id, turn, usage, model_ms)| SessionEvent::TurnEnd {
+                run_id,
+                turn,
+                model: "test-model".into(),
+                usage,
+                model_ms,
+                at,
+            }
+        ),
+        (run_id(), run_end_status()).prop_map(move |(run_id, status)| SessionEvent::RunEnd {
             run_id,
+            status,
             outcome: RunOutcome::default(),
             at,
         }),

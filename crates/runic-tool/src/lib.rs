@@ -209,6 +209,12 @@ pub trait ToolCatalog: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ActivatedToolNames(pub Arc<std::collections::HashSet<String>>);
 
+#[derive(Clone)]
+pub struct CallId(pub String);
+
+#[derive(Clone, Copy)]
+pub struct CurrentTurn(pub u32);
+
 impl ActivatedToolNames {
     pub fn contains(&self, name: &str) -> bool {
         self.0.contains(name)

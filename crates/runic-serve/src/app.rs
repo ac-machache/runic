@@ -179,7 +179,14 @@ fn routes(state: AppState) -> Router {
             "/transcribe",
             post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
-        .route("/threads/{thread_id}/runs", post(runs::background_run))
+        .route(
+            "/threads/{thread_id}/runs",
+            post(runs::background_run).get(runs::list_thread_runs),
+        )
+        .route(
+            "/threads/{thread_id}/runs/{run_id}/timeline",
+            get(runs::run_timeline),
+        )
         .route(
             "/threads/{thread_id}/runs/stream",
             post(runs::create_and_stream_run),

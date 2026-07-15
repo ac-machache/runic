@@ -13,15 +13,20 @@ pub mod external;
 pub mod state;
 pub mod stats;
 pub mod tasks;
+pub mod timeline;
 
-pub use event::{HookLifecycle, RunOutcome, SessionEvent};
+pub use event::{
+    AuditStamp, DelegationMode, DelegationStatus, HookLifecycle, RunEndStatus, RunOutcome,
+    SessionEvent, ToolStatus,
+};
 pub use external::ExternalEvents;
 pub use state::{
     AgentState, EVENT_BROADCAST_CAPACITY, InvalidStateKey, MAX_STATE_KEY_BYTES, PersistSink,
     RunTimeContext, RunView, new_run_id, validate_state_key,
 };
-pub use stats::ThreadStats;
+pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, ThreadStats, ToolStat};
 pub use tasks::{TaskRecord, TaskStatus};
+pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 
 #[cfg(test)]
 mod tests {
@@ -89,16 +94,19 @@ mod tests {
         s.push_event(SessionEvent::RunStart {
             run_id: "a".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         s.push_event(SessionEvent::RunEnd {
             run_id: "a".into(),
+            status: RunEndStatus::Completed,
             outcome: RunOutcome::default(),
             at: Utc::now(),
         });
         s.push_event(SessionEvent::RunStart {
             run_id: "b".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         let runs = s.runs();
@@ -113,17 +121,20 @@ mod tests {
         s.push_event(SessionEvent::RunStart {
             run_id: "old".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         push_msg(&mut s, "old", Message::user("ancient"));
         s.push_event(SessionEvent::RunEnd {
             run_id: "old".into(),
+            status: RunEndStatus::Completed,
             outcome: RunOutcome::default(),
             at: Utc::now(),
         });
         s.push_event(SessionEvent::RunStart {
             run_id: "live".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         push_msg(&mut s, "live", Message::user("now"));
@@ -144,7 +155,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, SessionEvent::RunEnd { run_id, .. } if run_id == "old"))
         );
-        assert_eq!(s.stats().runs, 1);
+        assert_eq!(s.stats().runs, 2, "runs count attempts, from RunStart");
     }
 
     #[test]
@@ -164,6 +175,7 @@ mod tests {
         s.push_event(SessionEvent::RunStart {
             run_id: "r1".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         assert!(rx.try_recv().is_ok(), "subscriber should receive the event");

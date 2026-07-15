@@ -201,7 +201,7 @@ async fn cost_of_state_hydration_per_request() {
             .collect(),
         system_prompt: "sys".into(),
         reason: "compaction".into(),
-        stats: Some(ThreadStats::default()),
+        stats: Some(Box::new(ThreadStats::default())),
         open_tasks: Some(vec![]),
         data: None,
         at: Utc::now(),

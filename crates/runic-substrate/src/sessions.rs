@@ -14,7 +14,11 @@ pub(crate) fn event_at(e: &SessionEvent) -> DateTime<Utc> {
         SessionEvent::RunStart { at, .. }
         | SessionEvent::RunEnd { at, .. }
         | SessionEvent::Message { at, .. }
-        | SessionEvent::TurnBoundary { at, .. }
+        | SessionEvent::TurnEnd { at, .. }
+        | SessionEvent::ToolStarted { at, .. }
+        | SessionEvent::ToolFinished { at, .. }
+        | SessionEvent::DelegationStarted { at, .. }
+        | SessionEvent::DelegationFinished { at, .. }
         | SessionEvent::HookFired { at, .. }
         | SessionEvent::StateSnapshot { at, .. }
         | SessionEvent::TaskSpawned { at, .. }
@@ -122,6 +126,54 @@ pub struct SessionMeta {
     pub event_count: u64,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
+    #[serde(default)]
+    pub run_count: u64,
+    #[serde(default)]
+    pub errored_runs: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SummaryDelta {
+    pub runs: u64,
+    pub errored: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub last_run_status: Option<&'static str>,
+    pub last_run_at: Option<DateTime<Utc>>,
+}
+
+pub(crate) fn summary_delta(event: &SessionEvent) -> SummaryDelta {
+    match event {
+        SessionEvent::RunStart { at, .. } => SummaryDelta {
+            runs: 1,
+            last_run_status: Some("running"),
+            last_run_at: Some(*at),
+            ..Default::default()
+        },
+        SessionEvent::RunEnd { status, .. } => SummaryDelta {
+            errored: matches!(status, runic_state::RunEndStatus::Failed(_)) as u64,
+            last_run_status: Some(match status {
+                runic_state::RunEndStatus::Completed => "completed",
+                runic_state::RunEndStatus::Failed(_) => "failed",
+                runic_state::RunEndStatus::Cancelled => "cancelled",
+            }),
+            ..Default::default()
+        },
+        SessionEvent::TurnEnd { usage, .. } => SummaryDelta {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            ..Default::default()
+        },
+        _ => SummaryDelta::default(),
+    }
 }
 
 /// A textual-search hit from [`SessionStore::search`].
@@ -246,6 +298,18 @@ pub trait SessionStore: Send + Sync {
         _input: &RunInput,
     ) -> Result<()> {
         Err(Error::Unsupported("create_run".into()))
+    }
+
+    async fn list_runs(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _limit: usize,
+        _before: Option<(DateTime<Utc>, String)>,
+    ) -> Result<Vec<RunRecord>> {
+        Err(crate::Error::Database(
+            "list_runs not supported by this backend".into(),
+        ))
     }
 
     async fn set_run_status(

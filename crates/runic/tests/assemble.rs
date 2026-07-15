@@ -346,6 +346,7 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
         task_id: "t-done".into(),
         agent: "scout".into(),
         prompt: "dig".into(),
+        child_session: None,
         at: chrono::Utc::now(),
     });
     state.fold_event(runic_state::SessionEvent::TaskFinished {

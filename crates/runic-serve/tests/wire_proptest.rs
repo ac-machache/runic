@@ -45,6 +45,7 @@ fn session_event() -> impl Strategy<Value = SessionEvent> {
         "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::RunStart {
             run_id,
             agent: None,
+            audit: None,
             at
         }),
         (
@@ -52,9 +53,17 @@ fn session_event() -> impl Strategy<Value = SessionEvent> {
             "[a-z ]{0,20}".prop_map(Message::assistant)
         )
             .prop_map(move |(run_id, msg)| SessionEvent::Message { run_id, msg, at }),
-        "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::TurnBoundary { run_id, at }),
+        "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::TurnEnd {
+            run_id,
+            turn: 1,
+            model: "m".into(),
+            usage: runic_types::TokenUsage::default(),
+            model_ms: 3,
+            at,
+        }),
         "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::RunEnd {
             run_id,
+            status: runic_state::RunEndStatus::Completed,
             outcome: RunOutcome::default(),
             at,
         }),
@@ -94,7 +103,7 @@ proptest! {
                 prop_assert!(
                     matches!(
                         e,
-                        SessionEvent::RunStart { .. } | SessionEvent::RunEnd { .. } | SessionEvent::Message { .. }
+                        SessionEvent::RunStart { .. } | SessionEvent::RunEnd { .. } | SessionEvent::Message { .. } | SessionEvent::TurnEnd { .. }
                     ),
                     "Some came from a non-client-visible kind"
                 );
@@ -102,7 +111,7 @@ proptest! {
             None => prop_assert!(
                 matches!(
                     e,
-                    SessionEvent::TurnBoundary { .. } | SessionEvent::HookFired { .. } | SessionEvent::StateSnapshot { .. }
+                    SessionEvent::HookFired { .. } | SessionEvent::StateSnapshot { .. }
                 ),
                 "None filtered a client-visible kind"
             ),

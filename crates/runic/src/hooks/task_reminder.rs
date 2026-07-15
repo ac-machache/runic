@@ -95,6 +95,7 @@ mod tests {
             task_id: id.into(),
             agent: "scout".into(),
             prompt: "dig".into(),
+            child_session: None,
             at: Utc::now(),
         });
     }

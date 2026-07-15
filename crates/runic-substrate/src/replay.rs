@@ -70,6 +70,7 @@ mod tests {
                 &SessionEvent::RunStart {
                     run_id: "r".into(),
                     agent: None,
+                    audit: None,
                     at: Utc::now(),
                 },
             )

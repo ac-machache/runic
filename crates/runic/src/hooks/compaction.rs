@@ -101,7 +101,8 @@ impl WriteHook for CompactionHook {
         let est_tokens = {
             let msgs = state.messages_for_provider();
             let total_chars: usize = msgs.iter().map(|m| m.content.text_length()).sum();
-            let est = total_chars / CHARS_PER_TOKEN;
+            let est =
+                (total_chars / CHARS_PER_TOKEN).max(state.stats().last_prompt_tokens as usize);
             if est <= self.max_context_tokens || msgs.len() <= self.keep_recent {
                 return HookOutcome::Noop;
             }
@@ -166,7 +167,7 @@ impl WriteHook for CompactionHook {
                 "context ~{est_tokens} tokens > {} max",
                 self.max_context_tokens
             ),
-            stats: Some(stats),
+            stats: Some(Box::new(stats)),
             open_tasks: Some(open_tasks),
             data: Some(data),
             at: Utc::now(),

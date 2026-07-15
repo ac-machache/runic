@@ -87,7 +87,12 @@ impl WriteHook for ToolCallLimit {
         *self.counts.lock().unwrap() = Counts {
             run_tool: HashMap::new(),
             run_total: 0,
-            thread_tool: state.stats().tool_calls.clone(),
+            thread_tool: state
+                .stats()
+                .tools
+                .iter()
+                .map(|(name, stat)| (name.clone(), stat.calls))
+                .collect(),
             thread_total: state.stats().total_tool_calls,
         };
         HookOutcome::Noop
@@ -151,7 +156,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use runic_state::SessionEvent;
-    use runic_types::{ContentBlock, Message};
+    use runic_types::Message;
 
     fn state() -> AgentState {
         AgentState::new("u1", "s1", "sys")
@@ -166,14 +171,13 @@ mod tests {
     }
 
     fn tool_result_event(run: &str, tool: &str) -> SessionEvent {
-        SessionEvent::Message {
+        SessionEvent::ToolFinished {
             run_id: run.into(),
-            msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
-                tool_use_id: "tu".into(),
-                tool_name: tool.into(),
-                content: "ok".into(),
-                is_error: false,
-            }]),
+            turn: 1,
+            call_id: "tu".into(),
+            tool: tool.into(),
+            status: runic_state::ToolStatus::Ok,
+            duration_ms: 1,
             at: Utc::now(),
         }
     }

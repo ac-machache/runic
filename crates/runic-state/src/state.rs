@@ -391,6 +391,18 @@ impl AgentState {
         })
     }
 
+    /// Execution tree over the in-RAM working set; the store's full log gives
+    /// complete history through the same projection.
+    pub fn timeline(&self) -> Vec<crate::timeline::RunTrace> {
+        crate::timeline::project(&self.events)
+    }
+
+    pub fn timeline_for(&self, run_id: &str) -> Option<crate::timeline::RunTrace> {
+        crate::timeline::project(self.events.iter().filter(|e| e.run_id() == run_id))
+            .into_iter()
+            .next()
+    }
+
     /// Most recent assistant text in the log (e.g. the final answer).
     pub fn last_assistant_text(&self) -> Option<String> {
         for msg in self.messages.iter().rev() {
@@ -439,6 +451,7 @@ mod tests {
         state.push_event(SessionEvent::RunStart {
             run_id: "r".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         state.push_event(message("hello", true));
@@ -498,6 +511,7 @@ mod tests {
             SessionEvent::RunStart {
                 run_id: "r".into(),
                 agent: None,
+                audit: None,
                 at: Utc::now(),
             },
             message("a", true),
@@ -552,16 +566,19 @@ mod tests {
         state.push_event(SessionEvent::RunStart {
             run_id: "r1".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
         state.push_event(SessionEvent::RunEnd {
             run_id: "r1".into(),
+            status: crate::event::RunEndStatus::Completed,
             outcome: crate::event::RunOutcome::default(),
             at: Utc::now(),
         });
         state.push_event(SessionEvent::RunStart {
             run_id: "r2".into(),
             agent: None,
+            audit: None,
             at: Utc::now(),
         });
 

@@ -13,10 +13,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runic_hook::HookOutcome;
-use runic_state::HookLifecycle;
+use runic_state::{HookLifecycle, SessionEvent};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, ToolCall};
 use tracing::Instrument;
+
+use runic_state::ToolStatus;
 
 use crate::loop_guard::Verdict;
 use crate::turn::hooks::outcome_kind;
@@ -25,7 +27,11 @@ use crate::{Agent, AgentError};
 /// What the loop decided to do with one requested tool call.
 enum CallPlan {
     /// Skip execution; this result was supplied by a hook or the guard.
-    Substituted { call: ToolCall, result: ToolResult },
+    Substituted {
+        call: ToolCall,
+        result: ToolResult,
+        status: ToolStatus,
+    },
     /// Run the tool (possibly concurrently). `warning` is a loop-guard nudge
     /// to append to the result.
     Dispatch {
@@ -33,6 +39,22 @@ enum CallPlan {
         parallelizable: bool,
         warning: Option<String>,
     },
+}
+
+struct Dispatched {
+    result: ToolResult,
+    status: ToolStatus,
+    duration_ms: u64,
+}
+
+impl Dispatched {
+    fn undispatched(result: ToolResult, status: ToolStatus) -> Self {
+        Self {
+            result,
+            status,
+            duration_ms: 0,
+        }
+    }
 }
 
 impl CallPlan {
@@ -50,6 +72,7 @@ impl Agent {
         &mut self,
         calls: Vec<ToolCall>,
         run_id: &str,
+        turn: u32,
     ) -> Result<(), AgentError> {
         tracing::debug!(run_id, batch_size = calls.len(), "tool batch started");
         // ── Phase 1: plan ──────────────────────────────────────────────────
@@ -63,6 +86,7 @@ impl Agent {
                     plans.push(CallPlan::Substituted {
                         result: ToolResult::error(msg),
                         call,
+                        status: ToolStatus::GuardBlocked,
                     });
                     continue;
                 }
@@ -72,7 +96,7 @@ impl Agent {
                 }
             };
 
-            let mut substituted: Option<ToolResult> = None;
+            let mut substituted: Option<(ToolResult, ToolStatus)> = None;
             for h in self.write_hooks.clone() {
                 if !h.points().contains(&HookLifecycle::BeforeTool) {
                     continue;
@@ -91,12 +115,12 @@ impl Agent {
                     HookOutcome::Noop | HookOutcome::Continue => {}
                     HookOutcome::SubstituteToolResult(r) => {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook substituted tool result");
-                        substituted = Some(r);
+                        substituted = Some((r, ToolStatus::Substituted));
                         break;
                     }
                     HookOutcome::Cancel(reason) => {
                         tracing::warn!(run_id, tool = %call.name, hook = h.name(), reason = %reason, "hook cancelled tool call");
-                        substituted = Some(ToolResult::error(reason));
+                        substituted = Some((ToolResult::error(reason), ToolStatus::Cancelled));
                         break;
                     }
                     HookOutcome::Stop => {
@@ -109,7 +133,11 @@ impl Agent {
             self.fire_read_before_tool(run_id, &call).await?;
 
             let plan = match substituted {
-                Some(result) => CallPlan::Substituted { call, result },
+                Some((result, status)) => CallPlan::Substituted {
+                    call,
+                    result,
+                    status,
+                },
                 None => {
                     let parallelizable = self
                         .resolve_tool(&call.name)
@@ -127,7 +155,8 @@ impl Agent {
 
         // ── Phase 2: execute ───────────────────────────────────────────────
         // Announce every call that will actually run (substituted ones never
-        // dispatch, so they don't get a Started event).
+        // dispatch, so they don't get a Started event). The durable ToolStarted
+        // lands here, BEFORE execution — a crash mid-tool leaves evidence.
         for plan in &plans {
             if let CallPlan::Dispatch { call, .. } = plan {
                 self.emit(crate::AgentEvent::ToolStarted {
@@ -135,15 +164,22 @@ impl Agent {
                     name: call.name.clone(),
                     input: call.input.clone(),
                 });
+                self.state.push_event(SessionEvent::ToolStarted {
+                    run_id: run_id.to_string(),
+                    turn,
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                    at: chrono::Utc::now(),
+                });
             }
         }
 
-        let mut results: Vec<Option<ToolResult>> = (0..plans.len()).map(|_| None).collect();
+        let mut results: Vec<Option<Dispatched>> = (0..plans.len()).map(|_| None).collect();
 
         // Pre-supplied (hook/guard) results.
         for (i, plan) in plans.iter().enumerate() {
-            if let CallPlan::Substituted { result, .. } = plan {
-                results[i] = Some(result.clone());
+            if let CallPlan::Substituted { result, status, .. } = plan {
+                results[i] = Some(Dispatched::undispatched(result.clone(), *status));
             }
         }
 
@@ -169,7 +205,9 @@ impl Agent {
                 .map(|&i| {
                     let call = plans[i].call().clone();
                     let tool = self.resolve_tool(&call.name);
-                    let ctx = self.tool_context(run_id);
+                    let mut ctx = self.tool_context(run_id);
+                    ctx.insert(runic_tool::CallId(call.id.clone()));
+                    ctx.insert(runic_tool::CurrentTurn(turn));
                     async move { (i, dispatch_one(tool, call, ctx, timeout, true).await) }
                 })
                 .collect();
@@ -188,7 +226,9 @@ impl Agent {
             {
                 let call = call.clone();
                 let tool = self.resolve_tool(&call.name);
-                let ctx = self.tool_context(run_id);
+                let mut ctx = self.tool_context(run_id);
+                ctx.insert(runic_tool::CallId(call.id.clone()));
+                ctx.insert(runic_tool::CurrentTurn(turn));
                 results[i] = Some(dispatch_one(tool, call, ctx, timeout, false).await);
             }
         }
@@ -197,12 +237,27 @@ impl Agent {
         let mut blocks: Vec<ContentBlock> = Vec::with_capacity(plans.len());
         for (i, plan) in plans.iter().enumerate() {
             let call = plan.call();
-            let mut result = results[i].take().expect("every plan produced a result");
+            let dispatched = results[i].take().expect("every plan produced a result");
+            let Dispatched {
+                mut result,
+                status,
+                duration_ms,
+            } = dispatched;
 
             if let Some(deferral) = result.deferred.take() {
                 self.pending_deferral = Some((call.id.clone(), deferral));
                 continue;
             }
+
+            self.state.push_event(SessionEvent::ToolFinished {
+                run_id: run_id.to_string(),
+                turn,
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                status,
+                duration_ms,
+                at: chrono::Utc::now(),
+            });
 
             // For actually-dispatched calls: feed the outcome to the guard
             // (so identical call+result streaks escalate) and append any nudge.
@@ -317,14 +372,15 @@ impl Agent {
 }
 
 /// Execute one tool with a timeout, mapping every failure mode to an in-band
-/// error result the model can read and react to.
+/// error result the model can read and react to. The monotonic timer wraps
+/// exactly this execution — serial batch-mates never inflate each other.
 async fn dispatch_one(
     tool: Option<Arc<dyn Tool>>,
     call: ToolCall,
     ctx: ToolContext,
     timeout: Duration,
     parallel: bool,
-) -> ToolResult {
+) -> Dispatched {
     let span = tracing::info_span!(
         "tool",
         name = %call.name,
@@ -333,11 +389,16 @@ async fn dispatch_one(
         is_error = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
-    let result = dispatch_one_inner(tool, call, ctx, timeout, &span)
+    let started = std::time::Instant::now();
+    let (result, status) = dispatch_one_inner(tool, call, ctx, timeout, &span)
         .instrument(span.clone())
         .await;
     span.record("is_error", !result.success);
-    result
+    Dispatched {
+        result,
+        status,
+        duration_ms: started.elapsed().as_millis() as u64,
+    }
 }
 
 async fn dispatch_one_inner(
@@ -346,11 +407,14 @@ async fn dispatch_one_inner(
     ctx: ToolContext,
     timeout: Duration,
     span: &tracing::Span,
-) -> ToolResult {
+) -> (ToolResult, ToolStatus) {
     let Some(tool) = tool else {
         tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "unknown tool");
         span.record("outcome", "unknown_tool");
-        return ToolResult::error(format!("unknown tool: {}", call.name));
+        return (
+            ToolResult::error(format!("unknown tool: {}", call.name)),
+            ToolStatus::UnknownTool,
+        );
     };
     // Catch panics so a buggy tool can NEVER abort the run task (which would
     // kill the SSE stream and strand the call). A panic becomes an in-band
@@ -367,29 +431,39 @@ async fn dispatch_one_inner(
                     "tool returned error"
                 );
                 span.record("outcome", "error");
+                (result, ToolStatus::ToolError)
             } else {
                 span.record("outcome", "ok");
+                (result, ToolStatus::Ok)
             }
-            result
         }
         Ok(Ok(Err(e))) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, error = %e, "tool returned error");
             span.record("outcome", "error");
-            ToolResult::error(format!("tool '{}' failed: {e}", call.name))
+            (
+                ToolResult::error(format!("tool '{}' failed: {e}", call.name)),
+                ToolStatus::ExecError,
+            )
         }
         Ok(Err(_panic)) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, "tool panicked");
             span.record("outcome", "panic");
-            ToolResult::error(format!("tool '{}' panicked", call.name))
+            (
+                ToolResult::error(format!("tool '{}' panicked", call.name)),
+                ToolStatus::Panic,
+            )
         }
         Err(_) => {
             tracing::warn!(run_id = %ctx.run_id, tool = %call.name, timeout_s = timeout.as_secs(), "tool timed out");
             span.record("outcome", "timeout");
-            ToolResult::error(format!(
-                "tool '{}' timed out after {}s",
-                call.name,
-                timeout.as_secs()
-            ))
+            (
+                ToolResult::error(format!(
+                    "tool '{}' timed out after {}s",
+                    call.name,
+                    timeout.as_secs()
+                )),
+                ToolStatus::Timeout,
+            )
         }
     }
 }

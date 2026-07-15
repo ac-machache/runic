@@ -25,6 +25,7 @@ fn run_start(run: &str, n: i64) -> SessionEvent {
     SessionEvent::RunStart {
         run_id: run.into(),
         agent: None,
+        audit: None,
         at: ts(n),
     }
 }
@@ -32,12 +33,14 @@ fn run_start(run: &str, n: i64) -> SessionEvent {
 fn run_end(run: &str, stop: Option<&str>, n: i64) -> SessionEvent {
     SessionEvent::RunEnd {
         run_id: run.into(),
+        status: runic_state::RunEndStatus::Completed,
         outcome: RunOutcome {
             total_turns: 3,
             stop_reason: stop.map(str::to_string),
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 42,
+                ..Default::default()
             },
             structured: None,
         },
@@ -96,6 +99,68 @@ async fn paginate(
 }
 
 // ── core event log ──────────────────────────────────────────────────────────
+
+pub async fn summary_columns_track_runs_and_tokens(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    store.append(&t, &s, &run_start("r1", 0)).await.unwrap();
+
+    let meta = store.session_meta(&t, &s).await.unwrap().unwrap();
+    assert_eq!(meta.run_count, 1);
+    assert_eq!(meta.last_run_status.as_deref(), Some("running"));
+    assert!(meta.last_run_at.is_some());
+
+    store
+        .append(
+            &t,
+            &s,
+            &SessionEvent::TurnEnd {
+                run_id: "r1".into(),
+                turn: 1,
+                model: "m".into(),
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 40,
+                    ..Default::default()
+                },
+                model_ms: 5,
+                at: ts(1),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append(&t, &s, &run_end("r1", Some("end_turn"), 2))
+        .await
+        .unwrap();
+    store
+        .append_batch(
+            &t,
+            &s,
+            &[
+                run_start("r2", 3),
+                SessionEvent::RunEnd {
+                    run_id: "r2".into(),
+                    status: runic_state::RunEndStatus::Failed("boom".into()),
+                    outcome: RunOutcome::default(),
+                    at: ts(4),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let meta = store.session_meta(&t, &s).await.unwrap().unwrap();
+    assert_eq!(meta.run_count, 2);
+    assert_eq!(meta.errored_runs, 1);
+    assert_eq!(meta.input_tokens, 100);
+    assert_eq!(meta.output_tokens, 40);
+    assert_eq!(meta.last_run_status.as_deref(), Some("failed"));
+
+    let listed = store.list_sessions(&t).await.unwrap();
+    let row = listed.iter().find(|m| m.session_id == s).unwrap();
+    assert_eq!(row.run_count, 2);
+    assert_eq!(row.input_tokens, 100);
+}
 
 pub async fn empty_read_returns_empty(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
@@ -209,8 +274,12 @@ pub async fn pagination_covers_every_event_once(store: &dyn SessionStore) {
     for i in 0..20 {
         events.push(user_msg("r1", &format!("m{i}"), 1 + i));
         if i % 5 == 4 {
-            events.push(SessionEvent::TurnBoundary {
+            events.push(SessionEvent::TurnEnd {
                 run_id: "r1".into(),
+                turn: i as u32,
+                model: "m".into(),
+                usage: TokenUsage::default(),
+                model_ms: 5,
                 at: ts(100 + i),
             });
         }
@@ -392,8 +461,12 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
             msg: media,
             at: ts(4),
         },
-        SessionEvent::TurnBoundary {
+        SessionEvent::TurnEnd {
             run_id: "r1".into(),
+            turn: 1,
+            model: "m".into(),
+            usage: TokenUsage::default(),
+            model_ms: 5,
             at: ts(5),
         },
         SessionEvent::HookFired {

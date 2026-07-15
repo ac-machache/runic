@@ -77,6 +77,7 @@ async fn the_span_tree_carries_the_agreed_fields() {
                     usage: TokenUsage {
                         input_tokens: 100,
                         output_tokens: 20,
+                        ..Default::default()
                     },
                 },
                 CompletionResponse {
@@ -89,6 +90,7 @@ async fn the_span_tree_carries_the_agreed_fields() {
                     usage: TokenUsage {
                         input_tokens: 120,
                         output_tokens: 8,
+                        ..Default::default()
                     },
                 },
             ]

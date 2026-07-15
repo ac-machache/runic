@@ -331,6 +331,69 @@ async fn a_consumer_hook_can_block_the_childs_tool_calls() {
 }
 
 #[tokio::test]
+async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
+    let mut child_reply = text("child done");
+    child_reply.usage = TokenUsage {
+        input_tokens: 5,
+        output_tokens: 7,
+        ..Default::default()
+    };
+    let child = ScriptedProvider::new(vec![child_reply]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("sub-a"), text("done")]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("sub-a", "a expert")
+                .prompt("you are a")
+                .provider(child.clone())
+                .tool(NamedTool("only-a")),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    let outcome = agent.run("start").await.unwrap();
+
+    let events = agent.state().events();
+    let started = events
+        .iter()
+        .find_map(|e| match e {
+            runic_state::SessionEvent::DelegationStarted {
+                agent, mode, turn, ..
+            } => Some((agent.clone(), *mode, *turn)),
+            _ => None,
+        })
+        .expect("delegation start edge");
+    assert_eq!(started.0, "sub-a");
+    assert_eq!(started.1, runic_state::DelegationMode::Sync);
+    assert_eq!(started.2, 1);
+
+    let finished = events
+        .iter()
+        .find_map(|e| match e {
+            runic_state::SessionEvent::DelegationFinished {
+                agent,
+                status,
+                usage,
+                model,
+                ..
+            } => Some((agent.clone(), status.clone(), *usage, model.clone())),
+            _ => None,
+        })
+        .expect("delegation finish edge");
+    assert_eq!(finished.0, "sub-a");
+    assert_eq!(finished.1, runic_state::DelegationStatus::Ok);
+    assert_eq!(finished.2.input_tokens, 5);
+    assert_eq!(finished.2.output_tokens, 7);
+    assert_eq!(finished.3.as_deref(), Some("main-model"));
+
+    assert_eq!(
+        outcome.usage.input_tokens, 0,
+        "parent tokens never include child tokens"
+    );
+}
+
+#[tokio::test]
 async fn owned_tools_with_allowed_tools_list_is_a_build_error() {
     let markdown = "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig purchases";
     let draft = runic::subagent::from_markdown(markdown)

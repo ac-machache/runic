@@ -47,6 +47,8 @@ pub struct DelegationCtx {
     pub cancel: CancelToken,
     /// The parent run's open per-run config map, carried to the child.
     pub config: serde_json::Map<String, serde_json::Value>,
+    pub tenant: String,
+    pub session: String,
 }
 
 pub struct SubagentReq<'a> {
@@ -69,7 +71,10 @@ pub trait SubagentBuilder: Send + Sync {
     }
 
     fn identity(&self, req: &SubagentReq<'_>) -> (String, String) {
-        ("subagent".to_string(), req.def.name.clone())
+        (
+            req.dctx.tenant.clone(),
+            format!("{}:{}", req.dctx.session, req.def.name),
+        )
     }
 
     fn decorate(&self, b: AgentBuilder, _req: &SubagentReq<'_>) -> AgentBuilder {
@@ -242,6 +247,8 @@ impl DelegateTool {
             max_depth: self.max_depth,
             cancel,
             config: ctx.config_map().clone(),
+            tenant: ctx.user_id.clone(),
+            session: ctx.session_id.clone(),
         }
     }
 
@@ -256,11 +263,31 @@ impl DelegateTool {
             Ok(g) => g,
             Err(e) => return ToolResult::error(e),
         };
+        let external = ctx.get::<ExternalEvents>();
+        let (call_id, turn) = edge_keys(ctx);
         let dctx = self.child_ctx(self.cancel.clone(), ctx);
+        emit_started(
+            &external,
+            &ctx.run_id,
+            turn,
+            &call_id,
+            agent,
+            runic_state::DelegationMode::Sync,
+        );
+        let started = std::time::Instant::now();
         let result = run_child(&self.builder, &def, &dctx, &prompt).await;
+        emit_finished(
+            &external,
+            &ctx.run_id,
+            turn,
+            &call_id,
+            agent,
+            &result,
+            started,
+        );
         drop(guard);
         match result {
-            Ok(text) => ToolResult::ok(text),
+            Ok(child) => ToolResult::ok(child.text),
             Err(e) => ToolResult::error(format!("subagent '{agent}' failed: {e}")),
         }
     }
@@ -278,6 +305,9 @@ impl DelegateTool {
             let builder = self.builder.clone();
             let acquired = self.budget.acquire();
             let dctx = self.child_ctx(self.cancel.clone(), ctx);
+            let external = ctx.get::<ExternalEvents>();
+            let (call_id, turn) = edge_keys(ctx);
+            let run_id = ctx.run_id.clone();
             async move {
                 let Some(def) = def else {
                     return format!("[{name}] error: unknown subagent");
@@ -286,8 +316,19 @@ impl DelegateTool {
                     Ok(g) => g,
                     Err(e) => return format!("[{name}] error: {e}"),
                 };
-                let out = match run_child(&builder, &def, &dctx, &prompt).await {
-                    Ok(text) => format!("[{name}]\n{text}"),
+                emit_started(
+                    &external,
+                    &run_id,
+                    turn,
+                    &call_id,
+                    &name,
+                    runic_state::DelegationMode::Parallel,
+                );
+                let started = std::time::Instant::now();
+                let result = run_child(&builder, &def, &dctx, &prompt).await;
+                emit_finished(&external, &run_id, turn, &call_id, &name, &result, started);
+                let out = match result {
+                    Ok(child) => format!("[{name}]\n{}", child.text),
                     Err(e) => format!("[{name}] error: {e}"),
                 };
                 drop(guard);
@@ -328,6 +369,7 @@ impl DelegateTool {
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
                 prompt: head(&prompt, 300),
+                child_session: None,
                 at: chrono::Utc::now(),
             });
         }
@@ -336,9 +378,29 @@ impl DelegateTool {
         let tasks = self.tasks.clone();
         let dctx = self.child_ctx(cancel, ctx);
         let tid = task_id.clone();
+        let (call_id, turn) = edge_keys(ctx);
+        let agent_name = agent.to_string();
         tokio::spawn(async move {
             let _guard = guard; // hold the concurrent slot until done
+            emit_started(
+                &external,
+                &run_id,
+                turn,
+                &call_id,
+                &agent_name,
+                runic_state::DelegationMode::Background,
+            );
+            let started = std::time::Instant::now();
             let result = run_child(&builder, &def, &dctx, &prompt).await;
+            emit_finished(
+                &external,
+                &run_id,
+                turn,
+                &call_id,
+                &agent_name,
+                &result,
+                started,
+            );
             let outcome = {
                 let mut tasks = tasks.lock().unwrap_or_else(|p| p.into_inner());
                 let Some(task) = tasks.get_mut(&tid) else {
@@ -348,10 +410,10 @@ impl DelegateTool {
                     return;
                 }
                 match result {
-                    Ok(text) => {
+                    Ok(child) => {
                         task.status = TaskStatus::Completed;
-                        task.output = Some(text.clone());
-                        (runic_state::TaskStatus::Completed, Some(text))
+                        task.output = Some(child.text.clone());
+                        (runic_state::TaskStatus::Completed, Some(child.text))
                     }
                     Err(e) => {
                         task.status = TaskStatus::Failed;
@@ -484,22 +546,110 @@ fn head(s: &str, max: usize) -> String {
 }
 
 /// Build + run a child agent to completion; return its final assistant text.
+struct ChildRun {
+    text: String,
+    usage: runic_types::TokenUsage,
+    model: String,
+}
+
 async fn run_child(
     builder: &Arc<dyn SubagentBuilder>,
     def: &AgentDef,
     dctx: &DelegationCtx,
     prompt: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ChildRun> {
     let req = SubagentReq { def, dctx };
     let mut child = assemble_subagent(builder.as_ref(), &req).await;
+    let configured = child.model().to_string();
     let rc = RunContext::new()
         .with_cancel(dctx.cancel.clone())
         .with_config(dctx.config.clone());
-    child
+    let outcome = child
         .run_with(prompt.to_string(), rc)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(child.state().last_assistant_text().unwrap_or_default())
+    let served = child
+        .state()
+        .events()
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            SessionEvent::TurnEnd { model, .. } => Some(model.clone()),
+            _ => None,
+        })
+        .unwrap_or(configured);
+    Ok(ChildRun {
+        text: child.state().last_assistant_text().unwrap_or_default(),
+        usage: outcome.usage,
+        model: served,
+    })
+}
+
+fn edge_keys(ctx: &ToolContext) -> (String, u32) {
+    (
+        ctx.get::<runic_tool::CallId>()
+            .map(|c| c.0.clone())
+            .unwrap_or_default(),
+        ctx.get::<runic_tool::CurrentTurn>()
+            .map(|t| t.0)
+            .unwrap_or_default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_finished(
+    external: &Option<std::sync::Arc<ExternalEvents>>,
+    run_id: &str,
+    turn: u32,
+    call_id: &str,
+    agent: &str,
+    result: &anyhow::Result<ChildRun>,
+    started: std::time::Instant,
+) {
+    let Some(external) = external else { return };
+    let (status, usage, model) = match result {
+        Ok(child) => (
+            runic_state::DelegationStatus::Ok,
+            child.usage,
+            Some(child.model.clone()),
+        ),
+        Err(e) => (
+            runic_state::DelegationStatus::Failed(e.to_string()),
+            runic_types::TokenUsage::default(),
+            None,
+        ),
+    };
+    external.emit(SessionEvent::DelegationFinished {
+        run_id: run_id.to_string(),
+        turn,
+        call_id: call_id.to_string(),
+        agent: agent.to_string(),
+        status,
+        usage,
+        model,
+        duration_ms: started.elapsed().as_millis() as u64,
+        at: chrono::Utc::now(),
+    });
+}
+
+fn emit_started(
+    external: &Option<std::sync::Arc<ExternalEvents>>,
+    run_id: &str,
+    turn: u32,
+    call_id: &str,
+    agent: &str,
+    mode: runic_state::DelegationMode,
+) {
+    let Some(external) = external else { return };
+    external.emit(SessionEvent::DelegationStarted {
+        run_id: run_id.to_string(),
+        turn,
+        call_id: call_id.to_string(),
+        agent: agent.to_string(),
+        mode,
+        child_session: None,
+        at: chrono::Utc::now(),
+    });
 }
 
 /// Combine optional context with the task prompt (ZeroClaw's framing).

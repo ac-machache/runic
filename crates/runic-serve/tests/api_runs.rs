@@ -36,6 +36,7 @@ impl Provider for ScriptedProvider {
             usage: TokenUsage {
                 input_tokens: 1,
                 output_tokens: 2,
+                ..Default::default()
             },
         })
     }
@@ -722,6 +723,62 @@ async fn factory_build_failure_in_queued_mode_lands_in_the_run_row() {
         run_status_settles(&store, TENANT, &second).await,
         runic_substrate::RunStatus::Error
     );
+}
+
+#[tokio::test]
+async fn run_list_and_timeline_endpoints_serve_the_execution_tree() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(wait_request("t1", TENANT, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_id = body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/threads/t1/runs")
+                .header("x-runic-tenant", TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = body_json(resp).await;
+    assert_eq!(list["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(list["runs"][0]["run_id"], run_id.as_str());
+    assert_eq!(list["runs"][0]["status"], "success");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/threads/t1/runs/{run_id}/timeline"))
+                .header("x-runic-tenant", TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trace = body_json(resp).await;
+    assert_eq!(trace["run_id"], run_id.as_str());
+    assert_eq!(trace["status"], "Completed");
+    let turns = trace["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["complete"], true);
+    assert!(turns[0]["model"].is_string());
+    assert!(turns[0]["model_ms"].is_u64());
 }
 
 #[tokio::test]
@@ -2372,6 +2429,7 @@ fn replay_message(run_id: &str, text: &str) -> runic_state::SessionEvent {
 fn replay_end(run_id: &str) -> runic_state::SessionEvent {
     runic_state::SessionEvent::RunEnd {
         run_id: run_id.into(),
+        status: runic_state::RunEndStatus::Completed,
         outcome: runic_state::RunOutcome {
             total_turns: 1,
             stop_reason: Some("end_turn".into()),

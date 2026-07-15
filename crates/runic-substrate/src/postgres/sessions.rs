@@ -43,7 +43,11 @@ fn event_kind(e: &SessionEvent) -> &'static str {
         SessionEvent::RunStart { .. } => "RunStart",
         SessionEvent::RunEnd { .. } => "RunEnd",
         SessionEvent::Message { .. } => "Message",
-        SessionEvent::TurnBoundary { .. } => "TurnBoundary",
+        SessionEvent::TurnEnd { .. } => "TurnEnd",
+        SessionEvent::ToolStarted { .. } => "ToolStarted",
+        SessionEvent::ToolFinished { .. } => "ToolFinished",
+        SessionEvent::DelegationStarted { .. } => "DelegationStarted",
+        SessionEvent::DelegationFinished { .. } => "DelegationFinished",
         SessionEvent::HookFired { .. } => "HookFired",
         SessionEvent::StateSnapshot { .. } => "StateSnapshot",
         SessionEvent::TaskSpawned { .. } => "TaskSpawned",
@@ -97,6 +101,12 @@ fn row_to_meta(row: sqlx::postgres::PgRow) -> Result<SessionMeta> {
         event_count: row.try_get::<i64, _>("event_count").map_err(db)? as u64,
         created_at: row.try_get("created_at").map_err(db)?,
         last_activity: row.try_get("last_activity").map_err(db)?,
+        run_count: row.try_get::<i64, _>("run_count").map_err(db)? as u64,
+        errored_runs: row.try_get::<i64, _>("errored_runs").map_err(db)? as u64,
+        input_tokens: row.try_get::<i64, _>("input_tokens").map_err(db)? as u64,
+        output_tokens: row.try_get::<i64, _>("output_tokens").map_err(db)? as u64,
+        last_run_status: row.try_get("last_run_status").map_err(db)?,
+        last_run_at: row.try_get("last_run_at").map_err(db)?,
     })
 }
 
@@ -112,19 +122,34 @@ async fn write_event(
     let kind = event_kind(event);
     let run_id = event.run_id().to_string();
     let json = serde_json::to_value(event).map_err(serde)?;
+    let delta = crate::sessions::summary_delta(event);
 
     let seq: i64 = sqlx::query_scalar(
-        "INSERT INTO sessions (tenant, session_id, last_seq, event_count, last_activity)
-         VALUES ($1, $2, 1, 1, $3)
+        "INSERT INTO sessions (tenant, session_id, last_seq, event_count, last_activity,
+                               run_count, errored_runs, input_tokens, output_tokens,
+                               last_run_status, last_run_at)
+         VALUES ($1, $2, 1, 1, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (tenant, session_id) DO UPDATE
            SET last_seq = sessions.last_seq + 1,
                event_count = sessions.event_count + 1,
-               last_activity = EXCLUDED.last_activity
+               last_activity = EXCLUDED.last_activity,
+               run_count = sessions.run_count + EXCLUDED.run_count,
+               errored_runs = sessions.errored_runs + EXCLUDED.errored_runs,
+               input_tokens = sessions.input_tokens + EXCLUDED.input_tokens,
+               output_tokens = sessions.output_tokens + EXCLUDED.output_tokens,
+               last_run_status = COALESCE(EXCLUDED.last_run_status, sessions.last_run_status),
+               last_run_at = COALESCE(EXCLUDED.last_run_at, sessions.last_run_at)
          RETURNING last_seq",
     )
     .bind(tenant)
     .bind(session_id)
     .bind(at)
+    .bind(delta.runs as i64)
+    .bind(delta.errored as i64)
+    .bind(delta.input_tokens as i64)
+    .bind(delta.output_tokens as i64)
+    .bind(delta.last_run_status)
+    .bind(delta.last_run_at)
     .fetch_one(&mut **tx)
     .await
     .map_err(db)?;
@@ -299,7 +324,9 @@ impl SessionStore for PostgresSessionStore {
     ) -> Result<Vec<SessionMeta>> {
         let rows = match after {
             Some((at, id)) => sqlx::query(
-                "SELECT session_id, label, event_count, created_at, last_activity
+                "SELECT session_id, label, event_count, created_at, last_activity,
+                        run_count, errored_runs, input_tokens, output_tokens,
+                        last_run_status, last_run_at
                  FROM sessions
                  WHERE tenant = $1 AND (last_activity, session_id) < ($2, $3)
                  ORDER BY last_activity DESC, session_id DESC LIMIT $4",
@@ -309,7 +336,9 @@ impl SessionStore for PostgresSessionStore {
             .bind(id)
             .bind(limit as i64),
             None => sqlx::query(
-                "SELECT session_id, label, event_count, created_at, last_activity
+                "SELECT session_id, label, event_count, created_at, last_activity,
+                        run_count, errored_runs, input_tokens, output_tokens,
+                        last_run_status, last_run_at
                  FROM sessions WHERE tenant = $1
                  ORDER BY last_activity DESC, session_id DESC LIMIT $2",
             )
@@ -324,7 +353,9 @@ impl SessionStore for PostgresSessionStore {
 
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>> {
         let rows = sqlx::query(
-            "SELECT session_id, label, event_count, created_at, last_activity
+            "SELECT session_id, label, event_count, created_at, last_activity,
+                        run_count, errored_runs, input_tokens, output_tokens,
+                        last_run_status, last_run_at
              FROM sessions WHERE tenant = $1 ORDER BY last_activity DESC",
         )
         .bind(tenant)
@@ -341,7 +372,9 @@ impl SessionStore for PostgresSessionStore {
 
     async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>> {
         let row = sqlx::query(
-            "SELECT session_id, label, event_count, created_at, last_activity
+            "SELECT session_id, label, event_count, created_at, last_activity,
+                        run_count, errored_runs, input_tokens, output_tokens,
+                        last_run_status, last_run_at
              FROM sessions WHERE tenant = $1 AND session_id = $2",
         )
         .bind(tenant)
@@ -609,7 +642,22 @@ impl SessionStore for PostgresSessionStore {
         .fetch_all(&self.pool)
         .await
         .map_err(db)?;
-        rows.into_iter().map(row_to_run).collect()
+        let reaped: Vec<crate::RunRecord> =
+            rows.into_iter().map(row_to_run).collect::<Result<_>>()?;
+        for run in &reaped {
+            sqlx::query(
+                "UPDATE sessions SET last_run_status = 'failed'
+                 WHERE tenant = $1 AND session_id = $2
+                   AND last_run_status = 'running' AND last_run_at <= $3",
+            )
+            .bind(&run.tenant)
+            .bind(&run.session_id)
+            .bind(run.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
+        }
+        Ok(reaped)
     }
 
     async fn claim_next_queued_run(
@@ -708,6 +756,45 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(db)?;
         row.map(row_to_run).transpose()
+    }
+
+    async fn list_runs(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        limit: usize,
+        before: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> Result<Vec<crate::RunRecord>> {
+        let rows = match before {
+            Some((cut_at, cut_id)) => {
+                sqlx::query(&format!(
+                    "SELECT {RUN_COLUMNS} FROM runs \
+                     WHERE tenant = $1 AND session_id = $2 AND (created_at, run_id) < ($3, $4) \
+                     ORDER BY created_at DESC, run_id DESC LIMIT $5"
+                ))
+                .bind(tenant)
+                .bind(session_id)
+                .bind(cut_at)
+                .bind(cut_id)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query(&format!(
+                    "SELECT {RUN_COLUMNS} FROM runs \
+                     WHERE tenant = $1 AND session_id = $2 \
+                     ORDER BY created_at DESC, run_id DESC LIMIT $3"
+                ))
+                .bind(tenant)
+                .bind(session_id)
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(db)?;
+        rows.into_iter().map(row_to_run).collect()
     }
 
     async fn latest_active_run(

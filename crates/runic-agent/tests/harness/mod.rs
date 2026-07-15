@@ -34,6 +34,7 @@ pub fn text_response(text: &str) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..Default::default()
         },
     }
 }
@@ -69,6 +70,7 @@ pub fn multi_tool_response(calls: Vec<(&str, &str, serde_json::Value)>) -> Compl
         usage: TokenUsage {
             input_tokens: 20,
             output_tokens: 8,
+            ..Default::default()
         },
     }
 }
@@ -782,7 +784,11 @@ pub fn session_kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
             SessionEvent::RunStart { .. } => "RunStart",
             SessionEvent::RunEnd { .. } => "RunEnd",
             SessionEvent::Message { .. } => "Message",
-            SessionEvent::TurnBoundary { .. } => "TurnBoundary",
+            SessionEvent::TurnEnd { .. } => "TurnEnd",
+            SessionEvent::ToolStarted { .. } => "ToolStarted",
+            SessionEvent::ToolFinished { .. } => "ToolFinished",
+            SessionEvent::DelegationStarted { .. } => "DelegationStarted",
+            SessionEvent::DelegationFinished { .. } => "DelegationFinished",
             SessionEvent::HookFired { .. } => "HookFired",
             SessionEvent::StateSnapshot { .. } => "StateSnapshot",
             SessionEvent::TaskSpawned { .. } => "TaskSpawned",
@@ -807,6 +813,7 @@ pub fn mismatched_response(
         usage: TokenUsage {
             input_tokens: 1,
             output_tokens: 1,
+            ..Default::default()
         },
     }
 }

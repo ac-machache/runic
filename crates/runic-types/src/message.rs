@@ -338,18 +338,29 @@ pub enum StopReason {
 }
 
 /// Token usage information from an LLM call.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Tokens used for the input/prompt.
     pub input_tokens: u64,
     /// Tokens generated in the output.
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
 }
 
 impl TokenUsage {
     /// Total tokens used.
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens
+    }
+
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_write_tokens += other.cache_write_tokens;
     }
 }
 
@@ -388,8 +399,26 @@ mod tests {
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
+            ..Default::default()
         };
         assert_eq!(usage.total(), 150);
+
+        let old_log: TokenUsage =
+            serde_json::from_str(r#"{"input_tokens":100,"output_tokens":50}"#).unwrap();
+        assert_eq!(old_log.cache_read_tokens, 0);
+        assert_eq!(old_log.cache_write_tokens, 0);
+
+        let mut sum = TokenUsage::default();
+        sum.add(&TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+        });
+        sum.add(&old_log);
+        assert_eq!(sum.input_tokens, 101);
+        assert_eq!(sum.cache_read_tokens, 3);
+        assert_eq!(sum.cache_write_tokens, 4);
     }
 
     #[test]

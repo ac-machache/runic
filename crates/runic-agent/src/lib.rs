@@ -145,6 +145,10 @@ pub struct RunContext {
     pub human: Option<Arc<dyn HumanInterface>>,
     /// Optional agent name recorded on the run's `RunStart` event.
     pub agent: Option<String>,
+    /// Optional actor identifier recorded on the run's audit stamp. The
+    /// application chooses what goes here (raw id, hash, or nothing) — the
+    /// open `config` map is never persisted.
+    pub actor: Option<String>,
     /// Optional pre-generated run id; the loop generates one when absent.
     pub run_id: Option<String>,
     /// Invocation mode recorded on the run trace span (`stream` / `wait` /
@@ -194,6 +198,11 @@ impl RunContext {
     }
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    pub fn with_actor(mut self, actor: impl Into<String>) -> Self {
+        self.actor = Some(actor.into());
         self
     }
 
@@ -283,6 +292,8 @@ pub(crate) struct TurnRecord {
     pub stop_reason: runic_types::StopReason,
     /// Token usage for this turn's model call.
     pub usage: runic_types::TokenUsage,
+    pub model: String,
+    pub model_ms: u64,
 }
 
 /// The agent: a provider + a tool registry + hooks, driving an [`AgentState`].

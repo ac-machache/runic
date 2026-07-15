@@ -42,15 +42,16 @@ async fn every_hook_execution_leaves_a_hookfired_entry() {
             "HookFired",    // before_agent (continue)
             "HookFired",    // before_model (continue)
             "Message",      // assistant (tool_use)
+            "TurnEnd",      // turn 1 — durable before after_model can fail
             "HookFired",    // after_model (continue)
-            "TurnBoundary", // turn 1
             "HookFired",    // before_tool (substitute)
+            "ToolFinished", // substituted disposition (no ToolStarted — never ran)
             "HookFired",    // after_tool (continue)
             "Message",      // substituted tool result
             "HookFired",    // before_model (continue)
             "Message",      // assistant (final text)
+            "TurnEnd",      // turn 2
             "HookFired",    // after_model (continue)
-            "TurnBoundary", // turn 2
             "HookFired",    // after_agent (continue)
             "RunEnd",
         ]
@@ -139,11 +140,12 @@ async fn scoped_hook_fires_only_at_its_declared_points() {
             "RunStart",
             "Message",      // user
             "Message",      // assistant (tool_use)
-            "TurnBoundary", // turn 1
+            "TurnEnd",      // turn 1
             "HookFired",    // before_tool (substitute) — the only firing
+            "ToolFinished", // substituted disposition
             "Message",      // substituted tool result
             "Message",      // assistant (final text)
-            "TurnBoundary", // turn 2
+            "TurnEnd",      // turn 2
             "RunEnd",
         ]
     );
@@ -207,6 +209,116 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
     assert!(note.is_none());
 }
 
+fn terminal_shape(evs: &[SessionEvent]) -> (usize, usize, Option<runic_state::RunEndStatus>) {
+    let starts = evs
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::RunStart { .. }))
+        .count();
+    let ends: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::RunEnd { status, .. } => Some(status.clone()),
+            _ => None,
+        })
+        .collect();
+    (starts, ends.len(), ends.first().cloned())
+}
+
+#[tokio::test]
+async fn every_hook_failure_point_still_yields_exactly_one_terminal_event() {
+    for point in ["before_agent", "before_model", "after_model", "after_agent"] {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            text_response("a"),
+            text_response("b"),
+        ]));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let hook = RecordWriteHook::new("bomb", log).act(point, Act::Stop);
+        let mut agent = Agent::builder(provider, "u1", "s1")
+            .model("test")
+            .write_hook(Arc::new(hook))
+            .build();
+        let mut events = capture_session_events(&mut agent);
+
+        let result = agent.run("go").await;
+        assert!(result.is_err(), "hook Stop at {point} must fail the run");
+
+        let (starts, ends, status) = terminal_shape(&drain_session(&mut events));
+        assert_eq!(starts, 1, "{point}: exactly one RunStart");
+        assert_eq!(ends, 1, "{point}: exactly one terminal RunEnd");
+        assert!(
+            matches!(status, Some(runic_state::RunEndStatus::Failed(_))),
+            "{point}: terminal status is Failed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failing_after_model_hook_cannot_erase_the_turns_accounting() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("paid for")]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook = RecordWriteHook::new("bomb", log).act("after_model", Act::Stop);
+    let mut agent = Agent::builder(provider, "u1", "s1")
+        .model("test")
+        .write_hook(Arc::new(hook))
+        .build();
+    let mut events = capture_session_events(&mut agent);
+
+    assert!(agent.run("go").await.is_err());
+
+    let evs = drain_session(&mut events);
+    let turn_ends = evs
+        .iter()
+        .filter(|e| matches!(e, SessionEvent::TurnEnd { .. }))
+        .count();
+    assert_eq!(
+        turn_ends, 1,
+        "the model call happened and cost money — its TurnEnd must survive the hook failure"
+    );
+    let (starts, ends, _) = terminal_shape(&evs);
+    assert_eq!((starts, ends), (1, 1));
+}
+
+#[tokio::test]
+async fn provider_failure_yields_exactly_one_failed_terminal_event() {
+    let provider = Arc::new(ScriptedProvider::new(vec![]));
+    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut events = capture_session_events(&mut agent);
+
+    assert!(agent.run("go").await.is_err());
+
+    let (starts, ends, status) = terminal_shape(&drain_session(&mut events));
+    assert_eq!((starts, ends), (1, 1));
+    assert!(matches!(status, Some(runic_state::RunEndStatus::Failed(_))));
+}
+
+#[tokio::test]
+async fn the_audit_stamp_carries_actor_and_model_but_never_the_config_map() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut events = capture_session_events(&mut agent);
+
+    let ctx = RunContext::new()
+        .config_value("api_key", serde_json::json!("sk-supersecret"))
+        .config_value("db_password", serde_json::json!("hunter2"))
+        .with_actor("user-42");
+    agent.run_with("go", ctx).await.unwrap();
+
+    let evs = drain_session(&mut events);
+    let run_start = evs
+        .iter()
+        .find(|e| matches!(e, SessionEvent::RunStart { .. }))
+        .unwrap();
+    let json = serde_json::to_string(run_start).unwrap();
+    assert!(json.contains("user-42"));
+    assert!(json.contains("test"));
+    assert!(!json.contains("supersecret"), "{json}");
+    assert!(!json.contains("hunter2"), "{json}");
+    assert!(!json.contains("api_key"), "{json}");
+
+    let all = serde_json::to_string(&evs).unwrap();
+    assert!(!all.contains("supersecret"), "no event may carry config");
+}
+
 #[tokio::test]
 async fn precancel_path_emits_only_runstart_message_runend() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never")]));
@@ -229,7 +341,7 @@ async fn precancel_path_emits_only_runstart_message_runend() {
 #[tokio::test]
 async fn cancel_after_tool_stops_before_the_next_assistant_message() {
     // Turn 1's tool flips the token; the log ends right after the tool result,
-    // with no second assistant message and no second TurnBoundary.
+    // with no second assistant message and no second TurnEnd.
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("t1", "cancel_tool", serde_json::json!({})),
         text_response("should-not-run"),
@@ -254,7 +366,9 @@ async fn cancel_after_tool_stops_before_the_next_assistant_message() {
             "RunStart",
             "Message",      // user
             "Message",      // assistant (tool_use)
-            "TurnBoundary", // turn 1
+            "TurnEnd",      // turn 1
+            "ToolStarted",  // real dispatch
+            "ToolFinished", // ok, timed
             "Message",      // tool result
             "RunEnd",       // cancelled at the next boundary
         ]
@@ -301,7 +415,9 @@ async fn failure_after_a_tool_round_trip_keeps_the_partial_log() {
             "RunStart",
             "Message",      // user
             "Message",      // assistant (tool_use)
-            "TurnBoundary", // turn 1
+            "TurnEnd",      // turn 1
+            "ToolStarted",  // real dispatch
+            "ToolFinished", // ok, timed
             "Message",      // tool result
             "RunEnd",       // turn 2's model call failed
         ]

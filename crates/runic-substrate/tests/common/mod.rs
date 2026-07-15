@@ -150,6 +150,7 @@ macro_rules! session_store_contract_suite {
             cancel_and_steering_signals_flow_through_the_heartbeat,
             cancelling_an_unclaimed_queued_run_drops_it,
             cancelling_a_pending_run_flags_it_for_the_owner,
+            summary_columns_track_runs_and_tokens,
             cancelled_queued_runs_are_not_dequeued,
             steering_is_rejected_after_a_queued_run_is_cancelled,
             terminal_runs_reject_late_signals,

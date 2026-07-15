@@ -148,6 +148,7 @@ pub async fn reconstruct_large_log(store: &dyn SessionStore) {
     let mut events = vec![SessionEvent::RunStart {
         run_id: "r".into(),
         agent: None,
+        audit: None,
         at: ts(0),
     }];
     events.extend((0..5000).map(|i| msg(&format!("m{i}"), 1 + i)));

@@ -190,6 +190,8 @@ struct GeminiUsageMetadata {
     prompt_token_count: u64,
     #[serde(default)]
     candidates_token_count: u64,
+    #[serde(default)]
+    cached_content_token_count: u64,
 }
 
 /// Gemini API error response.
@@ -651,6 +653,8 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, Provider
         .map(|u| TokenUsage {
             input_tokens: u.prompt_token_count,
             output_tokens: u.candidates_token_count,
+            cache_read_tokens: u.cached_content_token_count,
+            cache_write_tokens: 0,
         })
         .unwrap_or_default();
 
@@ -901,6 +905,7 @@ impl Provider for GeminiDriver {
                     if let Some(ref u) = json.usage_metadata {
                         usage.input_tokens = u.prompt_token_count;
                         usage.output_tokens = u.candidates_token_count;
+                        usage.cache_read_tokens = u.cached_content_token_count;
                     }
 
                     for candidate in &json.candidates {
@@ -999,6 +1004,7 @@ impl Provider for GeminiDriver {
                     if let Some(ref u) = json.usage_metadata {
                         usage.input_tokens = u.prompt_token_count;
                         usage.output_tokens = u.candidates_token_count;
+                        usage.cache_read_tokens = u.cached_content_token_count;
                     }
                     for candidate in &json.candidates {
                         if let Some(fr) = &candidate.finish_reason {
@@ -1187,6 +1193,19 @@ impl Provider for GeminiDriver {
 mod tests {
     use super::*;
     use runic_types::ToolDefinition;
+
+    #[test]
+    fn usage_maps_cached_content_tokens_and_defaults_without_them() {
+        let with_cache: GeminiUsageMetadata = serde_json::from_str(
+            r#"{"promptTokenCount":10,"candidatesTokenCount":5,"cachedContentTokenCount":4}"#,
+        )
+        .unwrap();
+        assert_eq!(with_cache.cached_content_token_count, 4);
+
+        let without: GeminiUsageMetadata =
+            serde_json::from_str(r#"{"promptTokenCount":10,"candidatesTokenCount":5}"#).unwrap();
+        assert_eq!(without.cached_content_token_count, 0);
+    }
 
     #[test]
     fn test_gemini_driver_creation() {
@@ -1379,6 +1398,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 5,
                 candidates_token_count: 3,
+                cached_content_token_count: 0,
             }),
         };
 
@@ -2086,6 +2106,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 10,
                 candidates_token_count: 20,
+                cached_content_token_count: 0,
             }),
         };
         let completion = convert_response(resp).unwrap();

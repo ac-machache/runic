@@ -788,6 +788,119 @@ pub async fn run_status(
     }))
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct RunListQuery {
+    pub limit: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+fn decode_run_cursor(cursor: &str) -> Option<(chrono::DateTime<chrono::Utc>, String)> {
+    let (at, run_id) = cursor.split_once('|')?;
+    let at = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    Some((at.with_timezone(&chrono::Utc), run_id.to_string()))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub agent: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RunListResponse {
+    pub runs: Vec<RunSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/runs",
+    tag = "runs",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        RunListQuery,
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "Run summaries, newest first, keyset-paginated via `before`", body = RunListResponse)
+    )
+)]
+pub async fn list_thread_runs(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RunListQuery>,
+) -> Result<Json<RunListResponse>, ServeError> {
+    let limit = query.limit.unwrap_or(20).min(100);
+    let before = query.cursor.as_deref().and_then(decode_run_cursor);
+    let records = state
+        .session_store
+        .list_runs(&tenant, &thread_id, limit, before)
+        .await?;
+    let next_cursor = (records.len() == limit)
+        .then(|| {
+            records
+                .last()
+                .map(|r| format!("{}|{}", r.created_at.to_rfc3339(), r.run_id))
+        })
+        .flatten();
+    Ok(Json(RunListResponse {
+        runs: records
+            .into_iter()
+            .map(|r| RunSummary {
+                run_id: r.run_id,
+                agent: r.agent,
+                status: r.status.as_str().to_string(),
+                error: r.error,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect(),
+        next_cursor,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/runs/{run_id}/timeline",
+    tag = "runs",
+    params(
+        ("thread_id" = String, Path, description = "Thread id"),
+        ("run_id" = String, Path, description = "Run id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "The run's execution tree (turns → tools/delegations, with timing and usage)", body = serde_json::Value),
+        (status = 404, description = "Unknown run", body = ErrorBody)
+    )
+)]
+pub async fn run_timeline(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path((thread_id, run_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ServeError> {
+    let events = state
+        .session_store
+        .read_run_after(&tenant, &thread_id, &run_id, 0)
+        .await?;
+    let trace = runic_state::timeline::project(events.iter().map(|entry| &entry.event))
+        .into_iter()
+        .next()
+        .ok_or(ServeError::RunNotFound {
+            id: run_id,
+            thread: thread_id,
+        })?;
+    Ok(Json(serde_json::to_value(trace).map_err(|e| {
+        ServeError::Internal(format!("timeline serialization failed: {e}"))
+    })?))
+}
+
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn flush_persist(persist: &crate::registry::PersistHandle) {

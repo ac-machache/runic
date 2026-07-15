@@ -300,6 +300,14 @@ impl OaiResponseMessage {
 struct OaiUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<OaiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OaiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 /// Strip trailing empty assistant messages without tool calls.
@@ -904,6 +912,12 @@ impl Provider for OpenAIDriver {
                 .map(|u| TokenUsage {
                     input_tokens: u.prompt_tokens,
                     output_tokens: u.completion_tokens,
+                    cache_read_tokens: u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map(|d| d.cached_tokens)
+                        .unwrap_or_default(),
+                    cache_write_tokens: 0,
                 })
                 .unwrap_or_default();
 
@@ -1257,6 +1271,9 @@ impl Provider for OpenAIDriver {
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
+                        }
+                        if let Some(cr) = u["prompt_tokens_details"]["cached_tokens"].as_u64() {
+                            usage.cache_read_tokens = cr;
                         }
                     }
 
@@ -1710,10 +1727,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                 }],
                 tool_calls: vec![],
                 stop_reason: StopReason::EndTurn,
-                usage: TokenUsage {
-                    input_tokens: 0,
-                    output_tokens: 0,
-                },
+                usage: TokenUsage::default(),
             });
         }
         return None;
@@ -1723,16 +1737,33 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         content: vec![],
         tool_calls,
         stop_reason: StopReason::ToolUse,
-        usage: TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        },
+        usage: TokenUsage::default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_maps_cached_tokens_and_defaults_without_them() {
+        let with_cache: OaiUsage = serde_json::from_str(
+            r#"{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":6}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            with_cache
+                .prompt_tokens_details
+                .as_ref()
+                .unwrap()
+                .cached_tokens,
+            6
+        );
+
+        let without: OaiUsage =
+            serde_json::from_str(r#"{"prompt_tokens":10,"completion_tokens":5}"#).unwrap();
+        assert!(without.prompt_tokens_details.is_none());
+    }
 
     #[test]
     fn test_openai_driver_creation() {

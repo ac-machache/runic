@@ -55,8 +55,42 @@ pub enum WireEvent {
         preview: String,
     },
 
-    /// One model turn just finished — live runs only.
-    TurnComplete { turn: u32, stop_reason: String },
+    /// One model turn just finished. Live runs carry `stop_reason`; replayed
+    /// turns carry the durable usage/model/latency instead.
+    TurnComplete {
+        turn: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_ms: Option<u64>,
+    },
+
+    /// A delegation edge opened (the parent handed work to a subagent).
+    DelegationStart {
+        run_id: String,
+        call_id: String,
+        agent: String,
+        mode: String,
+    },
+
+    /// A delegation edge closed, carrying the child's cost.
+    DelegationFinish {
+        run_id: String,
+        call_id: String,
+        agent: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        duration_ms: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 
     /// A complete message landed in agent state. Replay only (live runs
     /// surface the same content as deltas + the persisted log).
@@ -165,6 +199,8 @@ impl WireEvent {
             Self::ToolStart { .. } => "tool_start",
             Self::ToolFinish { .. } => "tool_finish",
             Self::TurnComplete { .. } => "turn_complete",
+            Self::DelegationStart { .. } => "delegation_start",
+            Self::DelegationFinish { .. } => "delegation_finish",
             Self::Message { .. } => "message",
             Self::RunEnd { .. } => "run_end",
             Self::Usage { .. } => "usage",
@@ -222,7 +258,14 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             }]
         }
         AgentEvent::TurnCompleted { turn, stop_reason } => {
-            vec![WireEvent::TurnComplete { turn, stop_reason }]
+            vec![WireEvent::TurnComplete {
+                turn,
+                stop_reason: Some(stop_reason),
+                model: None,
+                input_tokens: None,
+                output_tokens: None,
+                model_ms: None,
+            }]
         }
         AgentEvent::ToolDeferred {
             run_id,
@@ -269,10 +312,13 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
 
 /// Convert a persisted [`SessionEvent`] (whole-message granularity, from
 /// `SessionStore::read`) into a wire event for replay. Returns `None` for
-/// internal bookkeeping events (`TurnBoundary`, `StateSnapshot`).
+/// internal bookkeeping events (`StateSnapshot` and, until 1.9 maps them,
+/// the execution-fact events).
 pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
     match event {
-        SessionEvent::RunStart { run_id, agent, at } => Some(WireEvent::RunStart {
+        SessionEvent::RunStart {
+            run_id, agent, at, ..
+        } => Some(WireEvent::RunStart {
             run_id,
             agent,
             at: Some(at),
@@ -281,6 +327,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             run_id,
             outcome,
             at,
+            ..
         } => Some(WireEvent::RunEnd {
             run_id,
             total_turns: outcome.total_turns,
@@ -344,7 +391,70 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             channel,
             payload,
         }),
-        SessionEvent::TurnBoundary { .. } | SessionEvent::StateSnapshot { .. } => None,
+        SessionEvent::TurnEnd {
+            turn,
+            model,
+            usage,
+            model_ms,
+            ..
+        } => Some(WireEvent::TurnComplete {
+            turn,
+            stop_reason: None,
+            model: Some(model),
+            input_tokens: Some(usage.input_tokens),
+            output_tokens: Some(usage.output_tokens),
+            model_ms: Some(model_ms),
+        }),
+        SessionEvent::ToolFinished {
+            call_id,
+            tool,
+            status,
+            ..
+        } => Some(WireEvent::ToolFinish {
+            id: call_id,
+            name: tool,
+            is_error: !matches!(
+                status,
+                runic_state::ToolStatus::Ok | runic_state::ToolStatus::Substituted
+            ),
+            preview: String::new(),
+        }),
+        SessionEvent::DelegationStarted {
+            run_id,
+            call_id,
+            agent,
+            mode,
+            ..
+        } => Some(WireEvent::DelegationStart {
+            run_id,
+            call_id,
+            agent,
+            mode: match mode {
+                runic_state::DelegationMode::Sync => "sync".to_string(),
+                runic_state::DelegationMode::Parallel => "parallel".to_string(),
+                runic_state::DelegationMode::Background => "background".to_string(),
+            },
+        }),
+        SessionEvent::DelegationFinished {
+            run_id,
+            call_id,
+            agent,
+            status,
+            usage,
+            model,
+            duration_ms,
+            ..
+        } => Some(WireEvent::DelegationFinish {
+            run_id,
+            call_id,
+            agent,
+            ok: matches!(status, runic_state::DelegationStatus::Ok),
+            model,
+            duration_ms,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        }),
+        SessionEvent::ToolStarted { .. } | SessionEvent::StateSnapshot { .. } => None,
     }
 }
 
@@ -388,6 +498,7 @@ mod tests {
             usage: runic_types::TokenUsage {
                 input_tokens: 10,
                 output_tokens: 20,
+                ..Default::default()
             },
             structured: None,
         };
@@ -424,12 +535,35 @@ mod tests {
     }
 
     #[test]
-    fn turn_boundary_is_filtered_from_replay() {
-        let evt = SessionEvent::TurnBoundary {
+    fn turn_end_replays_with_durable_usage() {
+        let evt = SessionEvent::TurnEnd {
             run_id: "r1".into(),
+            turn: 3,
+            model: "m".into(),
+            usage: runic_types::TokenUsage {
+                input_tokens: 12,
+                output_tokens: 5,
+                ..Default::default()
+            },
+            model_ms: 40,
             at: Utc::now(),
         };
-        assert!(from_session_event(evt).is_none());
+        let Some(WireEvent::TurnComplete {
+            turn,
+            stop_reason,
+            model,
+            input_tokens,
+            model_ms,
+            ..
+        }) = from_session_event(evt)
+        else {
+            panic!("turn end must replay");
+        };
+        assert_eq!(turn, 3);
+        assert!(stop_reason.is_none());
+        assert_eq!(model.as_deref(), Some("m"));
+        assert_eq!(input_tokens, Some(12));
+        assert_eq!(model_ms, Some(40));
     }
 
     #[test]

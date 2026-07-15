@@ -103,6 +103,33 @@ struct SessionRec {
     label: Option<String>,
     created_at: DateTime<Utc>,
     last_activity: DateTime<Utc>,
+    summary: Summary,
+}
+
+#[derive(Default)]
+struct Summary {
+    run_count: u64,
+    errored_runs: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    last_run_status: Option<String>,
+    last_run_at: Option<DateTime<Utc>>,
+}
+
+impl Summary {
+    fn apply(&mut self, event: &SessionEvent) {
+        let delta = crate::sessions::summary_delta(event);
+        self.run_count += delta.runs;
+        self.errored_runs += delta.errored;
+        self.input_tokens += delta.input_tokens;
+        self.output_tokens += delta.output_tokens;
+        if let Some(status) = delta.last_run_status {
+            self.last_run_status = Some(status.to_string());
+        }
+        if let Some(at) = delta.last_run_at {
+            self.last_run_at = Some(at);
+        }
+    }
 }
 
 struct ThreadLease {
@@ -147,9 +174,11 @@ impl SessionStore for MemorySessionStore {
                 label: None,
                 created_at: event_at(event),
                 last_activity: event_at(event),
+                summary: Summary::default(),
             });
         let seq = rec.events.len() as u64 + 1;
         rec.last_activity = event_at(event);
+        rec.summary.apply(event);
         rec.events.push(StoredEvent {
             seq,
             event: event.clone(),
@@ -174,10 +203,12 @@ impl SessionStore for MemorySessionStore {
                 label: None,
                 created_at: event_at(first),
                 last_activity: event_at(first),
+                summary: Summary::default(),
             });
         for event in events {
             let seq = rec.events.len() as u64 + 1;
             rec.last_activity = event_at(event);
+            rec.summary.apply(event);
             rec.events.push(StoredEvent {
                 seq,
                 event: event.clone(),
@@ -228,6 +259,12 @@ impl SessionStore for MemorySessionStore {
                 event_count: rec.events.len() as u64,
                 created_at: rec.created_at,
                 last_activity: rec.last_activity,
+                run_count: rec.summary.run_count,
+                errored_runs: rec.summary.errored_runs,
+                input_tokens: rec.summary.input_tokens,
+                output_tokens: rec.summary.output_tokens,
+                last_run_status: rec.summary.last_run_status.clone(),
+                last_run_at: rec.summary.last_run_at,
             })
             .collect();
         out.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
@@ -246,6 +283,12 @@ impl SessionStore for MemorySessionStore {
                 event_count: rec.events.len() as u64,
                 created_at: rec.created_at,
                 last_activity: rec.last_activity,
+                run_count: rec.summary.run_count,
+                errored_runs: rec.summary.errored_runs,
+                input_tokens: rec.summary.input_tokens,
+                output_tokens: rec.summary.output_tokens,
+                last_run_status: rec.summary.last_run_status.clone(),
+                last_run_at: rec.summary.last_run_at,
             }))
     }
 
@@ -259,6 +302,7 @@ impl SessionStore for MemorySessionStore {
                 label: None,
                 created_at: now,
                 last_activity: now,
+                summary: Summary::default(),
             });
         rec.label = label.map(str::to_string);
         Ok(())
@@ -485,15 +529,29 @@ impl SessionStore for MemorySessionStore {
     async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
         let now = Utc::now();
         let mut reaped = Vec::new();
-        let mut runs = self.runs.write().await;
-        for rec in runs.values_mut() {
-            if rec.status == crate::RunStatus::Running
-                && rec.lease_expires_at.is_some_and(|at| at < now)
+        {
+            let mut runs = self.runs.write().await;
+            for rec in runs.values_mut() {
+                if rec.status == crate::RunStatus::Running
+                    && rec.lease_expires_at.is_some_and(|at| at < now)
+                {
+                    rec.status = crate::RunStatus::Error;
+                    rec.error = Some("lease expired".into());
+                    rec.updated_at = now;
+                    reaped.push(rec.clone());
+                }
+            }
+        }
+        let mut sessions = self.sessions.write().await;
+        for run in &reaped {
+            if let Some(rec) = sessions.get_mut(&(run.tenant.clone(), run.session_id.clone()))
+                && rec.summary.last_run_status.as_deref() == Some("running")
+                && rec
+                    .summary
+                    .last_run_at
+                    .is_some_and(|at| at <= run.created_at)
             {
-                rec.status = crate::RunStatus::Error;
-                rec.error = Some("lease expired".into());
-                rec.updated_at = now;
-                reaped.push(rec.clone());
+                rec.summary.last_run_status = Some("failed".to_string());
             }
         }
         Ok(reaped)
@@ -573,9 +631,11 @@ impl SessionStore for MemorySessionStore {
                     label: None,
                     created_at: event_at(event),
                     last_activity: event_at(event),
+                    summary: Summary::default(),
                 });
             let seq = srec.events.len() as u64 + 1;
             srec.last_activity = event_at(event);
+            srec.summary.apply(event);
             srec.events.push(StoredEvent {
                 seq,
                 event: event.clone(),
@@ -596,6 +656,32 @@ impl SessionStore for MemorySessionStore {
             .get(run_id)
             .filter(|r| r.tenant == tenant)
             .cloned())
+    }
+
+    async fn list_runs(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        limit: usize,
+        before: Option<(chrono::DateTime<chrono::Utc>, String)>,
+    ) -> Result<Vec<crate::RunRecord>> {
+        let mut records: Vec<crate::RunRecord> = self
+            .runs
+            .read()
+            .await
+            .values()
+            .filter(|r| {
+                r.tenant == tenant
+                    && r.session_id == session_id
+                    && before.as_ref().is_none_or(|(cut_at, cut_id)| {
+                        (&r.created_at, &r.run_id) < (cut_at, cut_id)
+                    })
+            })
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| (&b.created_at, &b.run_id).cmp(&(&a.created_at, &a.run_id)));
+        records.truncate(limit);
+        Ok(records)
     }
 
     async fn latest_active_run(

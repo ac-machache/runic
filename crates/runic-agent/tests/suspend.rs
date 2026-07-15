@@ -118,7 +118,7 @@ fn kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
             SessionEvent::RunStart { .. } => "RunStart",
             SessionEvent::RunEnd { .. } => "RunEnd",
             SessionEvent::Message { .. } => "Message",
-            SessionEvent::TurnBoundary { .. } => "TurnBoundary",
+            SessionEvent::TurnEnd { .. } => "TurnEnd",
             SessionEvent::ToolDeferred { .. } => "ToolDeferred",
             _ => "other",
         })
@@ -174,7 +174,22 @@ async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
         .unwrap();
     assert_eq!(out2.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(agent.state().last_assistant_text().as_deref(), Some("done"));
-    assert!(kinds(agent.state().events()).contains(&"RunEnd"));
+
+    let terminals: Vec<_> = agent
+        .state()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::RunEnd { status, .. } => Some(status.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminals.len(),
+        1,
+        "exactly one terminal across suspend+resume"
+    );
+    assert!(matches!(terminals[0], runic_state::RunEndStatus::Completed));
 }
 
 #[tokio::test]

@@ -23,6 +23,7 @@ runic-provider = { path = "../runic-provider" }
 runic-skills = { path = "../runic-skills" }
 runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }
+runic-types = { path = "../runic-types" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

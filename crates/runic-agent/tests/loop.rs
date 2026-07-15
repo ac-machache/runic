@@ -64,6 +64,7 @@ fn text_response(text: &str) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..Default::default()
         },
     }
 }
@@ -85,6 +86,7 @@ fn tool_use_response(id: &str, name: &str, input: serde_json::Value) -> Completi
         usage: TokenUsage {
             input_tokens: 20,
             output_tokens: 8,
+            ..Default::default()
         },
     }
 }

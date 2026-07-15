@@ -170,6 +170,14 @@ struct MistralInFunction {
 struct MistralUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<MistralPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MistralPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 fn wire_call_id(id: &str) -> String {
@@ -535,6 +543,12 @@ fn parse_response(response: MistralResponse) -> Result<CompletionResponse, Provi
         .map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
+            cache_read_tokens: u
+                .prompt_tokens_details
+                .as_ref()
+                .map(|d| d.cached_tokens)
+                .unwrap_or_default(),
+            cache_write_tokens: 0,
         })
         .unwrap_or_default();
     if !content.is_empty() && usage.input_tokens == 0 && usage.output_tokens == 0 {
@@ -682,6 +696,9 @@ impl Provider for MistralDriver {
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
+                        }
+                        if let Some(cr) = u["prompt_tokens_details"]["cached_tokens"].as_u64() {
+                            usage.cache_read_tokens = cr;
                         }
                     }
 

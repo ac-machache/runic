@@ -35,6 +35,7 @@ impl Provider for ScriptedProvider {
             usage: TokenUsage {
                 input_tokens: 1,
                 output_tokens: 2,
+                ..Default::default()
             },
         })
     }

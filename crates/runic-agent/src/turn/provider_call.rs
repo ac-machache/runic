@@ -18,7 +18,7 @@ impl Agent {
     pub(crate) async fn call_model(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, AgentError> {
+    ) -> Result<(CompletionResponse, String), AgentError> {
         let span = tracing::info_span!(
             "provider_call",
             model = %request.model,
@@ -36,7 +36,7 @@ impl Agent {
             .instrument(span.clone())
             .await;
         match &result {
-            Ok(response) => {
+            Ok((response, _)) => {
                 span.record("input_tokens", response.usage.input_tokens);
                 span.record("output_tokens", response.usage.output_tokens);
                 span.record(
@@ -54,7 +54,7 @@ impl Agent {
     async fn call_model_inner(
         &self,
         mut request: CompletionRequest,
-    ) -> Result<CompletionResponse, AgentError> {
+    ) -> Result<(CompletionResponse, String), AgentError> {
         if let Some(resolver) = &self.media_resolver {
             resolver
                 .resolve(&mut request)
@@ -79,7 +79,7 @@ impl Agent {
     async fn call_model_streaming(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, AgentError> {
+    ) -> Result<(CompletionResponse, String), AgentError> {
         let (se_tx, mut se_rx) = mpsc::channel::<StreamEvent>(64);
         let provider = self.provider.clone();
         let sink = self.events.clone();
@@ -101,7 +101,7 @@ impl Agent {
         let (stream_result, _) = tokio::join!(provider.stream(request.clone(), se_tx), forward);
 
         match stream_result {
-            Ok(response) => Ok(response),
+            Ok(response) => Ok((response, request.model)),
             Err(e) if is_fallback_worthy(&e) => {
                 tracing::warn!(
                     provider = provider.name(),
@@ -118,10 +118,10 @@ impl Agent {
     async fn call_model_complete(
         &self,
         request: CompletionRequest,
-    ) -> Result<CompletionResponse, AgentError> {
+    ) -> Result<(CompletionResponse, String), AgentError> {
         let primary_err =
             match retry::call_with_retry(self.provider.as_ref(), request.clone()).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => return Ok((response, request.model)),
                 Err(e) => e,
             };
 
@@ -141,7 +141,7 @@ impl Agent {
                         primary_error = %primary_err,
                         "primary model call failed; served from fallback"
                     );
-                    return Ok(response);
+                    return Ok((response, fb.model.clone()));
                 }
                 Err(e) => {
                     tracing::warn!(

@@ -180,6 +180,20 @@ struct MistralPromptTokensDetails {
     cached_tokens: u64,
 }
 
+fn tool_result_text(content: &runic_types::ToolResultPayload, is_error: bool) -> String {
+    let text = content.text();
+    let text = if text.is_empty() {
+        "(empty)".to_string()
+    } else {
+        text
+    };
+    if is_error {
+        format!("Error: {text}")
+    } else {
+        text
+    }
+}
+
 fn wire_call_id(id: &str) -> String {
     if id.len() == 9 && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return id.to_string();
@@ -330,15 +344,13 @@ fn build_messages(request: &CompletionRequest) -> Vec<MistralMessage> {
                             tool_use_id,
                             tool_name,
                             content,
+                            is_error,
                             ..
                         } => {
+                            let text = tool_result_text(content, *is_error);
                             messages.push(MistralMessage {
                                 role: "tool",
-                                content: MistralContent::Text(if content.is_empty() {
-                                    "(empty)".to_string()
-                                } else {
-                                    content.clone()
-                                }),
+                                content: MistralContent::Text(text),
                                 tool_calls: None,
                                 tool_call_id: Some(wire_call_id(tool_use_id)),
                                 name: if tool_name.is_empty() {
@@ -969,6 +981,7 @@ mod tests {
             tool_name: "search".into(),
             content: "found it".into(),
             is_error: false,
+            provenance: Vec::new(),
         }])]);
         let messages = build_messages(&req);
         let v = serde_json::to_value(&messages[1]).unwrap();
@@ -1003,6 +1016,7 @@ mod tests {
                 tool_name: "search".into(),
                 content: "ok".into(),
                 is_error: false,
+                provenance: Vec::new(),
             }]),
         ]);
         let messages = build_messages(&req);
@@ -1183,10 +1197,89 @@ mod tests {
             tool_name: "noop".into(),
             content: "".into(),
             is_error: false,
+            provenance: Vec::new(),
         }])]);
         let messages = build_messages(&req);
         let v = serde_json::to_value(&messages[1]).unwrap();
         assert_eq!(v["content"], "(empty)");
+    }
+
+    fn tool_result_request(
+        content: runic_types::ToolResultPayload,
+        is_error: bool,
+    ) -> CompletionRequest {
+        request_with(vec![user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "abc123def".into(),
+            tool_name: "probe".into(),
+            content,
+            is_error,
+            provenance: Vec::new(),
+        }])])
+    }
+
+    #[test]
+    fn every_json_output_category_stringifies_into_the_tool_message() {
+        use runic_types::ToolResultPayload;
+        let cases: Vec<(ToolResultPayload, &str)> = vec![
+            (
+                ToolResultPayload::inline(serde_json::json!({"a": 1, "b": [2]})),
+                r#"{"a":1,"b":[2]}"#,
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!([1, "x", null])),
+                r#"[1,"x",null]"#,
+            ),
+            (ToolResultPayload::inline("plain text"), "plain text"),
+            (ToolResultPayload::inline(serde_json::json!(42)), "42"),
+            (ToolResultPayload::inline(serde_json::json!(true)), "true"),
+            (ToolResultPayload::inline(serde_json::json!(null)), "null"),
+        ];
+        for (payload, expected) in cases {
+            let req = tool_result_request(payload.clone(), false);
+            let v = serde_json::to_value(&build_messages(&req)[1]).unwrap();
+            assert_eq!(v["role"], "tool");
+            assert_eq!(v["content"], expected, "payload: {payload:?}");
+        }
+    }
+
+    #[test]
+    fn error_and_artifact_results_stringify_too() {
+        let req = tool_result_request("boom".into(), true);
+        let v = serde_json::to_value(&build_messages(&req)[1]).unwrap();
+        assert_eq!(v["content"], "Error: boom");
+
+        let req = tool_result_request(
+            runic_types::ToolResultPayload::Artifact {
+                id: "art-1".into(),
+                preview: "first bytes".into(),
+                mime: "application/json".into(),
+                size: 9000,
+            },
+            false,
+        );
+        let v = serde_json::to_value(&build_messages(&req)[1]).unwrap();
+        let content = v["content"].as_str().unwrap();
+        assert!(content.starts_with("first bytes"));
+        assert!(content.contains("art-1"));
+        assert!(content.contains("9000 bytes"));
+    }
+
+    #[test]
+    fn provenance_never_reaches_the_request_body() {
+        let req = request_with(vec![user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "abc123def".into(),
+            tool_name: "probe".into(),
+            content: "answer".into(),
+            is_error: false,
+            provenance: vec![
+                runic_types::ProvenanceSource::new("s1", "https://example.com/doc")
+                    .with_snippet("SNIPPET_MARKER"),
+            ],
+        }])]);
+        let body = serde_json::to_string(&build_messages(&req)).unwrap();
+        assert!(!body.contains("provenance"));
+        assert!(!body.contains("SNIPPET_MARKER"));
+        assert!(!body.contains("example.com"));
     }
 
     #[test]

@@ -41,10 +41,11 @@ impl Tool for ReadThreadArtifactTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file the user already uploaded in THIS thread. Use it only when \
-         you need to inspect that file again. You cannot read arbitrary local \
-         paths, URLs, or artifacts from other threads — the artifact_id must \
-         come from a file reference in this thread."
+        "Read an artifact stored in THIS thread: a file the user uploaded, or a \
+         large tool output that was stored instead of shown inline (its result \
+         says 'full output stored as artifact <id>'). You cannot read arbitrary \
+         local paths, URLs, or artifacts from other threads — the artifact_id \
+         must come from a reference in this thread."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -53,7 +54,7 @@ impl Tool for ReadThreadArtifactTool {
             "properties": {
                 "artifact_id": {
                     "type": "string",
-                    "description": "The id (art-…) of a file uploaded in this thread."
+                    "description": "The id of an artifact referenced in this thread."
                 }
             },
             "required": ["artifact_id"]
@@ -119,7 +120,7 @@ impl Tool for ReadThreadArtifactTool {
                 meta.id, meta.mime_type, meta.size, data
             )
         };
-        Ok(ToolResult::ok(full).with_persisted_summary(summary))
+        Ok(ToolResult::ok(full).with_summary(summary))
     }
 }
 
@@ -148,8 +149,8 @@ mod tests {
             .execute(serde_json::json!({ "artifact_id": a.id }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        assert_eq!(r.output, "hello notes");
+        assert!(!r.is_error());
+        assert_eq!(r.text(), "hello notes");
     }
 
     #[tokio::test]
@@ -172,12 +173,20 @@ mod tests {
             .execute(serde_json::json!({ "artifact_id": a.id }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
+        assert!(!r.is_error());
         // Full bytes (base64) go to the model …
-        assert!(r.output.contains("base64"));
-        assert!(r.output.contains("application/pdf"));
+        let full = r.text();
+        assert!(full.contains("base64"));
+        assert!(full.contains("application/pdf"));
         // … a summary (no bytes) is what gets persisted.
-        let persisted = r.persisted_output.expect("a persisted summary");
+        let runic_tool::ToolResult::Done {
+            retention: runic_tool::Retention::Summary(summary),
+            ..
+        } = &r
+        else {
+            panic!("expected a summary retention, got {r:?}");
+        };
+        let persisted = summary.as_str().expect("summary is text");
         assert!(persisted.contains("omitted from log"));
         assert!(!persisted.contains("base64"));
     }
@@ -214,20 +223,20 @@ mod tests {
             .execute(serde_json::json!({ "artifact_id": other.id }), &ctx)
             .await
             .unwrap();
-        assert!(!r.success);
+        assert!(r.is_error());
 
         // belongs to another tenant → rejected
         let r = tool
             .execute(serde_json::json!({ "artifact_id": foreign.id }), &ctx)
             .await
             .unwrap();
-        assert!(!r.success);
+        assert!(r.is_error());
 
         // unknown id → rejected
         let r = tool
             .execute(serde_json::json!({ "artifact_id": "art-nope" }), &ctx)
             .await
             .unwrap();
-        assert!(!r.success);
+        assert!(r.is_error());
     }
 }

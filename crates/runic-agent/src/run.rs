@@ -177,20 +177,20 @@ impl Agent {
     ) -> Result<RunOutcome, AgentError> {
         match result {
             Ok(stop_reason) if stop_reason == "suspended" => {
-                let (call_id, deferral) = self
+                let deferral = self
                     .pending_deferral
                     .take()
                     .expect("a suspended run always carries its deferral");
                 self.emit(crate::AgentEvent::ToolDeferred {
                     run_id: run_id.clone(),
-                    call_id: call_id.clone(),
-                    channel: deferral.kind.clone(),
+                    call_id: deferral.call_id.clone(),
+                    channel: deferral.channel.clone(),
                     payload: deferral.payload.clone(),
                 });
                 self.state.push_event(SessionEvent::ToolDeferred {
                     run_id: run_id.clone(),
-                    call_id,
-                    channel: deferral.kind,
+                    call_id: deferral.call_id,
+                    channel: deferral.channel,
                     payload: deferral.payload,
                     at: Utc::now(),
                 });
@@ -338,8 +338,9 @@ impl Agent {
                     Message::user_with_blocks(vec![ContentBlock::ToolResult {
                         tool_use_id: call.id.clone(),
                         tool_name: crate::FINAL_ANSWER_TOOL.to_string(),
-                        content: "Recorded.".to_string(),
+                        content: "Recorded.".into(),
                         is_error: false,
+                        provenance: Vec::new(),
                     }]),
                     run_id,
                 );

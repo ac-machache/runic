@@ -86,7 +86,7 @@ fn tool_result_pairs(agent: &Agent) -> Vec<(String, String, bool)> {
                 content,
                 is_error,
                 ..
-            } => Some((tool_name.clone(), content.clone(), *is_error)),
+            } => Some((tool_name.clone(), content.text(), *is_error)),
             _ => None,
         })
         .collect()

@@ -24,17 +24,6 @@ pub struct ToolCall {
     pub input: serde_json::Value,
 }
 
-/// Result of a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    /// The tool_use ID this result corresponds to.
-    pub tool_use_id: String,
-    /// The output content.
-    pub content: String,
-    /// Whether the tool execution resulted in an error.
-    pub is_error: bool,
-}
-
 /// Normalize a JSON Schema for cross-provider compatibility.
 ///
 /// Some providers (Gemini, Groq) reject `anyOf` in tool schemas.

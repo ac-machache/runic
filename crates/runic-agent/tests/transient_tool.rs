@@ -83,7 +83,7 @@ impl Tool for Leaker {
     }
     async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> anyhow::Result<ToolResult> {
         Ok(ToolResult::ok("FULL_SECRET_CONTENT")
-            .with_persisted_summary("artifact returned (18 bytes); content omitted from log."))
+            .with_summary("artifact returned (18 bytes); content omitted from log."))
     }
 }
 
@@ -96,7 +96,7 @@ fn tool_result_contents(req: &CompletionRequest) -> Vec<String> {
         })
         .flatten()
         .filter_map(|b| match b {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.text()),
             _ => None,
         })
         .collect()
@@ -133,7 +133,7 @@ async fn transient_output_reaches_model_but_summary_is_persisted() {
         })
         .flatten()
         .filter_map(|b| match b {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.text()),
             _ => None,
         })
         .collect();

@@ -425,7 +425,7 @@ impl Tool for SummaryTool {
         _args: serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::ok(self.full.clone()).with_persisted_summary(self.summary.clone()))
+        Ok(ToolResult::ok(self.full.clone()).with_summary(self.summary.clone()))
     }
 }
 
@@ -771,7 +771,7 @@ pub fn tool_results(messages: &[runic_types::Message]) -> Vec<(String, String, b
                 content,
                 is_error,
                 ..
-            } => Some((tool_use_id.clone(), content.clone(), *is_error)),
+            } => Some((tool_use_id.clone(), content.text(), *is_error)),
             _ => None,
         })
         .collect()
@@ -829,7 +829,7 @@ pub fn tool_result_contents(messages: &[runic_types::Message]) -> Vec<String> {
         })
         .flatten()
         .filter_map(|b| match b {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.text()),
             _ => None,
         })
         .collect()

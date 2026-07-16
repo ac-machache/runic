@@ -194,7 +194,7 @@ impl WriteHook for HookProbe {
         self.log
             .lock()
             .unwrap()
-            .push(format!("write:after_tool:{}:{}", call.input, result.output));
+            .push(format!("write:after_tool:{}:{}", call.input, result.text()));
         HookOutcome::Continue
     }
 
@@ -231,7 +231,7 @@ impl ReadHook for ReadProbe {
         self.log
             .lock()
             .unwrap()
-            .push(format!("read:after_tool:{}:{}", call.input, result.output));
+            .push(format!("read:after_tool:{}:{}", call.input, result.text()));
         HookSignal::Continue
     }
 }
@@ -292,7 +292,7 @@ async fn tool_call_round_trips_then_finishes() {
     let msgs = agent.state().messages_for_provider();
     let has_tool_result = msgs.iter().any(|m| match &m.content {
         runic_types::MessageContent::Blocks(blocks) => blocks.iter().any(
-            |b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("echo:")),
+            |b| matches!(b, ContentBlock::ToolResult { content, .. } if content.text().contains("echo:")),
         ),
         _ => false,
     });
@@ -342,12 +342,12 @@ async fn hooks_rewrite_and_substitute_tool_results_in_the_loop() {
     let cached = messages.iter().any(|m| {
         matches!(&m.content, MessageContent::Blocks(blocks)
             if blocks.iter().any(|b| matches!(b,
-                ContentBlock::ToolResult { content, .. } if content == "cached by hook")))
+                ContentBlock::ToolResult { content, .. } if content.text() == "cached by hook")))
     });
     let actual_echo_ran = messages.iter().any(|m| {
         matches!(&m.content, MessageContent::Blocks(blocks)
             if blocks.iter().any(|b| matches!(b,
-                ContentBlock::ToolResult { content, .. } if content.contains("echo:"))))
+                ContentBlock::ToolResult { content, .. } if content.text().contains("echo:"))))
     });
     assert!(cached, "substituted tool result should be persisted");
     assert!(
@@ -413,7 +413,7 @@ async fn unknown_tool_yields_error_result_not_crash() {
     let has_unknown_err = msgs.iter().any(|m| match &m.content {
         runic_types::MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
             matches!(b, ContentBlock::ToolResult { content, is_error, .. }
-                if *is_error && content.contains("unknown tool"))
+                if *is_error && content.text().contains("unknown tool"))
         }),
         _ => false,
     });
@@ -443,7 +443,7 @@ async fn run_context_injects_per_run_config_into_tools() {
     let saw_injected = agent.state().messages_for_provider().iter().any(|m| {
         matches!(&m.content, MessageContent::Blocks(b)
             if b.iter().any(|blk| matches!(blk,
-                ContentBlock::ToolResult { content, .. } if content.contains("user_id=u-run"))))
+                ContentBlock::ToolResult { content, .. } if content.text().contains("user_id=u-run"))))
     });
     assert!(saw_injected, "tool should have seen the per-run user_id");
     assert_eq!(
@@ -691,7 +691,7 @@ async fn deferred_tool_activates_then_becomes_callable() {
     let ran_late = agent.state().messages_for_provider().iter().any(|m| {
         matches!(&m.content, MessageContent::Blocks(b)
             if b.iter().any(|blk| matches!(blk,
-                ContentBlock::ToolResult { content, .. } if content.contains("late result"))))
+                ContentBlock::ToolResult { content, .. } if content.text().contains("late result"))))
     });
     assert!(ran_late, "a deferred-activated tool must resolve and run");
 }
@@ -721,7 +721,7 @@ async fn activations_survive_a_rebuild_from_the_log() {
     let ran_late = agent.state().messages_for_provider().iter().any(|m| {
         matches!(&m.content, MessageContent::Blocks(b)
             if b.iter().any(|blk| matches!(blk,
-                ContentBlock::ToolResult { content, .. } if content.contains("late result"))))
+                ContentBlock::ToolResult { content, .. } if content.text().contains("late result"))))
     });
     assert!(
         ran_late,

@@ -102,7 +102,6 @@ runic-skills      SKILL.md registry + skill_view tool
 runic-commands    COMMAND.md slash-command templates
 runic-mcp         MCP client (stdio + Streamable HTTP)
 runic-substrate   sessions + artifacts persistence (Postgres / local / memory) + search_chats
-runic-memory      bounded MEMORY.md / USER.md stores + memory tool + providers
 runic-transcriber speech-to-text trait + Mistral/Voxtral (audio → text preprocess)
 runic-macros      the #[tool] proc-macro
 runic-serve       axum HTTP server (threads, SSE runs, pooling, resume, deferred-tool answers)

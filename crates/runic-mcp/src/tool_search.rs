@@ -304,7 +304,7 @@ mod tests {
             .execute(serde_json::json!({ "query": "" }), &ctx)
             .await
             .unwrap();
-        assert!(!r.success);
+        assert!(r.is_error());
     }
 
     #[tokio::test]
@@ -318,9 +318,9 @@ mod tests {
             .execute(serde_json::json!({ "query": "read file" }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.contains("<function>"));
-        assert!(r.output.contains("mcp__fs__read_file"));
+        assert!(!r.is_error());
+        assert!(r.text().contains("<function>"));
+        assert!(r.text().contains("mcp__fs__read_file"));
         assert_eq!(activated_keys(&mut pending), ["mcp__fs__read_file"]);
     }
 
@@ -335,9 +335,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.contains("mcp__fs__tool_a"));
-        assert!(r.output.contains("Not found"));
+        assert!(!r.is_error());
+        assert!(r.text().contains("mcp__fs__tool_a"));
+        assert!(r.text().contains("Not found"));
         assert_eq!(activated_keys(&mut pending), ["mcp__fs__tool_a"]);
     }
 
@@ -352,8 +352,8 @@ mod tests {
             .execute(serde_json::json!({ "query": "select:mcp__fs__t" }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.contains("mcp__fs__t"), "schema is still returned");
+        assert!(!r.is_error());
+        assert!(r.text().contains("mcp__fs__t"), "schema is still returned");
         assert!(activated_keys(&mut pending).is_empty());
     }
 
@@ -367,8 +367,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.contains("mcp__fs__t"));
+        assert!(!r.is_error());
+        assert!(r.text().contains("mcp__fs__t"));
     }
 
     #[tokio::test]
@@ -386,8 +386,8 @@ mod tests {
             .execute(serde_json::json!({ "query": "tool" }), &ctx)
             .await
             .unwrap();
-        assert!(r.output.contains("mcp__fs__allowed"));
-        assert!(!r.output.contains("mcp__fs__blocked"));
+        assert!(r.text().contains("mcp__fs__allowed"));
+        assert!(!r.text().contains("mcp__fs__blocked"));
         assert_eq!(activated_keys(&mut pending), ["mcp__fs__allowed"]);
     }
 }

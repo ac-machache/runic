@@ -7,6 +7,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+runic-types = { path = "../runic-types" }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

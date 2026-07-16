@@ -64,18 +64,18 @@ mod tests {
             .execute(serde_json::json!({}), &ctx)
             .await
             .unwrap();
-        assert!(utc.success && utc.output.contains("UTC"));
+        assert!(!utc.is_error() && utc.text().contains("UTC"));
 
         let paris = SystemTimeTool
             .execute(serde_json::json!({ "timezone": "Europe/Paris" }), &ctx)
             .await
             .unwrap();
-        assert!(paris.success);
+        assert!(!paris.is_error());
 
         let bad = SystemTimeTool
             .execute(serde_json::json!({ "timezone": "Nowhere/Nope" }), &ctx)
             .await
             .unwrap();
-        assert!(!bad.success);
+        assert!(bad.is_error());
     }
 }

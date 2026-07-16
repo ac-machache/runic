@@ -30,7 +30,8 @@ fn agent_event() -> impl Strategy<Value = AgentEvent> {
                 id,
                 name,
                 is_error,
-                result
+                result: serde_json::Value::String(result),
+                provenance: Vec::new(),
             }
         ),
         (0u32..10, "[a-z_]{1,8}")

@@ -309,17 +309,33 @@ fn convert_messages(
                             });
                         }
                         ContentBlock::ToolResult {
-                            content, tool_name, ..
+                            content,
+                            tool_name,
+                            is_error,
+                            ..
                         } => {
                             let fn_name = if tool_name.is_empty() {
                                 "unknown_function".to_string()
                             } else {
                                 tool_name.clone()
                             };
+                            let response = if *is_error {
+                                serde_json::json!({ "error": content.text() })
+                            } else {
+                                match content {
+                                    runic_types::ToolResultPayload::Inline(
+                                        serde_json::Value::Object(map),
+                                    ) => serde_json::Value::Object(map.clone()),
+                                    runic_types::ToolResultPayload::Inline(value) => {
+                                        serde_json::json!({ "result": value })
+                                    }
+                                    artifact => serde_json::json!({ "result": artifact.text() }),
+                                }
+                            };
                             parts.push(GeminiPart::FunctionResponse {
                                 function_response: GeminiFunctionResponseData {
                                     name: fn_name,
-                                    response: serde_json::json!({ "result": content }),
+                                    response,
                                 },
                             });
                         }
@@ -1613,8 +1629,9 @@ mod tests {
                 content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                     tool_use_id: "call_123".to_string(),
                     tool_name: "web_search".to_string(),
-                    content: "Results about Rust programming".to_string(),
+                    content: "Results about Rust programming".into(),
                     is_error: false,
+                    provenance: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -1733,8 +1750,9 @@ mod tests {
                 content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                     tool_use_id: "call_456".to_string(),
                     tool_name: "read_file".to_string(),
-                    content: "file contents".to_string(),
+                    content: "file contents".into(),
                     is_error: false,
+                    provenance: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -1987,8 +2005,9 @@ mod tests {
                 content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
                     tool_use_id,
                     tool_name: "web_search".to_string(),
-                    content: "search results".to_string(),
+                    content: "search results".into(),
                     is_error: false,
+                    provenance: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -2261,5 +2280,143 @@ mod tests {
     fn test_sanitize_empty_input() {
         let sanitized = sanitize_gemini_turns(vec![]);
         assert!(sanitized.is_empty());
+    }
+
+    fn tool_result_message(content: runic_types::ToolResultPayload) -> Message {
+        Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            tool_name: "probe".into(),
+            content,
+            is_error: false,
+            provenance: Vec::new(),
+        }])
+    }
+
+    fn function_response_of(message: Message) -> serde_json::Value {
+        let ask = Message::user("go");
+        let call = Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "probe".into(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]);
+        let (contents, _) = convert_messages(&[ask, call, message], &None);
+        let response = contents
+            .iter()
+            .flat_map(|c| &c.parts)
+            .find_map(|p| match p {
+                GeminiPart::FunctionResponse { function_response } => {
+                    Some(function_response.response.clone())
+                }
+                _ => None,
+            });
+        response.expect("a FunctionResponse part")
+    }
+
+    #[test]
+    fn objects_pass_natively_and_every_other_category_gets_the_result_envelope() {
+        use runic_types::ToolResultPayload;
+        let object = function_response_of(tool_result_message(ToolResultPayload::inline(
+            serde_json::json!({"a": 1, "nested": {"b": 2}}),
+        )));
+        assert_eq!(object, serde_json::json!({"a": 1, "nested": {"b": 2}}));
+
+        for (payload, expected) in [
+            (
+                ToolResultPayload::inline(serde_json::json!([1, 2])),
+                serde_json::json!({"result": [1, 2]}),
+            ),
+            (
+                ToolResultPayload::inline("text"),
+                serde_json::json!({"result": "text"}),
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!(42)),
+                serde_json::json!({"result": 42}),
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!(false)),
+                serde_json::json!({"result": false}),
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!(null)),
+                serde_json::json!({"result": null}),
+            ),
+        ] {
+            let response = function_response_of(tool_result_message(payload.clone()));
+            assert_eq!(response, expected, "payload: {payload:?}");
+        }
+    }
+
+    #[test]
+    fn error_results_get_the_error_envelope() {
+        let ask = Message::user("go");
+        let call = Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "probe".into(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]);
+        let failed = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            tool_name: "probe".into(),
+            content: "boom".into(),
+            is_error: true,
+            provenance: Vec::new(),
+        }]);
+        let (contents, _) = convert_messages(&[ask, call, failed], &None);
+        let response = contents
+            .iter()
+            .flat_map(|c| &c.parts)
+            .find_map(|p| match p {
+                GeminiPart::FunctionResponse { function_response } => {
+                    Some(function_response.response.clone())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(response, serde_json::json!({ "error": "boom" }));
+    }
+
+    #[test]
+    fn artifact_results_envelope_their_preview_text() {
+        let response = function_response_of(tool_result_message(
+            runic_types::ToolResultPayload::Artifact {
+                id: "art-7".into(),
+                preview: "head".into(),
+                mime: "text/plain".into(),
+                size: 5,
+            },
+        ));
+        let text = response["result"].as_str().unwrap();
+        assert!(text.starts_with("head"));
+        assert!(text.contains("art-7"));
+    }
+
+    #[test]
+    fn provenance_never_reaches_the_gemini_request() {
+        let ask = Message::user("go");
+        let call = Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "probe".into(),
+            input: serde_json::json!({}),
+            provider_metadata: None,
+        }]);
+        let message = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            tool_name: "probe".into(),
+            content: "answer".into(),
+            is_error: false,
+            provenance: vec![
+                runic_types::ProvenanceSource::new("s1", "https://example.com/doc")
+                    .with_snippet("SNIPPET_MARKER"),
+            ],
+        }]);
+        let (contents, _) = convert_messages(&[ask, call, message], &None);
+        let body = serde_json::to_string(&contents).unwrap();
+        assert!(body.contains("answer"), "the response itself survives");
+        assert!(!body.contains("provenance"));
+        assert!(!body.contains("SNIPPET_MARKER"));
+        assert!(!body.contains("example.com"));
     }
 }

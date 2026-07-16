@@ -116,7 +116,7 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
         .execute(serde_json::json!({ "name": "core:alpha" }), &ctx)
         .await
         .unwrap();
-    assert!(r.success && r.output.contains("Alpha body."));
+    assert!(!r.is_error() && r.text().contains("Alpha body."));
 
     // sub-file through the source
     let r = tool
@@ -126,7 +126,7 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
         )
         .await
         .unwrap();
-    assert!(r.success && r.output.contains("the note"));
+    assert!(!r.is_error() && r.text().contains("the note"));
 
     // traversal refused
     let r = tool
@@ -136,14 +136,14 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
         )
         .await
         .unwrap();
-    assert!(!r.success);
+    assert!(r.is_error());
 
     // unknown skill
     let r = tool
         .execute(serde_json::json!({ "name": "core:ghost" }), &ctx)
         .await
         .unwrap();
-    assert!(!r.success);
+    assert!(r.is_error());
 }
 
 #[tokio::test]

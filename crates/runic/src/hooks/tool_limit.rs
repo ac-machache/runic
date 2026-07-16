@@ -183,7 +183,7 @@ mod tests {
     }
 
     fn is_blocked(outcome: &HookOutcome, scope: &str) -> bool {
-        matches!(outcome, HookOutcome::SubstituteToolResult(r) if !r.success && r.output.contains(scope))
+        matches!(outcome, HookOutcome::SubstituteToolResult(r) if r.is_error() && r.text().contains(scope))
     }
 
     async fn allowed(hook: &ToolCallLimit, s: &mut AgentState, name: &str) -> bool {
@@ -246,8 +246,8 @@ mod tests {
         hook.before_agent(&mut s).await;
         match hook.before_tool(&mut s, &mut call("payment")).await {
             HookOutcome::SubstituteToolResult(r) => {
-                assert!(!r.success);
-                assert_eq!(r.output, "No more charges — ask the user to confirm.");
+                assert!(r.is_error());
+                assert_eq!(r.text(), "No more charges — ask the user to confirm.");
             }
             other => panic!("expected block, got {other:?}"),
         }

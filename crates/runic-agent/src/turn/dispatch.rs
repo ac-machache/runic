@@ -14,15 +14,18 @@ use std::time::Duration;
 
 use runic_hook::HookOutcome;
 use runic_state::{HookLifecycle, SessionEvent};
-use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_types::{ContentBlock, Message, ToolCall};
+use runic_tool::{Retention, Tool, ToolContext, ToolResult};
+use runic_types::{
+    ContentBlock, Message, ProvenanceSource, ToolCall, ToolResultPayload, sanitize_provenance,
+};
 use tracing::Instrument;
 
 use runic_state::ToolStatus;
 
 use crate::loop_guard::Verdict;
+use crate::spill;
 use crate::turn::hooks::outcome_kind;
-use crate::{Agent, AgentError};
+use crate::{Agent, AgentError, PendingDeferral};
 
 /// What the loop decided to do with one requested tool call.
 enum CallPlan {
@@ -235,19 +238,35 @@ impl Agent {
 
         // ── Phase 3: collect + after_tool hooks ────────────────────────────
         let mut blocks: Vec<ContentBlock> = Vec::with_capacity(plans.len());
+        let suspending = results.iter().any(|dispatched| {
+            matches!(
+                dispatched,
+                Some(Dispatched {
+                    result: ToolResult::Deferred { .. },
+                    ..
+                })
+            )
+        });
         for (i, plan) in plans.iter().enumerate() {
             let call = plan.call();
             let dispatched = results[i].take().expect("every plan produced a result");
             let Dispatched {
-                mut result,
+                result,
                 status,
                 duration_ms,
             } = dispatched;
 
-            if let Some(deferral) = result.deferred.take() {
-                self.pending_deferral = Some((call.id.clone(), deferral));
-                continue;
-            }
+            let mut result = match result {
+                ToolResult::Deferred { channel, payload } => {
+                    self.pending_deferral = Some(PendingDeferral {
+                        call_id: call.id.clone(),
+                        channel,
+                        payload,
+                    });
+                    continue;
+                }
+                other => other,
+            };
 
             self.state.push_event(SessionEvent::ToolFinished {
                 run_id: run_id.to_string(),
@@ -262,39 +281,38 @@ impl Agent {
             // For actually-dispatched calls: feed the outcome to the guard
             // (so identical call+result streaks escalate) and append any nudge.
             if let CallPlan::Dispatch { warning, .. } = plan {
-                if let Some(outcome_warning) = self.guard.record_outcome(call, &result.output) {
-                    result.output = format!("{}\n\n[loop guard] {outcome_warning}", result.output);
+                let outcome_text = result.text();
+                let mut notes: Vec<String> = Vec::new();
+                if let Some(outcome_warning) = self.guard.record_outcome(call, &outcome_text) {
+                    notes.push(format!("[loop guard] {outcome_warning}"));
                 }
                 if let Some(w) = warning {
-                    result.output = format!("{}\n\n[loop guard] {w}", result.output);
+                    notes.push(format!("[loop guard] {w}"));
                 }
+                result.push_notes(&notes);
             }
 
-            // Persist the summary when one is given; the full output reaches
-            // only the next model call, via the transient overlay.
-            let persisted = result
-                .persisted_output
-                .clone()
-                .unwrap_or_else(|| result.output.clone());
-            if result.persisted_output.is_some() {
-                self.transient_tool_outputs
-                    .insert(call.id.clone(), result.output.clone());
-            }
+            let (payload, provenance) = self.persist_result(&call.id, &result, suspending).await;
 
             if let CallPlan::Dispatch { .. } = plan {
                 self.emit(crate::AgentEvent::ToolFinished {
                     id: call.id.clone(),
                     name: call.name.clone(),
-                    is_error: !result.success,
-                    result: persisted.clone(),
+                    is_error: result.is_error(),
+                    result: match &payload {
+                        ToolResultPayload::Inline(value) => value.clone(),
+                        artifact => serde_json::Value::String(artifact.text()),
+                    },
+                    provenance: provenance.clone(),
                 });
             }
 
             blocks.push(ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
                 tool_name: call.name.clone(),
-                content: persisted,
-                is_error: !result.success,
+                content: payload,
+                is_error: result.is_error(),
+                provenance,
             });
 
             // The tool already ran, so there's no call to make in-band: both
@@ -340,6 +358,141 @@ impl Agent {
         );
         self.push_tool_results(Message::user_with_blocks(blocks), run_id);
         Ok(())
+    }
+
+    async fn persist_result(
+        &mut self,
+        call_id: &str,
+        result: &ToolResult,
+        suspending: bool,
+    ) -> (ToolResultPayload, Vec<ProvenanceSource>) {
+        match result {
+            ToolResult::Done {
+                output,
+                provenance,
+                retention,
+            } => {
+                let sanitized = sanitize_provenance(provenance.clone());
+                let payload = match retention {
+                    Retention::Full => match self.config.auto_spill_over {
+                        Some(threshold) => {
+                            let (text, mime) = spill::serialize_output(output);
+                            if text.len() > threshold {
+                                let preview = spill::preview_of(&text);
+                                self.spill_output(call_id, output, text, mime, preview, suspending)
+                                    .await
+                            } else {
+                                ToolResultPayload::Inline(output.clone())
+                            }
+                        }
+                        None => ToolResultPayload::Inline(output.clone()),
+                    },
+                    Retention::Summary(summary) if suspending && self.spill.is_some() => {
+                        let (text, mime) = spill::serialize_output(output);
+                        let (summary_text, _) = spill::serialize_output(summary);
+                        let preview = spill::preview_of(&summary_text);
+                        self.spill_output(call_id, output, text, mime, preview, true)
+                            .await
+                    }
+                    Retention::Summary(summary) => {
+                        if suspending {
+                            tracing::warn!(
+                                call_id,
+                                "batch suspends with no artifact store; the summarized output cannot survive resume"
+                            );
+                        } else {
+                            self.transient_tool_outputs
+                                .entry(call_id.to_string())
+                                .or_default()
+                                .push(output.clone());
+                        }
+                        ToolResultPayload::Inline(self.bounded_inline(summary.clone()))
+                    }
+                    Retention::Artifact => {
+                        let (text, mime) = spill::serialize_output(output);
+                        let preview = spill::preview_of(&text);
+                        self.spill_output(call_id, output, text, mime, preview, suspending)
+                            .await
+                    }
+                };
+                (payload, sanitized)
+            }
+            ToolResult::Failed { message } => (
+                ToolResultPayload::Inline(
+                    self.bounded_inline(serde_json::Value::String(message.clone())),
+                ),
+                Vec::new(),
+            ),
+            ToolResult::Deferred { .. } => (ToolResultPayload::default(), Vec::new()),
+        }
+    }
+
+    fn bounded_inline(&self, value: serde_json::Value) -> serde_json::Value {
+        let Some(threshold) = self.config.auto_spill_over else {
+            return value;
+        };
+        let (text, _) = spill::serialize_output(&value);
+        if text.len() <= threshold {
+            return value;
+        }
+        let marker = format!("…[truncated from {} bytes]", text.len());
+        if threshold <= marker.len() {
+            return serde_json::Value::String(
+                spill::truncate_to_bytes(&marker, threshold).to_string(),
+            );
+        }
+        serde_json::Value::String(format!(
+            "{}{marker}",
+            spill::truncate_to_bytes(&text, threshold - marker.len())
+        ))
+    }
+
+    async fn spill_output(
+        &mut self,
+        call_id: &str,
+        output: &serde_json::Value,
+        text: String,
+        mime: &'static str,
+        preview: String,
+        suspending: bool,
+    ) -> ToolResultPayload {
+        let stored = match &self.spill {
+            Some(store) => {
+                store
+                    .store(
+                        &self.state.user_id,
+                        &self.state.session_id,
+                        mime,
+                        text.as_bytes(),
+                    )
+                    .await
+            }
+            None => Err(anyhow::anyhow!(
+                "no artifact store wired for tool-output spill"
+            )),
+        };
+        if !suspending {
+            self.transient_tool_outputs
+                .entry(call_id.to_string())
+                .or_default()
+                .push(output.clone());
+        }
+        match stored {
+            Ok(artifact) => ToolResultPayload::Artifact {
+                id: artifact.id,
+                preview,
+                mime: artifact.mime,
+                size: artifact.size,
+            },
+            Err(err) => {
+                tracing::warn!(call_id, error = %err, "tool-output spill failed; persisting a summary note instead");
+                let err_text = err.to_string();
+                ToolResultPayload::Inline(self.bounded_inline(serde_json::Value::String(format!(
+                    "[artifact spill failed: {}] {preview}",
+                    spill::truncate_to_bytes(&err_text, 200)
+                ))))
+            }
+        }
     }
 
     /// A tool context for this run, carrying identity + the per-run config map.
@@ -393,7 +546,7 @@ async fn dispatch_one(
     let (result, status) = dispatch_one_inner(tool, call, ctx, timeout, &span)
         .instrument(span.clone())
         .await;
-    span.record("is_error", !result.success);
+    span.record("is_error", result.is_error());
     Dispatched {
         result,
         status,
@@ -423,11 +576,11 @@ async fn dispatch_one_inner(
     let exec = std::panic::AssertUnwindSafe(tool.execute(call.input.clone(), &ctx)).catch_unwind();
     match tokio::time::timeout(timeout, exec).await {
         Ok(Ok(Ok(result))) => {
-            if !result.success {
+            if result.is_error() {
                 tracing::warn!(
                     run_id = %ctx.run_id,
                     tool = %call.name,
-                    error = %result.error.as_deref().unwrap_or(&result.output),
+                    error = %result.text(),
                     "tool returned error"
                 );
                 span.record("outcome", "error");

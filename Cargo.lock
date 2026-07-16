@@ -1805,7 +1805,6 @@ dependencies = [
  "runic-hook",
  "runic-macros",
  "runic-mcp",
- "runic-memory",
  "runic-provider",
  "runic-skills",
  "runic-state",
@@ -1887,25 +1886,6 @@ dependencies = [
  "futures",
  "reqwest",
  "runic-state",
- "runic-tool",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "runic-memory"
-version = "0.9.11"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "libc",
- "proptest",
- "regex",
  "runic-tool",
  "serde",
  "serde_json",
@@ -2047,6 +2027,7 @@ version = "0.9.11"
 dependencies = [
  "anyhow",
  "async-trait",
+ "runic-types",
  "serde",
  "serde_json",
  "tokio",
@@ -2073,6 +2054,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

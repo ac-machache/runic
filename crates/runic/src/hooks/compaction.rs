@@ -227,6 +227,7 @@ mod tests {
             tool_name: "rec".into(),
             content: "out".into(),
             is_error: false,
+            provenance: Vec::new(),
         }])
     }
 

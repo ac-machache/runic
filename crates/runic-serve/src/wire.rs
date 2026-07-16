@@ -53,6 +53,9 @@ pub enum WireEvent {
         name: String,
         is_error: bool,
         preview: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[schema(value_type = Vec<Object>)]
+        provenance: Vec<runic_types::ProvenanceSource>,
     },
 
     /// One model turn just finished. Live runs carry `stop_reason`; replayed
@@ -249,12 +252,18 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             name,
             is_error,
             result,
+            provenance,
         } => {
+            let text = match result {
+                serde_json::Value::String(text) => text,
+                value => value.to_string(),
+            };
             vec![WireEvent::ToolFinish {
                 id,
                 name,
                 is_error,
-                preview: truncate(&result, 4000),
+                preview: truncate(&text, 4000),
+                provenance,
             }]
         }
         AgentEvent::TurnCompleted { turn, stop_reason } => {
@@ -418,6 +427,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
                 runic_state::ToolStatus::Ok | runic_state::ToolStatus::Substituted
             ),
             preview: String::new(),
+            provenance: Vec::new(),
         }),
         SessionEvent::DelegationStarted {
             run_id,
@@ -488,6 +498,44 @@ mod tests {
             panic!()
         };
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn tool_finish_previews_structured_results_and_carries_provenance() {
+        let wires = from_agent_event(AgentEvent::ToolFinished {
+            id: "c1".into(),
+            name: "search".into(),
+            is_error: false,
+            result: serde_json::json!({ "hits": 3 }),
+            provenance: vec![runic_types::ProvenanceSource::new(
+                "s1",
+                "https://example.com",
+            )],
+        });
+        let WireEvent::ToolFinish {
+            preview,
+            provenance,
+            ..
+        } = &wires[0]
+        else {
+            panic!("expected ToolFinish, got {wires:?}");
+        };
+        assert_eq!(preview, r#"{"hits":3}"#);
+        assert_eq!(provenance.len(), 1);
+
+        let json = serde_json::to_value(&wires[0]).unwrap();
+        assert_eq!(json["provenance"][0]["source"], "https://example.com");
+
+        let bare = from_agent_event(AgentEvent::ToolFinished {
+            id: "c2".into(),
+            name: "calc".into(),
+            is_error: false,
+            result: serde_json::json!("2"),
+            provenance: Vec::new(),
+        });
+        let json = serde_json::to_value(&bare[0]).unwrap();
+        assert_eq!(json["preview"], "2");
+        assert!(json.get("provenance").is_none(), "empty list is omitted");
     }
 
     #[test]

@@ -256,7 +256,7 @@ fn tool_result_texts(agent: &Agent) -> Vec<String> {
         })
         .flatten()
         .filter_map(|block| match block {
-            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+            ContentBlock::ToolResult { content, .. } => Some(content.text()),
             _ => None,
         })
         .collect()

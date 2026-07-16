@@ -144,6 +144,7 @@ pub struct Composer {
     subagent_builder: Option<Arc<dyn SubagentBuilder>>,
     output_schema: Option<serde_json::Value>,
     max_turns: Option<u32>,
+    auto_spill_over: Option<usize>,
 }
 
 impl Composer {
@@ -158,6 +159,7 @@ impl Composer {
             subagent_builder: None,
             output_schema: None,
             max_turns: None,
+            auto_spill_over: None,
         }
     }
 
@@ -207,6 +209,11 @@ impl Composer {
 
     pub fn max_turns(mut self, turns: u32) -> Self {
         self.max_turns = Some(turns);
+        self
+    }
+
+    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
+        self.auto_spill_over = Some(bytes);
         self
     }
 
@@ -402,21 +409,34 @@ impl Composer {
             composition.tool_catalogs.push(registry);
         }
 
+        let mut tools = composition.tools;
+        if let Some(store) = &self.artifact_store
+            && !tools.iter().any(|t| t.name() == "read_thread_artifact")
+        {
+            tools.push(Arc::new(runic_substrate::ReadThreadArtifactTool::new(
+                store.clone(),
+            )));
+        }
         let mut agent_builder = Agent::builder(self.provider.clone(), tenant, session)
             .model(&self.model)
             .system_prompt(composition.prompt.render());
-        for tool in composition.tools {
+        for tool in tools {
             agent_builder = agent_builder.tool(tool);
         }
         for hook in composition.write_hooks {
             agent_builder = agent_builder.write_hook(hook);
         }
         if let Some(store) = &self.artifact_store {
-            agent_builder = agent_builder.media_resolver(Arc::new(ArtifactResolver::new(
-                store.clone(),
-                tenant,
-                session,
-            )));
+            agent_builder = agent_builder
+                .media_resolver(Arc::new(ArtifactResolver::new(
+                    store.clone(),
+                    tenant,
+                    session,
+                )))
+                .artifact_spill(Arc::new(crate::SpillToArtifacts::new(store.clone())));
+        }
+        if let Some(bytes) = self.auto_spill_over {
+            agent_builder = agent_builder.auto_spill_over(bytes);
         }
         if let Some(catalog) = into_catalog(composition.tool_catalogs) {
             agent_builder = agent_builder.tool_catalog(catalog);

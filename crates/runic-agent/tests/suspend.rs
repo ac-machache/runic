@@ -164,6 +164,7 @@ async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
             tool_name: "ask".into(),
             content: "yes".into(),
             is_error: false,
+            provenance: Vec::new(),
         }]),
         at: chrono::Utc::now(),
     });
@@ -246,6 +247,7 @@ async fn resume_does_not_append_a_second_run_start_or_user_message() {
             tool_name: "ask".into(),
             content: "yes".into(),
             is_error: false,
+            provenance: Vec::new(),
         }]),
         at: chrono::Utc::now(),
     });
@@ -293,6 +295,7 @@ async fn resume_sends_the_injected_tool_result_to_the_model() {
             tool_name: "ask".into(),
             content: "human said yes".into(),
             is_error: false,
+            provenance: Vec::new(),
         }]),
         at: chrono::Utc::now(),
     });

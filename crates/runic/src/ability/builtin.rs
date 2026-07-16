@@ -2,14 +2,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use runic_hook::WriteHook;
-use runic_memory::Memory as MemoryConfig;
 use runic_skills::SkillSet;
 use runic_subagent::Subagents;
 use runic_substrate::Sessions as SessionsConfig;
 use runic_tool::Tool;
 
-use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, Layer, ability};
-use crate::hooks::{Compaction as CompactionConfig, CompactionHook, MemoryCurator};
+use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, ability};
+use crate::hooks::{Compaction as CompactionConfig, CompactionHook};
 use crate::tools::{
     AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
     WeatherTool, WebFetchTool, WebSearchTool,
@@ -107,38 +106,6 @@ impl Ability for Tools {
     ) -> anyhow::Result<()> {
         for tool in &self.0 {
             bundle.tool(tool.clone());
-        }
-        Ok(())
-    }
-}
-
-pub struct Memory(pub MemoryConfig);
-
-#[async_trait]
-impl Ability for Memory {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        let store = self.0.store(ctx.tenant).await;
-        if let Ok(snapshot) = store.snapshot().await {
-            bundle.prompt(Layer::Stable, snapshot.section(true, true));
-        }
-        if let Some(tool) = self.0.tools(store.clone()) {
-            bundle.tool(tool);
-        }
-        if self.0.curation_interval_turns() > 0 {
-            let mut hook = MemoryCurator::new(
-                self.0.curation_interval_turns(),
-                ctx.provider.clone(),
-                ctx.model,
-                store,
-            );
-            if let Some(guidance) = self.0.curation_guidance_override() {
-                hook = hook.with_guidance(guidance);
-            }
-            bundle.write_hook(Arc::new(hook));
         }
         Ok(())
     }

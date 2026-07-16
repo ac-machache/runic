@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 
 mod external;
 pub(crate) mod run;
+mod spill;
 mod turn;
 
 pub mod loop_guard;
@@ -34,6 +35,7 @@ pub mod retry;
 
 pub use external::{ReminderQueue, TasksSnapshot};
 pub use runic_state::RunOutcome;
+pub use spill::{SPILL_PREVIEW_CHARS, SpilledArtifact, ToolOutputSpill};
 
 /// Default hard cap on model turns per run — a backstop against runaway loops
 /// (the tunable policy lives in [`loop_guard`] and hooks).
@@ -42,6 +44,12 @@ pub const DEFAULT_MAX_TURNS: u32 = 64;
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 /// Default max output tokens per model call.
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+pub(crate) struct PendingDeferral {
+    pub(crate) call_id: String,
+    pub(crate) channel: String,
+    pub(crate) payload: serde_json::Value,
+}
 
 /// A fallback `(provider, model)` the loop tries, in order, when the primary
 /// model call fails with a not-found or persistent-transient error.
@@ -73,7 +81,8 @@ pub enum AgentEvent {
         id: String,
         name: String,
         is_error: bool,
-        result: String,
+        result: serde_json::Value,
+        provenance: Vec<runic_types::ProvenanceSource>,
     },
     TurnCompleted {
         turn: u32,
@@ -236,6 +245,9 @@ pub struct AgentConfig {
     /// JSON schema for a synthetic `final_answer` tool; its call is captured as
     /// the run's structured output.
     pub output_schema: Option<serde_json::Value>,
+    /// Serialized-byte threshold above which a `Retention::Full` tool output is
+    /// spilled to the artifact store instead of written inline.
+    pub auto_spill_over: Option<usize>,
 }
 
 impl Default for AgentConfig {
@@ -248,6 +260,7 @@ impl Default for AgentConfig {
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
             graceful_max_turns: false,
             output_schema: None,
+            auto_spill_over: None,
         }
     }
 }
@@ -318,8 +331,9 @@ pub struct Agent {
     /// activation keys; `activated` below is this agent's materialization.
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
-    pub(crate) transient_tool_outputs: HashMap<String, String>,
-    pub(crate) pending_deferral: Option<(String, runic_tool::Deferral)>,
+    pub(crate) spill: Option<Arc<dyn ToolOutputSpill>>,
+    pub(crate) transient_tool_outputs: HashMap<String, Vec<serde_json::Value>>,
+    pub(crate) pending_deferral: Option<PendingDeferral>,
     pub(crate) pending_external_tx: mpsc::UnboundedSender<runic_state::SessionEvent>,
     pub(crate) pending_external_rx: mpsc::UnboundedReceiver<runic_state::SessionEvent>,
 }
@@ -409,6 +423,7 @@ pub struct AgentBuilder {
     fallbacks: Vec<FallbackProvider>,
     media_resolver: Option<Arc<dyn MediaResolver>>,
     catalog: Option<Arc<dyn ToolCatalog>>,
+    spill: Option<Arc<dyn ToolOutputSpill>>,
     config: AgentConfig,
 }
 
@@ -429,6 +444,7 @@ impl AgentBuilder {
             fallbacks: Vec::new(),
             media_resolver: None,
             catalog: None,
+            spill: None,
             config: AgentConfig::default(),
         }
     }
@@ -492,6 +508,19 @@ impl AgentBuilder {
         self
     }
 
+    /// Wire the artifact store used for `Retention::Artifact` tool outputs
+    /// (and `auto_spill_over` when configured).
+    pub fn artifact_spill(mut self, spill: Arc<dyn ToolOutputSpill>) -> Self {
+        self.spill = Some(spill);
+        self
+    }
+
+    /// Spill `Retention::Full` outputs above this many serialized bytes.
+    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
+        self.config.auto_spill_over = Some(bytes);
+        self
+    }
+
     /// Wire the on-demand tool catalog (e.g. the deferred MCP set). An
     /// activating tool like `tool_search` records activations as state keys;
     /// the loop resolves them against this catalog each turn, so activations
@@ -538,6 +567,7 @@ impl AgentBuilder {
             human: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
+            spill: self.spill,
             transient_tool_outputs: HashMap::new(),
             pending_deferral: None,
             pending_external_tx: pending_tx,

@@ -2,11 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::ability::{
-    Compaction as CompactionAbility, Delegation, Memory, Sessions, Skills, Tools, ask_user, basics,
+    Compaction as CompactionAbility, Delegation, Sessions, Skills, Tools, ask_user, basics,
     weather, web_fetch,
 };
 use runic::composer::Composer;
-use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_subagent::subagents;
@@ -85,26 +84,13 @@ async fn write_agent(root: &std::path::Path, dir: &str, name: &str, description:
 #[tokio::test]
 async fn composes_prompt_sections_in_order() {
     let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
     let skill_dir = tempfile::tempdir().unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
-
-    let memory_cfg = memory(memory_dir.path()).init().scope_per_tenant();
-    let store = memory_cfg.store("alice").await;
-    store
-        .add(Target::Memory, "project uses focused tests")
-        .await
-        .unwrap();
-    store
-        .add(Target::User, "user prefers direct prose")
-        .await
-        .unwrap();
 
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
     write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let agent = base(provider)
-        .with(Memory(memory_cfg))
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
@@ -115,14 +101,10 @@ async fn composes_prompt_sections_in_order() {
     let system = &agent.state().system_prompt;
 
     let instructions = system.find("core instructions").unwrap();
-    let memory = system.find("project uses focused tests").unwrap();
-    let user = system.find("user prefers direct prose").unwrap();
     let skills = system.find("<available-skills>").unwrap();
     let subagents = system.find("<subagents>").unwrap();
 
-    assert!(instructions < memory);
-    assert!(memory < user);
-    assert!(user < skills);
+    assert!(instructions < skills);
     assert!(skills < subagents);
 }
 
@@ -131,7 +113,6 @@ async fn registers_enabled_tool_surfaces() {
     let provider = Arc::new(RecordingProvider::default());
     let skill_dir = tempfile::tempdir().unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
-    let memory_dir = tempfile::tempdir().unwrap();
 
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
     write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
@@ -141,9 +122,6 @@ async fn registers_enabled_tool_surfaces() {
         .with(ask_user())
         .with(web_fetch())
         .with(weather())
-        .with(Memory(
-            memory(memory_dir.path()).init().include_memory_tool(),
-        ))
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
@@ -169,7 +147,6 @@ async fn registers_enabled_tool_surfaces() {
         "weather",
         "weather_history",
         "ask_user",
-        "memory",
         "skill_view",
         "delegate",
         "search_chats",
@@ -194,32 +171,6 @@ async fn registers_enabled_tool_surfaces() {
             "unexpected {absent}"
         );
     }
-}
-
-#[tokio::test]
-async fn memory_tool_description_override_reaches_the_model() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-
-    let mut agent = base(provider.clone())
-        .with(Memory(
-            memory(memory_dir.path())
-                .init()
-                .include_memory_tool()
-                .memory_tool_description("notes for a support bot"),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
-    agent.run("hello").await.unwrap();
-
-    let tool = provider
-        .last_request()
-        .tools
-        .into_iter()
-        .find(|t| t.name == "memory")
-        .expect("memory tool registered");
-    assert_eq!(tool.description, "notes for a support bot");
 }
 
 #[tokio::test]
@@ -387,152 +338,6 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
     );
     assert_eq!(agent.state().get("keep/me"), Some(&serde_json::json!(1)));
     assert!(agent.state().tasks().is_empty());
-}
-
-#[tokio::test]
-async fn memory_review_is_disabled_by_default() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-    let mut agent = base(provider.clone())
-        .with(Memory(memory(memory_dir.path()).init()))
-        .build("alice", "s1")
-        .await
-        .unwrap();
-    agent.run("hello").await.unwrap();
-
-    assert_eq!(provider.count(), 1);
-}
-
-#[tokio::test]
-async fn memory_review_spawns_when_interval_is_due() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-    let mut agent = base(provider.clone())
-        .with(Memory(
-            memory(memory_dir.path())
-                .init()
-                .include_memory_tool()
-                .curate_every_turns(1),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
-    agent.run("hello").await.unwrap();
-
-    for _ in 0..50 {
-        if provider.count() >= 2 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(provider.count(), 2);
-    let review_request = provider.last_request();
-    assert_eq!(review_request.model, "model-a");
-    assert!(
-        review_request
-            .system
-            .as_deref()
-            .is_some_and(|system| system.contains("Review the conversation"))
-    );
-    assert!(
-        review_request
-            .tools
-            .iter()
-            .any(|tool| tool.name == "memory")
-    );
-}
-
-#[tokio::test]
-async fn curation_guidance_override_reaches_the_curator() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-    let mut agent = base(provider.clone())
-        .with(Memory(
-            memory(memory_dir.path())
-                .init()
-                .include_memory_tool()
-                .curate_every_turns(1)
-                .curation_guidance("custom curation instructions"),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
-    agent.run("hello").await.unwrap();
-
-    for _ in 0..50 {
-        if provider.count() >= 2 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(provider.count(), 2);
-    assert_eq!(
-        provider.last_request().system.as_deref(),
-        Some("custom curation instructions")
-    );
-}
-
-#[tokio::test]
-async fn memory_review_waits_until_interval() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-    let mut agent = base(provider.clone())
-        .with(Memory(
-            memory(memory_dir.path())
-                .init()
-                .include_memory_tool()
-                .curate_every_turns(2),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
-    agent.run("hello").await.unwrap();
-
-    assert_eq!(provider.count(), 1);
-}
-
-#[tokio::test]
-async fn memory_review_counts_runs_across_rebuilds() {
-    let provider = Arc::new(RecordingProvider::default());
-    let memory_dir = tempfile::tempdir().unwrap();
-    let composer = base(provider.clone()).with(Memory(
-        memory(memory_dir.path())
-            .init()
-            .include_memory_tool()
-            .curate_every_turns(2),
-    ));
-
-    let mut first = composer.build("alice", "s1").await.unwrap();
-    first.run("one").await.unwrap();
-    assert_eq!(provider.count(), 1, "run one: review not due yet");
-    let log: Vec<runic_state::SessionEvent> = first.state().events().to_vec();
-
-    let mut second = composer.build("alice", "s1").await.unwrap();
-    for event in log {
-        second.state_mut().fold_event(event);
-    }
-    second.run("two").await.unwrap();
-
-    for _ in 0..50 {
-        if provider.count() >= 3 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        provider.count(),
-        3,
-        "a rebuilt agent must still know run one happened — the schedule lives in state"
-    );
-    assert_eq!(
-        second
-            .state()
-            .get("memory-curator/last-review-run")
-            .and_then(|v| v.as_u64()),
-        Some(2)
-    );
 }
 
 struct EchoTool;

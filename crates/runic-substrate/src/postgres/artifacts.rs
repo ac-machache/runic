@@ -144,12 +144,16 @@ impl ArtifactStore for PostgresArtifactStore {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
+        match self.bytes.delete(id).await {
+            Ok(()) | Err(Error::NotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
         sqlx::query("DELETE FROM artifacts WHERE artifact_id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
             .map_err(db)?;
-        self.bytes.delete(id).await
+        Ok(())
     }
 
     async fn url(&self, id: &str) -> Result<Option<String>> {
@@ -162,17 +166,20 @@ impl ArtifactStore for PostgresArtifactStore {
         let artifacts = self.list(tenant, session_id).await?;
         let total = artifacts.len();
         for (deleted, artifact) in artifacts.iter().enumerate() {
-            if let Err(e) = self.bytes.delete(&artifact.id).await {
-                tracing::warn!(
-                    %tenant,
-                    %session_id,
-                    artifact_id = %artifact.id,
-                    deleted,
-                    total,
-                    error = %e,
-                    "artifact byte delete failed; session artifacts partially cleaned up"
-                );
-                return Err(e);
+            match self.bytes.delete(&artifact.id).await {
+                Ok(()) | Err(Error::NotFound(_)) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        %tenant,
+                        %session_id,
+                        artifact_id = %artifact.id,
+                        deleted,
+                        total,
+                        error = %e,
+                        "artifact byte delete failed; session artifacts partially cleaned up"
+                    );
+                    return Err(e);
+                }
             }
         }
         sqlx::query("DELETE FROM artifacts WHERE tenant = $1 AND session_id = $2")

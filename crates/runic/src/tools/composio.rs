@@ -496,10 +496,7 @@ impl Tool for ComposioTool {
                     .execute_action(action_name, app, &params, text, &entity, account)
                     .await
                 {
-                    Ok(result) => Ok(ToolResult::ok(
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|_| result.to_string()),
-                    )),
+                    Ok(result) => Ok(ToolResult::ok(result)),
                     Err(e) => Ok(ToolResult::error(format!("{e}"))),
                 }
             }

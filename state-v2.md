@@ -179,60 +179,95 @@ statuses), 7 (what the compaction signal measures), 10 (timeline pagination),
 
 One coherent migration; starts only after Phase 1 events are durable.
 
-- [ ] **2.1 `ToolResult` becomes an outcome enum** (`runic-tool`)
+- [x] **2.1 `ToolResult` becomes an outcome enum** (`runic-tool`) — DONE.
       `Done { output: Value, provenance, retention } | Failed { message } |
-      Deferred { channel, payload }`. Constructors preserve call sites:
-      `ok(impl Into<Value>)`, `error`, `defer`, `.with_provenance`,
-      `.with_summary`, `.spill()`. Hooks/dispatch/stats consume by match —
-      the `success`/`error`/`deferred` flag combinations become unrepresentable.
-      *Accept:* every in-tree tool compiles with constructor-only changes;
-      dispatch has no flag cross-checking left.
+      Deferred { channel, payload }`; old `Deferral` struct removed
+      (`PendingDeferral` is dispatch-internal in `runic-agent`). Constructors
+      `ok(impl Into<Value>)`/`error`/`defer` preserved every in-tree call site;
+      helpers `is_error()`/`output()`/`text()`/`push_notes()` replaced all
+      flag reads. Loop-guard nudges: string outputs get appended text,
+      structured outputs get wrapped once as `{ "output": …, "notes": […] }`.
+      `runic-tool` now depends on `runic-types`. Dispatch consumes by match —
+      no flag cross-checking anywhere.
 
-- [ ] **2.2 Provider projection of `Value`** (`runic-provider`)
-      Core preserves `Value`; each driver owns its projection. **Mistral is the
-      reference implementation and its needs win ties**: structured results are
-      serialized to a JSON string for the tool message (Mistral's documented
-      shape); OpenAI + Anthropic follow the same stringify rule; Gemini wraps
-      non-objects in `{ "result": value }` for `FunctionResponse.response`.
-      *Accept:* per-driver tests over object, array, string, number, boolean,
-      null, error, artifact-backed — request bodies asserted byte-for-shape.
+- [x] **2.2 Provider projection of `Value`** (`runic-provider`) — DONE.
+      Mistral reference rule: inline strings verbatim, any other value compact
+      JSON (`ToolResultPayload::text()`), `(empty)` padding kept; OpenAI
+      (shared `tool_result_text`, both chat paths) and Anthropic follow the
+      same stringify rule; Gemini passes objects natively into
+      `FunctionResponse.response` and wraps every non-object (array, string,
+      number, bool, null, artifact preview) in `{ "result": value }`.
+      Per-driver category tests over object/array/string/number/bool/null/
+      error/artifact assert the request bodies (146 provider tests green).
 
-- [ ] **2.3 Tool-result payload block** (`runic-types`)
-      `ContentBlock::ToolResult.content` becomes a payload that preserves
-      `tool_use_id` while being `Inline(Value)` or
-      `Artifact { id, preview, mime, size }`. Old logs (string content)
-      deserialize as `Inline(Value::String)`.
-      *Accept:* round-trip tests old→new; provider projection handles both arms;
-      `tool_use_id` correlation asserted end-to-end.
+- [x] **2.3 Tool-result payload block** (`runic-types`) — DONE.
+      `ContentBlock::ToolResult.content: ToolResultPayload` =
+      `Inline(Value) | Artifact { id, preview, mime, size }`, serialized
+      externally tagged (`{"inline": …}` / `{"artifact": {…}}`), plain
+      tagged derive both ways — NO legacy fallback (old logs get wiped, per
+      standing no-compat order). Block also gained `provenance`
+      (serde-default, skip-if-empty). Round-trip proptest extended over both
+      arms incl. the adversarial `{"inline": …}` output case; msgpack + JSON
+      round-trips pinned; `tool_use_id` untouched.
 
-- [ ] **2.4 Provenance** (rename from grounding) (`runic-tool` + wire)
-      `ProvenanceSource { id, source, title, snippet, metadata }` — stable ids;
-      it is provenance/supporting-sources, NOT inline citations (no segment
-      attribution claimed). Security: no raw local paths by default, credentials
-      + signed query params stripped from URLs, bounded counts/sizes,
-      deterministic truncation, snippets treated as untrusted. Persisted on the
-      block, surfaced on the wire, never sent to any model.
-      *Accept:* security tests from `critique-v2.md`; per-driver tests assert
-      absence from every provider request.
+- [x] **2.4 Provenance** (`runic-types` + dispatch + wire) — DONE.
+      `ProvenanceSource { id, source, title, snippet, metadata }` in
+      `runic_types::provenance` (re-exported from `runic-tool`);
+      `sanitize_provenance` applied in dispatch before persist/emit: max 16
+      sources, URL userinfo + secret query params stripped (sig/token/key/…,
+      `x-amz-*`, `x-goog-*`), local paths redacted to `file:<basename>`,
+      char-boundary truncation (id 128 / source 2048 / title 256 / snippet
+      1024), metadata > 2048 serialized bytes dropped. Persisted on the block,
+      carried on `AgentEvent::ToolFinished` and wire `tool_finish`
+      (skip-if-empty), and per-driver tests assert absence from every
+      provider request body.
 
-- [ ] **2.5 Retention + spill** (`runic-agent` + `runic-substrate`)
-      `Retention: Full | Summary(Value) | Artifact`. `Summary` keeps today's
-      transient-overlay semantics (full output exactly once). `Artifact`: write
-      to `ArtifactStore` (dispatch gets an explicit store handle on
-      `AgentBuilder`), history keeps the payload block's `Artifact` arm.
-      Defined: serialized-UTF-8 bytes measured for `auto_spill_over`; artifact
-      write failure → fall back to `Summary` with error note, never an unbounded
-      inline write; artifact-then-event partial failure; tenant/session
-      ownership on refs; size caps; orphan GC (idempotent).
-      *Accept:* artifact-retention test list from `critique-v2.md` in full.
+- [x] **2.5 Retention + spill** (`runic-agent`) — DONE.
+      `Retention: Full | Summary(Value) | Artifact`. `Summary` keeps the
+      transient-overlay semantics (`with_persisted_summary` renamed
+      `with_summary`; overlay now holds `Value`). `Artifact`: new
+      `ToolOutputSpill` seam (`runic-agent`), `AgentBuilder::artifact_spill` +
+      `auto_spill_over(bytes)`; the umbrella crate wires it from
+      `Composer::artifacts(store)` via `SpillToArtifacts`
+      (`ArtifactSource::ToolOutput`), composer knob `auto_spill_over`.
+      Serialization rule: string output → raw UTF-8 (`text/plain`), any other
+      value → compact JSON (`application/json`); `auto_spill_over` measures
+      those bytes and only fires on `Full` retention. History keeps the
+      `Artifact` payload arm (256-char preview); on a normal (non-suspending)
+      batch the model still gets the full output on the immediate next call
+      via the overlay; on suspension it retrieves the payload via the
+      auto-wired `read_thread_artifact` tool (`Composer::artifacts(store)`
+      registers it unless the consumer already owns the name). Spill failure
+      (or no store wired) degrades to an inline `[artifact spill failed: …]
+      preview` note — never an unbounded inline write. Tests: `runic-agent/
+      tests/retention.rs` + `runic/tests/suspend_retrieve.rs` (spill
+      round-trip incl. tenant/session/mime/bytes, failure fallback,
+      absent-store fallback, threshold behavior, provenance
+      sanitize+persist+wire, suspend → resume → retrieve e2e). Orphan GC
+      stays with the artifact store's existing delete/list surface (Phase 3
+      ties it to child cleanup).
 
-- [ ] **2.6 MCP + Composio preserve JSON** (`runic-mcp`, `runic/src/tools`)
-      Native JSON results stop being stringified-then-reparsed.
-      *Accept:* MCP structured content lands as `Value` end-to-end.
+- [x] **2.6 MCP + Composio preserve JSON** (`runic-mcp`, `runic/src/tools`) —
+      DONE. `CallToolResult` gained `structured_content`
+      (`structuredContent`); `McpTool::execute` returns it as the `Value`
+      output when present (text fallback unchanged, errors stay text);
+      Composio `execute` returns the raw response `Value` instead of
+      pretty-printed text. Scripted-transport tests pin structured, text-only,
+      and error shapes.
 
-**Phase 2 exit gate:** gate questions 4 (artifact result keeps tool-call
-identity), 5 (per-provider encoding of every JSON category), 6 (partial-failure
-behavior).
+**Phase 2 exit gate:** gate question 4 answered (artifact result keeps
+tool-call identity — payload arm lives inside the `tool_result` block,
+`tool_use_id` asserted in provider tests); gate question 5 answered
+(per-provider encoding of every JSON category — per-driver tests); gate
+question 6 PARTIALLY answered: spill-store failure degrades to a bounded
+inline note (tested), but the artifact-store write paths themselves still
+have partial-write windows (Postgres: bytes before metadata; Local: blob →
+meta → index) and event persistence can fail after an artifact write — full
+partial-failure safety needs the pending/committed lifecycle + orphan
+sweeper parked to Phase 3 (3.4). NOTE: `runic-memory` was removed from the
+workspace (moved to `../runic-memory` as an archive) and the memory domain
+(Memory ability, MemoryCurator hook, `runic::memory` re-export) was cut from
+the umbrella crate — memory becomes a consumer-owned ability.
 
 ---
 
@@ -282,6 +317,58 @@ behavior).
 9 (retries, deletion, artifact cleanup).
 
 ---
+
+### Phase 2 review round (post-landing)
+
+Fixed: transient overlay is occurrence-scoped (`Vec<Value>` per call id,
+newest-to-newest pairing on the next request — duplicate call ids can no
+longer receive each other's output); a suspending batch spills summarized
+outputs to the artifact store instead of losing them to the in-memory
+overlay (no store → summary kept, full bytes never inline, warn);
+`auto_spill_over` now also bounds Summary and Failed inline payloads
+(deterministic truncation with a byte-count marker) and spill-failure notes
+truncate the backend error to 200 bytes; provenance URL sanitization uses
+`url::Url` (case-insensitive schemes, percent-decoded query names,
+unparseable http(s) URLs fail closed to `[unparseable-url]`); providers
+without a native error bit mark failed results (OpenAI/Mistral: `Error: `
+prefix; Gemini: `{ "error": text }` envelope; Anthropic keeps `is_error`).
+
+Round 2 fixes: suspension-spilled summaries use the tool's SUMMARY as the
+artifact preview and failure-note text (the full output can no longer leak
+through the 256-char preview); suspension semantics documented honestly —
+after resume the model sees the summary preview + artifact id and retrieves
+the payload via `read_thread_artifact`; it is NOT auto-inlined into the next
+request (the resolver only handles `ContentBlock::ArtifactRef`, not payload
+arms). `bounded_inline` is now a hard byte ceiling (marker length reserved
+inside the budget, spill-failure notes included). `has_scheme_ci` compares
+bytes (no UTF-8 boundary panic on non-ASCII sources). Provenance metadata is
+scrubbed recursively — object keys matching the secret-param list are
+removed before persistence. Postgres artifact deletes run bytes-first and
+tolerate missing bytes, so a retried delete converges instead of stranding
+invisible orphans. Backward-compat removal (user order — no old-log
+compatibility, ever): `ToolResultPayload` deserialization is the plain
+tagged derive; the legacy string fallback and its test are gone.
+
+Round 3 fixes: `Composer::artifacts(store)` now auto-registers
+`ReadThreadArtifactTool` (skipped when the consumer already owns the name),
+its description covers spilled tool outputs as well as user uploads, and
+`runic/tests/suspend_retrieve.rs` proves the full suspend → resume →
+retrieve loop end-to-end. The exit-gate wording for question 6 was corrected
+to "partially answered" (put-path partial-write windows + the
+artifact-then-event failure window remain open until Phase 3's
+pending/committed lifecycle + sweeper).
+
+Rejected: replayed `tool_finish` carrying provenance (payload discipline —
+ground rule 5: lifecycle events carry identity/timing/status only; replayed
+`tool_finish` already has an empty preview by design, and the replayed
+Message event carries the block with provenance); a payload version
+discriminator (legacy content was a string *by type*, so old logs can only
+contain strings; new writes are always tagged, round-trip identity is
+proptested including adversarial `{"inline": …}` outputs).
+
+Parked to Phase 3: artifact/event partial-failure windows + orphan sweeper
+(pending/committed artifact state, idempotent GC) — joins child-artifact
+cleanup in 3.4.
 
 ## Parked (explicitly out of all three phases)
 

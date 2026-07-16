@@ -132,7 +132,7 @@ async fn the_loop_blocks_a_thread_capped_tool_and_the_model_sees_why() {
         .filter_map(|b| match b {
             ContentBlock::ToolResult {
                 content, is_error, ..
-            } => Some((content, is_error)),
+            } => Some((content.text(), is_error)),
             _ => None,
         })
         .collect();

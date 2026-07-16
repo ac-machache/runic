@@ -189,6 +189,8 @@ pub struct CallToolParams {
 pub struct CallToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
 }
 

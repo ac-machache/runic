@@ -1,10 +1,12 @@
 //! Shared conversation, content-block, and tool-schema wire types.
 
 pub mod message;
+pub mod provenance;
 pub mod tool;
 
 pub use message::{
     ContentBlock, Message, MessageContent, ReplyDirectives, Role, StopReason, TokenUsage,
-    validate_image,
+    ToolResultPayload, validate_image,
 };
-pub use tool::{ToolCall, ToolDefinition, ToolResult, normalize_schema_for_provider};
+pub use provenance::{ProvenanceSource, sanitize_provenance};
+pub use tool::{ToolCall, ToolDefinition, normalize_schema_for_provider};

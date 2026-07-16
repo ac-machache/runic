@@ -145,16 +145,17 @@ mod tests {
             .execute(serde_json::json!({ "query": "postgres migration" }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.contains("past")); // matched the other acme session
-        assert!(!r.output.contains("current")); // excluded the current one
-        assert!(!r.output.contains("another tenant")); // never crossed tenants
+        assert!(!r.is_error());
+        let text = r.text();
+        assert!(text.contains("past")); // matched the other acme session
+        assert!(!text.contains("current")); // excluded the current one
+        assert!(!text.contains("another tenant")); // never crossed tenants
 
         // empty query is rejected
         let r = tool
             .execute(serde_json::json!({ "query": "" }), &ctx)
             .await
             .unwrap();
-        assert!(!r.success);
+        assert!(r.is_error());
     }
 }

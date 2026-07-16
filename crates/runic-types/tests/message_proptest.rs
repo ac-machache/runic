@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 
-use runic_types::{ContentBlock, Message, Role};
+use runic_types::{ContentBlock, Message, ProvenanceSource, Role, ToolResultPayload};
 
 fn json_value() -> impl Strategy<Value = serde_json::Value> {
     prop_oneof![
@@ -49,14 +49,22 @@ fn content_block() -> impl Strategy<Value = ContentBlock> {
                 provider_metadata,
             }
         ),
-        ("[a-z]{1,8}", "[a-z_]{0,12}", "[a-z ]{0,30}", any::<bool>()).prop_map(
-            |(tool_use_id, tool_name, content, is_error)| ContentBlock::ToolResult {
-                tool_use_id,
-                tool_name,
-                content,
-                is_error,
-            }
-        ),
+        (
+            "[a-z]{1,8}",
+            "[a-z_]{0,12}",
+            tool_result_payload(),
+            any::<bool>(),
+            provenance()
+        )
+            .prop_map(|(tool_use_id, tool_name, content, is_error, provenance)| {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    tool_name,
+                    content,
+                    is_error,
+                    provenance,
+                }
+            }),
         ("[a-z ]{0,30}", prop::option::of("[a-z0-9]{0,16}")).prop_map(|(thinking, signature)| {
             ContentBlock::Thinking {
                 thinking,
@@ -66,6 +74,29 @@ fn content_block() -> impl Strategy<Value = ContentBlock> {
         }),
         "[a-z0-9]{0,16}".prop_map(|data| ContentBlock::RedactedThinking { data }),
     ]
+}
+
+fn tool_result_payload() -> impl Strategy<Value = ToolResultPayload> {
+    prop_oneof![
+        json_value().prop_map(ToolResultPayload::Inline),
+        json_value().prop_map(|v| ToolResultPayload::Inline(serde_json::json!({ "inline": v }))),
+        ("[a-z0-9-]{1,12}", "[a-z ]{0,20}", 0u64..100_000).prop_map(|(id, preview, size)| {
+            ToolResultPayload::Artifact {
+                id,
+                preview,
+                mime: "application/json".into(),
+                size,
+            }
+        }),
+    ]
+}
+
+fn provenance() -> impl Strategy<Value = Vec<ProvenanceSource>> {
+    prop::collection::vec(
+        ("[a-z0-9]{1,6}", "[a-z:/.]{1,24}")
+            .prop_map(|(id, source)| ProvenanceSource::new(id, format!("https://{source}"))),
+        0..3,
+    )
 }
 
 fn role() -> impl Strategy<Value = Role> {

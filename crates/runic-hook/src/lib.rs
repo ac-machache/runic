@@ -191,8 +191,8 @@ mod tests {
 
         match h.before_tool(&mut s, &mut call("search")).await {
             HookOutcome::SubstituteToolResult(r) => {
-                assert!(r.success);
-                assert_eq!(r.output, "cached: 42");
+                assert!(!r.is_error());
+                assert_eq!(r.text(), "cached: 42");
             }
             other => panic!("expected substitution, got {other:?}"),
         }

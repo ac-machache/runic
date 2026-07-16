@@ -6,68 +6,129 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Deferral {
-    pub kind: String,
-    pub payload: serde_json::Value,
+pub use runic_types::ProvenanceSource;
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Retention {
+    #[default]
+    Full,
+    Summary(serde_json::Value),
+    Artifact,
 }
 
 /// Result of executing a tool. Tool-level failures are reported in-band via
-/// `success`/`error`; the `Result` wrapper is for unexpected execution errors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub success: bool,
-    pub output: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// When set, this (a summary) is persisted to the event log instead of
-    /// `output`; the full `output` reaches the model only for the immediate
-    /// next call. Lets a tool feed the model a large payload (e.g. a re-read
-    /// file) without writing the bytes into history.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub persisted_output: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred: Option<Deferral>,
+/// `Failed`; the `Result` wrapper is for unexpected execution errors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResult {
+    Done {
+        output: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provenance: Vec<ProvenanceSource>,
+        #[serde(default)]
+        retention: Retention,
+    },
+    Failed {
+        message: String,
+    },
+    Deferred {
+        channel: String,
+        payload: serde_json::Value,
+    },
 }
 
 impl ToolResult {
-    pub fn ok(output: impl Into<String>) -> Self {
-        Self {
-            success: true,
+    pub fn ok(output: impl Into<serde_json::Value>) -> Self {
+        Self::Done {
             output: output.into(),
-            error: None,
-            persisted_output: None,
-            deferred: None,
+            provenance: Vec::new(),
+            retention: Retention::Full,
         }
     }
 
     pub fn error(message: impl Into<String>) -> Self {
-        let m = message.into();
-        Self {
-            success: false,
-            output: m.clone(),
-            error: Some(m),
-            persisted_output: None,
-            deferred: None,
+        Self::Failed {
+            message: message.into(),
         }
     }
 
-    /// Persist `summary` to the log instead of the full `output`.
-    pub fn with_persisted_summary(mut self, summary: impl Into<String>) -> Self {
-        self.persisted_output = Some(summary.into());
+    pub fn defer(channel: impl Into<String>, payload: serde_json::Value) -> Self {
+        Self::Deferred {
+            channel: channel.into(),
+            payload,
+        }
+    }
+
+    pub fn with_provenance(mut self, sources: Vec<ProvenanceSource>) -> Self {
+        if let Self::Done { provenance, .. } = &mut self {
+            *provenance = sources;
+        }
         self
     }
 
-    pub fn defer(kind: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self {
-            success: true,
-            output: String::new(),
-            error: None,
-            persisted_output: None,
-            deferred: Some(Deferral {
-                kind: kind.into(),
-                payload,
-            }),
+    pub fn with_summary(mut self, summary: impl Into<serde_json::Value>) -> Self {
+        if let Self::Done { retention, .. } = &mut self {
+            *retention = Retention::Summary(summary.into());
+        }
+        self
+    }
+
+    pub fn spill(mut self) -> Self {
+        if let Self::Done { retention, .. } = &mut self {
+            *retention = Retention::Artifact;
+        }
+        self
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+
+    pub fn output(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Done { output, .. } => Some(output),
+            _ => None,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        match self {
+            Self::Done {
+                output: serde_json::Value::String(text),
+                ..
+            } => text.clone(),
+            Self::Done { output, .. } => output.to_string(),
+            Self::Failed { message } => message.clone(),
+            Self::Deferred { .. } => String::new(),
+        }
+    }
+
+    pub fn push_notes(&mut self, notes: &[String]) {
+        if notes.is_empty() {
+            return;
+        }
+        match self {
+            Self::Done {
+                output: serde_json::Value::String(text),
+                ..
+            } => {
+                for note in notes {
+                    text.push_str("\n\n");
+                    text.push_str(note);
+                }
+            }
+            Self::Done { output, .. } => {
+                let original = std::mem::take(output);
+                *output = serde_json::json!({ "output": original, "notes": notes });
+            }
+            Self::Failed { message } => {
+                for note in notes {
+                    message.push_str("\n\n");
+                    message.push_str(note);
+                }
+            }
+            Self::Deferred { .. } => {}
         }
     }
 }
@@ -319,8 +380,8 @@ mod tests {
             .execute(serde_json::json!({ "x": 1 }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        assert!(r.output.starts_with("u1:"));
+        assert!(!r.is_error());
+        assert!(r.text().starts_with("u1:"));
         assert_eq!(t.spec().name, "echo");
         assert_eq!(t.spec().parameters["type"], "object");
     }
@@ -337,18 +398,73 @@ mod tests {
 
     #[test]
     fn tool_result_helpers() {
-        assert!(ToolResult::ok("hi").success);
-        let e = ToolResult::error("boom");
-        assert!(!e.success);
-        assert_eq!(e.error.as_deref(), Some("boom"));
+        let done = ToolResult::ok("hi");
+        assert!(!done.is_error());
+        assert_eq!(done.text(), "hi");
+        assert_eq!(done.output(), Some(&serde_json::json!("hi")));
+
+        let structured = ToolResult::ok(serde_json::json!({ "count": 3 }));
+        assert_eq!(structured.text(), r#"{"count":3}"#);
+
+        let failed = ToolResult::error("boom");
+        assert!(failed.is_error());
+        assert_eq!(failed.text(), "boom");
+        assert!(failed.output().is_none());
 
         let deferred = ToolResult::defer("human_ask", serde_json::json!({ "question": "ok?" }));
-        assert!(deferred.success);
-        assert_eq!(deferred.output, "");
-        assert_eq!(deferred.deferred.as_ref().unwrap().kind, "human_ask");
+        assert!(!deferred.is_error());
         let json = serde_json::to_value(&deferred).unwrap();
         assert_eq!(json["deferred"]["payload"]["question"], "ok?");
-        assert!(json.get("persisted_output").is_none());
+        assert_eq!(json["deferred"]["channel"], "human_ask");
+    }
+
+    #[test]
+    fn retention_and_provenance_builders_only_touch_done() {
+        let summarized = ToolResult::ok("full text").with_summary("short");
+        assert!(matches!(
+            summarized,
+            ToolResult::Done { retention: Retention::Summary(ref s), .. } if s == "short"
+        ));
+
+        let spilled = ToolResult::ok("big").spill();
+        assert!(matches!(
+            spilled,
+            ToolResult::Done {
+                retention: Retention::Artifact,
+                ..
+            }
+        ));
+
+        let sourced = ToolResult::ok("answer")
+            .with_provenance(vec![ProvenanceSource::new("s1", "https://e.com")]);
+        assert!(matches!(
+            sourced,
+            ToolResult::Done { ref provenance, .. } if provenance.len() == 1
+        ));
+
+        let failed = ToolResult::error("x").with_summary("ignored").spill();
+        assert_eq!(failed, ToolResult::error("x"));
+    }
+
+    #[test]
+    fn notes_append_to_strings_and_wrap_structured_output_once() {
+        let mut text_result = ToolResult::ok("body");
+        text_result.push_notes(&["[loop guard] stop".to_string()]);
+        assert_eq!(text_result.text(), "body\n\n[loop guard] stop");
+
+        let mut structured = ToolResult::ok(serde_json::json!({ "a": 1 }));
+        structured.push_notes(&["n1".to_string(), "n2".to_string()]);
+        let output = structured.output().unwrap();
+        assert_eq!(output["output"]["a"], 1);
+        assert_eq!(output["notes"][1], "n2");
+
+        let mut failed = ToolResult::error("bad");
+        failed.push_notes(&["note".to_string()]);
+        assert_eq!(failed.text(), "bad\n\nnote");
+
+        let mut untouched = ToolResult::ok("x");
+        untouched.push_notes(&[]);
+        assert_eq!(untouched.text(), "x");
     }
 
     #[test]

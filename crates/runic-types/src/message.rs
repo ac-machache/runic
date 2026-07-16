@@ -142,9 +142,11 @@ pub enum ContentBlock {
         #[serde(default)]
         tool_name: String,
         /// The result content.
-        content: String,
+        content: ToolResultPayload,
         /// Whether the tool execution errored.
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provenance: Vec<crate::ProvenanceSource>,
     },
     /// Extended thinking content block (model's reasoning trace).
     ///
@@ -180,6 +182,69 @@ pub enum ContentBlock {
     /// Catch-all for unrecognized content block types (forward compatibility).
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultPayload {
+    Inline(serde_json::Value),
+    Artifact {
+        id: String,
+        preview: String,
+        mime: String,
+        size: u64,
+    },
+}
+
+impl ToolResultPayload {
+    pub fn inline(value: impl Into<serde_json::Value>) -> Self {
+        ToolResultPayload::Inline(value.into())
+    }
+
+    pub fn text(&self) -> String {
+        match self {
+            ToolResultPayload::Inline(serde_json::Value::String(text)) => text.clone(),
+            ToolResultPayload::Inline(value) => value.to_string(),
+            ToolResultPayload::Artifact {
+                id,
+                preview,
+                mime,
+                size,
+            } => format!("{preview}\n[full output stored as artifact {id} ({mime}, {size} bytes)]"),
+        }
+    }
+
+    pub fn text_length(&self) -> usize {
+        match self {
+            ToolResultPayload::Inline(serde_json::Value::String(text)) => text.len(),
+            ToolResultPayload::Inline(value) => value.to_string().len(),
+            ToolResultPayload::Artifact { preview, .. } => preview.len(),
+        }
+    }
+}
+
+impl Default for ToolResultPayload {
+    fn default() -> Self {
+        ToolResultPayload::Inline(serde_json::Value::String(String::new()))
+    }
+}
+
+impl From<&str> for ToolResultPayload {
+    fn from(text: &str) -> Self {
+        ToolResultPayload::Inline(serde_json::Value::String(text.to_string()))
+    }
+}
+
+impl From<String> for ToolResultPayload {
+    fn from(text: String) -> Self {
+        ToolResultPayload::Inline(serde_json::Value::String(text))
+    }
+}
+
+impl From<serde_json::Value> for ToolResultPayload {
+    fn from(value: serde_json::Value) -> Self {
+        ToolResultPayload::Inline(value)
+    }
 }
 
 /// Allowed image media types.
@@ -227,7 +292,7 @@ impl MessageContent {
                 .iter()
                 .map(|b| match b {
                     ContentBlock::Text { text, .. } => text.len(),
-                    ContentBlock::ToolResult { content, .. } => content.len(),
+                    ContentBlock::ToolResult { content, .. } => content.text_length(),
                     ContentBlock::Thinking { thinking, .. } => thinking.len(),
                     ContentBlock::ToolUse { name, input, .. } => {
                         name.len() + input.to_string().len()
@@ -477,6 +542,45 @@ mod tests {
         };
         let json = serde_json::to_value(&no_name).unwrap();
         assert!(json.get("filename").is_none());
+    }
+
+    #[test]
+    fn tool_result_payload_round_trips_both_arms_in_json_and_msgpack() {
+        let inline = ToolResultPayload::inline(serde_json::json!({ "inline": "tricky" }));
+        let artifact = ToolResultPayload::Artifact {
+            id: "art-1".into(),
+            preview: "first bytes…".into(),
+            mime: "application/json".into(),
+            size: 12_345,
+        };
+        for payload in [inline, artifact] {
+            let json = serde_json::to_value(&payload).unwrap();
+            let back: ToolResultPayload = serde_json::from_value(json).unwrap();
+            assert_eq!(back, payload);
+
+            let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+            let back: ToolResultPayload = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(back, payload);
+        }
+    }
+
+    #[test]
+    fn tool_result_payload_text_projects_each_arm() {
+        assert_eq!(ToolResultPayload::inline("hi").text(), "hi");
+        assert_eq!(
+            ToolResultPayload::inline(serde_json::json!({ "a": 1 })).text(),
+            r#"{"a":1}"#
+        );
+        let artifact = ToolResultPayload::Artifact {
+            id: "art-9".into(),
+            preview: "head".into(),
+            mime: "text/plain".into(),
+            size: 9,
+        };
+        let text = artifact.text();
+        assert!(text.starts_with("head\n"));
+        assert!(text.contains("art-9"));
+        assert!(text.contains("9 bytes"));
     }
 
     #[test]

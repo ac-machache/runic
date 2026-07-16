@@ -788,7 +788,7 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         ..
                     } => Some(ApiContentBlock::ToolResult {
                         tool_use_id: tool_use_id.clone(),
-                        content: content.clone(),
+                        content: content.text(),
                         is_error: *is_error,
                     }),
                     ContentBlock::Thinking {
@@ -1331,5 +1331,79 @@ mod tests {
 
         // no system → no blocks (field omitted on the wire)
         assert!(driver.system_blocks(None).is_none());
+    }
+
+    fn tool_result_api_content(
+        content: runic_types::ToolResultPayload,
+        is_error: bool,
+    ) -> serde_json::Value {
+        let msg = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "tu_1".into(),
+            tool_name: "probe".into(),
+            content,
+            is_error,
+            provenance: Vec::new(),
+        }]);
+        let api = convert_message(&msg);
+        serde_json::to_value(&api).unwrap()["content"][0].clone()
+    }
+
+    #[test]
+    fn every_json_output_category_stringifies_into_the_tool_result_block() {
+        use runic_types::ToolResultPayload;
+        for (payload, expected) in [
+            (
+                ToolResultPayload::inline(serde_json::json!({"a": 1})),
+                r#"{"a":1}"#,
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!([true, null])),
+                "[true,null]",
+            ),
+            (ToolResultPayload::inline("text"), "text"),
+            (ToolResultPayload::inline(serde_json::json!(7)), "7"),
+            (ToolResultPayload::inline(serde_json::json!(false)), "false"),
+            (ToolResultPayload::inline(serde_json::json!(null)), "null"),
+        ] {
+            let block = tool_result_api_content(payload.clone(), false);
+            assert_eq!(block["type"], "tool_result");
+            assert_eq!(block["tool_use_id"], "tu_1");
+            assert_eq!(block["content"], expected, "payload: {payload:?}");
+        }
+
+        let error = tool_result_api_content("boom".into(), true);
+        assert_eq!(error["content"], "boom");
+        assert_eq!(error["is_error"], true);
+
+        let artifact = tool_result_api_content(
+            runic_types::ToolResultPayload::Artifact {
+                id: "art-2".into(),
+                preview: "head".into(),
+                mime: "application/json".into(),
+                size: 3,
+            },
+            false,
+        );
+        let text = artifact["content"].as_str().unwrap();
+        assert!(text.starts_with("head"));
+        assert!(text.contains("art-2"));
+    }
+
+    #[test]
+    fn provenance_never_reaches_the_anthropic_request() {
+        let msg = Message::user_with_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: "tu_1".into(),
+            tool_name: "probe".into(),
+            content: "answer".into(),
+            is_error: false,
+            provenance: vec![
+                runic_types::ProvenanceSource::new("s1", "https://example.com/doc")
+                    .with_snippet("SNIPPET_MARKER"),
+            ],
+        }]);
+        let body = serde_json::to_string(&convert_message(&msg)).unwrap();
+        assert!(!body.contains("provenance"));
+        assert!(!body.contains("SNIPPET_MARKER"));
+        assert!(!body.contains("example.com"));
     }
 }

@@ -206,6 +206,6 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
         )
         .await
         .unwrap();
-    assert!(result.success);
-    assert_eq!(result.output, "found 3 competitors");
+    assert!(!result.is_error());
+    assert_eq!(result.text(), "found 3 competitors");
 }

@@ -11,7 +11,6 @@ runic-provider = { path = "../runic-provider" }
 runic-substrate = { path = "../runic-substrate", features = ["postgres"] }
 runic-tool = { path = "../runic-tool" }
 runic-hook = { path = "../runic-hook" }
-runic-memory = { path = "../runic-memory"}
 runic-skills = { path = "../runic-skills" }
 runic-state = { path = "../runic-state" }
 runic-types = { path = "../runic-types" }

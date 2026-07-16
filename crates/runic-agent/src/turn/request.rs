@@ -23,21 +23,22 @@ impl Agent {
 
         // Swap summarized tool results for their full output, for this call
         // only; the overlay is consumed here.
-        let overlay = std::mem::take(&mut self.transient_tool_outputs);
+        let mut overlay = std::mem::take(&mut self.transient_tool_outputs);
         if !overlay.is_empty() {
-            for msg in &mut messages {
+            for msg in messages.iter_mut().rev() {
                 let runic_types::MessageContent::Blocks(blocks) = &mut msg.content else {
                     continue;
                 };
-                for block in blocks {
+                for block in blocks.iter_mut().rev() {
                     if let runic_types::ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         ..
                     } = block
-                        && let Some(full) = overlay.get(tool_use_id)
+                        && let Some(queue) = overlay.get_mut(tool_use_id)
+                        && let Some(full) = queue.pop()
                     {
-                        *content = full.clone();
+                        *content = runic_types::ToolResultPayload::Inline(full);
                     }
                 }
             }

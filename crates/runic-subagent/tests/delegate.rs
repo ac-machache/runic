@@ -71,8 +71,8 @@ async fn delegate_sync_returns_child_answer() {
         )
         .await
         .unwrap();
-    assert!(r.success);
-    assert_eq!(r.output, "done: reviewer");
+    assert!(!r.is_error());
+    assert_eq!(r.text(), "done: reviewer");
 }
 
 #[tokio::test]
@@ -85,8 +85,8 @@ async fn unknown_agent_lists_roster() {
         )
         .await
         .unwrap();
-    assert!(!r.success);
-    assert!(r.output.contains("reviewer")); // roster surfaced
+    assert!(r.is_error());
+    assert!(r.text().contains("reviewer")); // roster surfaced
 }
 
 #[tokio::test]
@@ -101,8 +101,8 @@ async fn depth_limit_refuses_delegation() {
         )
         .await
         .unwrap();
-    assert!(!r.success);
-    assert!(r.output.contains("depth limit"));
+    assert!(r.is_error());
+    assert!(r.text().contains("depth limit"));
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn spawn_budget_caps_total() {
         )
         .await
         .unwrap();
-    assert!(first.success);
+    assert!(!first.is_error());
     let second = tool
         .execute(
             serde_json::json!({ "agent": "researcher", "prompt": "y" }),
@@ -124,8 +124,8 @@ async fn spawn_budget_caps_total() {
         )
         .await
         .unwrap();
-    assert!(!second.success);
-    assert!(second.output.contains("budget"));
+    assert!(second.is_error());
+    assert!(second.text().contains("budget"));
 }
 
 #[tokio::test]
@@ -138,9 +138,9 @@ async fn parallel_runs_several_and_aggregates() {
         )
         .await
         .unwrap();
-    assert!(r.success);
-    assert!(r.output.contains("done: reviewer"));
-    assert!(r.output.contains("done: researcher"));
+    assert!(!r.is_error());
+    assert!(r.text().contains("done: reviewer"));
+    assert!(r.text().contains("done: researcher"));
 }
 
 #[tokio::test]
@@ -153,10 +153,10 @@ async fn background_then_check_result() {
         )
         .await
         .unwrap();
-    assert!(start.success);
+    assert!(!start.is_error());
     // Extract the task id from "...task_id=task-xxxx".
     let task_id = start
-        .output
+        .text()
         .split("task_id=")
         .nth(1)
         .unwrap()
@@ -173,8 +173,8 @@ async fn background_then_check_result() {
             )
             .await
             .unwrap();
-        if r.output == "done: reviewer" {
-            output = Some(r.output);
+        if r.text() == "done: reviewer" {
+            output = Some(r.text());
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

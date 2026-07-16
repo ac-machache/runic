@@ -1,5 +1,6 @@
 pub mod ability;
 mod artifact_resolver;
+mod artifact_spill;
 mod child;
 pub mod composer;
 mod context;
@@ -11,6 +12,7 @@ pub mod tools;
 
 pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
+pub use artifact_spill::SpillToArtifacts;
 pub use child::FoundrySubagentBuilder;
 pub use composer::{Compose, ComposeError, Composer};
 pub use context::Context;
@@ -37,9 +39,6 @@ pub mod hook {
 pub mod mcp {
     pub use crate::ability::mcp::{deferred, direct};
     pub use runic_mcp::*;
-}
-pub mod memory {
-    pub use runic_memory::*;
 }
 pub mod provider {
     pub use runic_provider::*;

@@ -108,9 +108,10 @@ async fn persisted_session_events_never_carry_the_full_bytes() {
         {
             for b in blocks {
                 if let ContentBlock::ToolResult { content, .. } = b {
+                    let text = content.text();
                     assert!(
-                        !content.contains("SECRET"),
-                        "a persisted SessionEvent leaked the full output: {content}"
+                        !text.contains("SECRET"),
+                        "a persisted SessionEvent leaked the full output: {text}"
                     );
                 }
             }
@@ -138,7 +139,10 @@ async fn live_tool_finished_event_carries_the_summary_not_the_full_output() {
     let finished: Vec<String> = drain(&mut rx)
         .into_iter()
         .filter_map(|e| match e {
-            AgentEvent::ToolFinished { result, .. } => Some(result),
+            AgentEvent::ToolFinished { result, .. } => Some(match result {
+                serde_json::Value::String(text) => text,
+                value => value.to_string(),
+            }),
             _ => None,
         })
         .collect();

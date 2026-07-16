@@ -94,19 +94,20 @@ mod tests {
             .execute(json!({ "question": "proceed?", "context": "bg" }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        let d = r.deferred.expect("ask_user defers");
-        assert_eq!(d.kind, "human_ask");
-        assert_eq!(d.payload["question"], "proceed?");
-        assert_eq!(d.payload["context"], "bg");
+        let runic_tool::ToolResult::Deferred { channel, payload } = r else {
+            panic!("ask_user defers, got {r:?}");
+        };
+        assert_eq!(channel, "human_ask");
+        assert_eq!(payload["question"], "proceed?");
+        assert_eq!(payload["context"], "bg");
     }
 
     #[tokio::test]
     async fn ask_user_without_question_errors_in_band() {
         let ctx = ToolContext::new("u", "s", "r");
         let r = AskUserTool.execute(json!({}), &ctx).await.unwrap();
-        assert!(!r.success);
-        assert!(r.deferred.is_none());
+        assert!(r.is_error());
+        assert!(!matches!(r, runic_tool::ToolResult::Deferred { .. }));
     }
 
     #[tokio::test]
@@ -116,18 +117,19 @@ mod tests {
             .execute(json!({ "reason": "need approval", "detail": "d" }), &ctx)
             .await
             .unwrap();
-        assert!(r.success);
-        let d = r.deferred.expect("escalate defers");
-        assert_eq!(d.kind, "human_escalation");
-        assert_eq!(d.payload["reason"], "need approval");
-        assert_eq!(d.payload["detail"], "d");
+        let runic_tool::ToolResult::Deferred { channel, payload } = r else {
+            panic!("escalate defers, got {r:?}");
+        };
+        assert_eq!(channel, "human_escalation");
+        assert_eq!(payload["reason"], "need approval");
+        assert_eq!(payload["detail"], "d");
     }
 
     #[tokio::test]
     async fn escalate_without_reason_errors_in_band() {
         let ctx = ToolContext::new("u", "s", "r");
         let r = EscalateToHumanTool.execute(json!({}), &ctx).await.unwrap();
-        assert!(!r.success);
-        assert!(r.deferred.is_none());
+        assert!(r.is_error());
+        assert!(!matches!(r, runic_tool::ToolResult::Deferred { .. }));
     }
 }

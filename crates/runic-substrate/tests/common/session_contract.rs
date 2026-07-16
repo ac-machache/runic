@@ -422,6 +422,7 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
         tool_name: "search".into(),
         content: "found".into(),
         is_error: false,
+        provenance: Vec::new(),
     }]);
     let media = Message::user_with_blocks(vec![
         ContentBlock::ArtifactRef {
@@ -883,6 +884,7 @@ pub async fn reconstruct_tool_call_and_result_messages(store: &dyn SessionStore)
         tool_name: "lookup".into(),
         content: "42".into(),
         is_error: false,
+        provenance: Vec::new(),
     }]);
     store
         .append_batch(

@@ -70,11 +70,12 @@ impl Tool for McpTool {
     ) -> anyhow::Result<ToolResult> {
         let result = match self.handle.call_tool(&self.def.name, input).await {
             Ok(result) => {
-                let text = content_blocks_to_text(&result.content);
                 if result.is_error.unwrap_or(false) {
-                    ToolResult::error(text)
+                    ToolResult::error(content_blocks_to_text(&result.content))
+                } else if let Some(structured) = result.structured_content {
+                    ToolResult::ok(structured)
                 } else {
-                    ToolResult::ok(text)
+                    ToolResult::ok(content_blocks_to_text(&result.content))
                 }
             }
             // A transport/protocol failure becomes an in-band error result so
@@ -177,6 +178,79 @@ mod tests {
             tool.parameters_schema(),
             serde_json::json!({"type": "object", "x": 42})
         );
+    }
+
+    #[derive(Debug)]
+    struct ScriptedTransport {
+        name: String,
+        result: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl Transport for ScriptedTransport {
+        fn server_name(&self) -> &str {
+            &self.name
+        }
+        async fn request(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value, crate::error::McpError> {
+            Ok(self.result.clone())
+        }
+        async fn notify(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<(), crate::error::McpError> {
+            Ok(())
+        }
+        async fn close(&self) {}
+    }
+
+    fn scripted_tool(result: serde_json::Value) -> McpTool {
+        let handle = McpHandle::from_transport(Arc::new(ScriptedTransport {
+            name: "fs".into(),
+            result,
+        }));
+        McpTool::new(handle, make_def("query"))
+    }
+
+    #[tokio::test]
+    async fn structured_content_lands_as_a_json_value_not_a_string() {
+        let tool = scripted_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": "{\"rows\": 2}" }],
+            "structuredContent": { "rows": 2, "items": ["a", "b"] }
+        }));
+        let ctx = runic_tool::ToolContext::new("u", "s", "r");
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
+        assert_eq!(
+            result.output(),
+            Some(&serde_json::json!({ "rows": 2, "items": ["a", "b"] }))
+        );
+    }
+
+    #[tokio::test]
+    async fn text_only_results_stay_text_and_errors_stay_errors() {
+        let ctx = runic_tool::ToolContext::new("u", "s", "r");
+
+        let text_only = scripted_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": "plain answer" }]
+        }));
+        let result = text_only
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result.output(), Some(&serde_json::json!("plain answer")));
+
+        let errored = scripted_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": "it broke" }],
+            "structuredContent": { "ignored": true },
+            "isError": true
+        }));
+        let result = errored.execute(serde_json::json!({}), &ctx).await.unwrap();
+        assert!(result.is_error());
+        assert_eq!(result.text(), "it broke");
     }
 
     #[test]

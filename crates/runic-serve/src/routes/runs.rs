@@ -1337,8 +1337,9 @@ async fn resolve_answer(
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: ask_id,
             tool_name,
-            content: answer,
+            content: answer.into(),
             is_error: false,
+            provenance: Vec::new(),
         }]),
         at: chrono::Utc::now(),
     };

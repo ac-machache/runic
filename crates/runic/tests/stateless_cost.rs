@@ -3,9 +3,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use runic::ability::{Delegation, Memory, Skills, basics};
+use runic::ability::{Delegation, Skills, basics};
 use runic::composer::Composer;
-use runic_memory::{Target, memory};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::{AgentState, SessionEvent, ThreadStats};
@@ -58,44 +57,26 @@ async fn write_agent(root: &std::path::Path, name: &str) {
 struct Fixture {
     skill_dir: tempfile::TempDir,
     agent_dir: tempfile::TempDir,
-    memory_dir: tempfile::TempDir,
 }
 
 async fn fixture() -> Fixture {
     let skill_dir = tempfile::tempdir().unwrap();
     let agent_dir = tempfile::tempdir().unwrap();
-    let memory_dir = tempfile::tempdir().unwrap();
     for name in ["review", "research", "deploy", "triage", "summarize"] {
         write_skill(skill_dir.path(), name).await;
     }
     for name in ["scout", "coder", "critic"] {
         write_agent(agent_dir.path(), name).await;
     }
-    let cfg = memory(memory_dir.path()).init().scope_per_tenant();
-    let store = cfg.store("bench-tenant").await;
-    for i in 0..20 {
-        store
-            .add(Target::Memory, &format!("durable project fact number {i}"))
-            .await
-            .unwrap();
-        store
-            .add(Target::User, &format!("user preference number {i}"))
-            .await
-            .unwrap();
-    }
     Fixture {
         skill_dir,
         agent_dir,
-        memory_dir,
     }
 }
 
 fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
     Composer::new(Arc::new(NoopProvider), "bench")
         .instructions("you are the bench agent ".repeat(50))
-        .with(Memory(
-            memory(fx.memory_dir.path()).init().scope_per_tenant(),
-        ))
         .with(Skills(skills))
         .with(Delegation(runic_subagent::subagents(fx.agent_dir.path())))
         .with(basics())
@@ -156,20 +137,6 @@ async fn cost_of_pure_stateless_rebuild() {
         },
     )
     .await;
-
-    let prebuilt_store = memory(fx.memory_dir.path())
-        .init()
-        .scope_per_tenant()
-        .store("bench-tenant")
-        .await;
-    timed("C. memory snapshot read alone (per request)", 200, || {
-        let store = prebuilt_store.clone();
-        async move {
-            let snap = store.snapshot().await.unwrap();
-            std::hint::black_box(snap);
-        }
-    })
-    .await;
 }
 
 fn fat_message(i: usize) -> SessionEvent {
@@ -178,8 +145,9 @@ fn fat_message(i: usize) -> SessionEvent {
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: format!("t{i}"),
             tool_name: "web_fetch".into(),
-            content: format!("tool output {i} {}", "payload ".repeat(256)),
+            content: format!("tool output {i} {}", "payload ".repeat(256)).into(),
             is_error: false,
+            provenance: Vec::new(),
         }]),
         at: Utc::now(),
     }

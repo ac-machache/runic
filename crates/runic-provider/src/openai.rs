@@ -534,16 +534,15 @@ impl Provider for OpenAIDriver {
                             ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
+                                is_error,
                                 ..
                             } => {
                                 has_tool_results = true;
                                 oai_messages.push(OaiMessage {
                                     role: "tool".to_string(),
-                                    content: Some(OaiMessageContent::Text(if content.is_empty() {
-                                        "(empty)".to_string()
-                                    } else {
-                                        content.clone()
-                                    })),
+                                    content: Some(OaiMessageContent::Text(tool_result_text(
+                                        content, *is_error,
+                                    ))),
                                     tool_calls: None,
                                     tool_call_id: Some(tool_use_id.clone()),
                                     reasoning_content: None,
@@ -1002,16 +1001,15 @@ impl Provider for OpenAIDriver {
                         if let ContentBlock::ToolResult {
                             tool_use_id,
                             content,
+                            is_error,
                             ..
                         } = block
                         {
                             oai_messages.push(OaiMessage {
                                 role: "tool".to_string(),
-                                content: Some(OaiMessageContent::Text(if content.is_empty() {
-                                    "(empty)".to_string()
-                                } else {
-                                    content.clone()
-                                })),
+                                content: Some(OaiMessageContent::Text(tool_result_text(
+                                    content, *is_error,
+                                ))),
                                 tool_calls: None,
                                 tool_call_id: Some(tool_use_id.clone()),
                                 reasoning_content: None,
@@ -1669,6 +1667,20 @@ fn extract_max_tokens_limit(body: &str) -> Option<u32> {
     None
 }
 
+fn tool_result_text(content: &runic_types::ToolResultPayload, is_error: bool) -> String {
+    let text = content.text();
+    let text = if text.is_empty() {
+        "(empty)".to_string()
+    } else {
+        text
+    };
+    if is_error {
+        format!("Error: {text}")
+    } else {
+        text
+    }
+}
+
 ///
 /// Some models (e.g. Llama 3.3) generate tool calls as XML: `<function=NAME ARGS></function>`
 /// instead of the proper JSON format. Groq rejects these with `tool_use_failed` but includes
@@ -2317,5 +2329,48 @@ mod tests {
             Some("I considered options A, B, and Câ€¦"),
             "issue #1098 regression: reasoning was stripped on resubmission"
         );
+    }
+
+    #[test]
+    fn every_json_output_category_stringifies_into_the_tool_message_text() {
+        use runic_types::ToolResultPayload;
+        for (payload, expected) in [
+            (
+                ToolResultPayload::inline(serde_json::json!({"a": 1})),
+                r#"{"a":1}"#,
+            ),
+            (
+                ToolResultPayload::inline(serde_json::json!([1, null])),
+                "[1,null]",
+            ),
+            (ToolResultPayload::inline("text"), "text"),
+            (ToolResultPayload::inline(serde_json::json!(7)), "7"),
+            (ToolResultPayload::inline(serde_json::json!(true)), "true"),
+            (ToolResultPayload::inline(serde_json::json!(null)), "null"),
+            (ToolResultPayload::inline(""), "(empty)"),
+        ] {
+            assert_eq!(
+                tool_result_text(&payload, false),
+                expected,
+                "payload: {payload:?}"
+            );
+        }
+
+        assert_eq!(
+            tool_result_text(&runic_types::ToolResultPayload::inline("boom"), true),
+            "Error: boom"
+        );
+
+        let artifact = tool_result_text(
+            &runic_types::ToolResultPayload::Artifact {
+                id: "art-3".into(),
+                preview: "head".into(),
+                mime: "text/plain".into(),
+                size: 4,
+            },
+            false,
+        );
+        assert!(artifact.starts_with("head"));
+        assert!(artifact.contains("art-3"));
     }
 }

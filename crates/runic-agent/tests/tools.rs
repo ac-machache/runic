@@ -266,7 +266,7 @@ fn error_result_matching(agent: &Agent, pred: impl Fn(&str) -> bool) -> bool {
         .any(|m| match &m.content {
             MessageContent::Blocks(b) => b.iter().any(|blk| {
                 matches!(blk, ContentBlock::ToolResult { content, is_error, .. }
-                    if *is_error && pred(content))
+                    if *is_error && pred(&content.text()))
             }),
             _ => false,
         })

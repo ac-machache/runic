@@ -122,8 +122,8 @@ async fn a_macro_tool_executes_with_typed_args() {
         .execute(serde_json::json!({ "a": 19, "b": 23 }), &ctx)
         .await
         .unwrap();
-    assert!(result.success);
-    assert_eq!(result.output, "42");
+    assert!(!result.is_error());
+    assert_eq!(result.text(), "42");
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn a_macro_tool_receives_the_context() {
         .execute(serde_json::json!({ "greeting": "hey" }), &ctx)
         .await
         .unwrap();
-    assert_eq!(result.output, "hey alice");
+    assert_eq!(result.text(), "hey alice");
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn a_no_args_macro_tool_ignores_input() {
         .execute(serde_json::json!({ "junk": true }), &ctx)
         .await
         .unwrap();
-    assert_eq!(result.output, "pong");
+    assert_eq!(result.text(), "pong");
 }
 
 #[tokio::test]
@@ -153,10 +153,10 @@ async fn invalid_arguments_come_back_as_an_in_band_tool_error() {
         .execute(serde_json::json!({ "a": "not a number" }), &ctx)
         .await
         .unwrap();
-    assert!(!result.success);
+    assert!(result.is_error());
     assert!(
         result
-            .output
+            .text()
             .contains("invalid arguments for `add_numbers`")
     );
 }
@@ -181,7 +181,7 @@ async fn a_macro_tool_runs_end_to_end_through_the_composer() {
         matches!(event, runic_state::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, runic_types::MessageContent::Blocks(blocks)
                 if blocks.iter().any(|block| matches!(block,
-                    ContentBlock::ToolResult { content, .. } if content == "5"))))
+                    ContentBlock::ToolResult { content, .. } if content.text() == "5"))))
     });
     assert!(executed, "macro tool result must land in the log");
 }

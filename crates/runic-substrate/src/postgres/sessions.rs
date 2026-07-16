@@ -406,6 +406,18 @@ impl SessionStore for PostgresSessionStore {
         parent_session: &str,
         agent: &str,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let parent: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM sessions WHERE tenant = $1 AND session_id = $2 FOR SHARE",
+        )
+        .bind(tenant)
+        .bind(parent_session)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        if parent.is_none() {
+            return Err(Error::NotFound(format!("parent session {parent_session}")));
+        }
         sqlx::query(
             "INSERT INTO sessions (tenant, session_id, parent_session, agent)
              VALUES ($1, $2, $3, $4)
@@ -417,9 +429,10 @@ impl SessionStore for PostgresSessionStore {
         .bind(session_id)
         .bind(parent_session)
         .bind(agent)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db)?;
+        tx.commit().await.map_err(db)?;
         Ok(())
     }
 
@@ -506,6 +519,16 @@ impl SessionStore for PostgresSessionStore {
         agent: &str,
         input: &crate::RunInput,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        sqlx::query(
+            "INSERT INTO sessions (tenant, session_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
         sqlx::query(
             "INSERT INTO runs (run_id, tenant, session_id, agent, status, input, context)
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -517,9 +540,10 @@ impl SessionStore for PostgresSessionStore {
         .bind(if input.queued { "queued" } else { "pending" })
         .bind(&input.input)
         .bind(&input.context)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(db)?;
+        tx.commit().await.map_err(db)?;
         Ok(())
     }
 

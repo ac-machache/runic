@@ -29,6 +29,9 @@ pub enum ServeError {
     #[error("no run in flight on thread {thread_id:?}")]
     NoRunInFlight { thread_id: String },
 
+    #[error("a run is active on thread {thread_id:?}; cancel it before deleting")]
+    ThreadBusy { thread_id: String },
+
     #[error("agent {name:?} not found")]
     AgentNotFound { name: String },
 
@@ -73,7 +76,9 @@ impl IntoResponse for ServeError {
             | Self::RunNotFound { .. }
             | Self::AgentNotFound { .. }
             | Self::ArtifactNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
-            Self::NoRunInFlight { .. } => (StatusCode::CONFLICT, "conflict"),
+            Self::NoRunInFlight { .. } | Self::ThreadBusy { .. } => {
+                (StatusCode::CONFLICT, "conflict")
+            }
             Self::PersistenceDegraded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "degraded"),
             Self::TooBusy { .. } => (StatusCode::TOO_MANY_REQUESTS, "too_busy"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
@@ -99,6 +104,7 @@ impl IntoResponse for ServeError {
             | Self::AgentNotFound { .. }
             | Self::ArtifactNotFound { .. }
             | Self::NoRunInFlight { .. }
+            | Self::ThreadBusy { .. }
             | Self::BadRequest(_) => {}
         }
 

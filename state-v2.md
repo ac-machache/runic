@@ -370,12 +370,22 @@ test; its `complete`/`stream` message conversion was deduplicated into one
 `build_messages` (the stream path had drifted and silently dropped user
 image/file parts).
 
-Known-open (accepted): a late append to a deleted PARENT thread still
-recreates it via the upsert path — parents are driven by live request
-handlers, not detached writers, so the window is the pre-existing
-delete-during-active-run case, out of Phase 3 scope. Orphaned child rows
-from a `begin()` racing a tree delete are invisible (never in root lists)
-and harmless; a future maintenance sweep can reap them.
+Round 2 (both former known-opens closed): `DELETE /threads/{id}` is now
+fenced by the thread lease — it claims with a distinct `delete:{instance}`
+owner (the lease is owner-reentrant, so reusing the instance id would not
+fence same-instance runs), returns 409 while a run holds the lease, and
+releases on failure; a run admitted while the delete holds the lease aborts
+at `claim_run` on its deleted run row (`Claim::Lost`), so it never writes.
+`create_run` materializes the sessions row in the same transaction (memory
+mirrors), so the parent row provably exists before any delegation can
+begin; `create_child_session` then fails `NotFound` under a missing parent
+(Postgres `FOR SHARE` same-tx check, memory atomic) — orphan child rows
+can no longer be created. Residual orphans (from any historical or exotic
+path) are reaped by `SessionStore::delete_orphan_children` — a fixpoint
+sweep (reaping an orphan may orphan its children) returning the ids so
+serve can delete their artifacts — which serve runs best-effort after
+every tree delete. Contract tests on both backends + a serve 409/204
+fence test.
 
 ---
 

@@ -331,6 +331,9 @@ impl SessionStore for MemorySessionStore {
     ) -> Result<()> {
         let now = Utc::now();
         let mut sessions = self.sessions.write().await;
+        if !sessions.contains_key(&(tenant.to_string(), parent_session.to_string())) {
+            return Err(Error::NotFound(format!("parent session {parent_session}")));
+        }
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
             .or_insert_with(|| SessionRec::new(now));
@@ -374,6 +377,11 @@ impl SessionStore for MemorySessionStore {
         input: &crate::RunInput,
     ) -> Result<()> {
         let now = Utc::now();
+        self.sessions
+            .write()
+            .await
+            .entry((tenant.to_string(), session_id.to_string()))
+            .or_insert_with(|| SessionRec::new(now));
         self.runs.write().await.insert(
             run_id.to_string(),
             crate::RunRecord {

@@ -591,14 +591,42 @@ pub async fn thread_state(
         ("thread_id" = String, Path, description = "Thread id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
-    responses((status = 204, description = "Thread, artifacts, and warm agent dropped"))
+    responses(
+        (status = 204, description = "Thread, artifacts, and warm agent dropped"),
+        (status = 409, description = "A run is active on this thread; cancel it first", body = ErrorBody)
+    )
 )]
 pub async fn delete_thread(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
-    let mut pending = vec![thread_id.clone()];
+    let delete_owner = format!("delete:{}", state.runs.instance_id());
+    let lease = crate::registry::as_chrono(state.runs.limits().run_lease);
+    match state
+        .session_store
+        .claim_thread(&tenant, &thread_id, &delete_owner, lease)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return Err(ServeError::ThreadBusy { thread_id }),
+        Err(runic_substrate::Error::Unsupported(_)) => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    let deleted = delete_tree(&state, &tenant, &thread_id).await;
+    if deleted.is_err() {
+        let _ = state
+            .session_store
+            .release_thread(&tenant, &thread_id, &delete_owner)
+            .await;
+    }
+    deleted?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_tree(state: &AppState, tenant: &str, thread_id: &str) -> Result<(), ServeError> {
+    let mut pending = vec![thread_id.to_string()];
     let mut order = Vec::new();
     while let Some(session) = pending.pop() {
         let mut cursor = None;
@@ -606,7 +634,7 @@ pub async fn delete_thread(
             let page = state
                 .session_store
                 .list_sessions_page(
-                    &tenant,
+                    tenant,
                     cursor,
                     500,
                     runic_substrate::SessionScope::ChildrenOf(session.clone()),
@@ -622,13 +650,32 @@ pub async fn delete_thread(
     let descendant_count = order.len() - 1;
     let mut artifact_count = 0usize;
     for session in order.iter().rev() {
-        state.runs.forget_thread(&tenant, session).await;
+        state.runs.forget_thread(tenant, session).await;
         artifact_count += state
             .artifact_store
-            .delete_session_artifacts(&tenant, session)
+            .delete_session_artifacts(tenant, session)
             .await?;
-        state.session_store.delete_session(&tenant, session).await?;
+        state.session_store.delete_session(tenant, session).await?;
     }
+
+    match state.session_store.delete_orphan_children(tenant).await {
+        Ok(reaped) => {
+            for orphan in &reaped {
+                if let Err(e) = state
+                    .artifact_store
+                    .delete_session_artifacts(tenant, orphan)
+                    .await
+                {
+                    tracing::warn!(%tenant, %orphan, error = %e, "orphan artifact cleanup failed");
+                }
+            }
+            if !reaped.is_empty() {
+                tracing::info!(%tenant, count = reaped.len(), "orphaned child sessions reaped");
+            }
+        }
+        Err(e) => tracing::warn!(%tenant, error = %e, "orphan sweep failed"),
+    }
+
     tracing::info!(%tenant, %thread_id, artifact_count, descendant_count, "thread deleted");
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }

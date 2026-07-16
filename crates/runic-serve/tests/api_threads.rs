@@ -552,3 +552,49 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
         );
     }
 }
+
+#[tokio::test]
+async fn delete_is_refused_while_a_run_holds_the_thread_lease() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+    create_thread(&app, TENANT, "busy").await;
+
+    assert!(
+        store
+            .claim_thread(
+                TENANT,
+                "busy",
+                "other-instance",
+                chrono::Duration::seconds(30)
+            )
+            .await
+            .unwrap()
+    );
+
+    let delete_req = || {
+        Request::builder()
+            .method("DELETE")
+            .uri("/threads/busy")
+            .header("x-runic-tenant", TENANT)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let resp = app.clone().oneshot(delete_req()).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "delete must be refused while a run holds the thread lease"
+    );
+    assert!(
+        store.session_meta(TENANT, "busy").await.unwrap().is_some(),
+        "the refused delete must not touch the thread"
+    );
+
+    store
+        .release_thread(TENANT, "busy", "other-instance")
+        .await
+        .unwrap();
+    let resp = app.clone().oneshot(delete_req()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(store.session_meta(TENANT, "busy").await.unwrap().is_none());
+}

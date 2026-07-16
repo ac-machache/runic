@@ -323,6 +323,8 @@ pub trait SessionStore: Send + Sync {
     }
 
     /// Materialize a child session owned by `parent_session`, run by `agent`.
+    /// Fails with [`Error::NotFound`] when the parent row doesn't exist, so a
+    /// child can never be created under a deleted (or never-created) parent.
     async fn create_child_session(
         &self,
         _tenant: &str,
@@ -331,6 +333,34 @@ pub trait SessionStore: Send + Sync {
         _agent: &str,
     ) -> Result<()> {
         Err(Error::Unsupported("child sessions".to_string()))
+    }
+
+    /// Delete child sessions whose parent row no longer exists, repeating
+    /// until none remain (reaping an orphan may orphan its own children).
+    /// Returns the deleted ids so callers can clean up their artifacts.
+    async fn delete_orphan_children(&self, tenant: &str) -> Result<Vec<String>> {
+        let mut reaped = Vec::new();
+        loop {
+            let all = self.list_sessions(tenant).await?;
+            let ids: std::collections::HashSet<&str> =
+                all.iter().map(|m| m.session_id.as_str()).collect();
+            let orphans: Vec<String> = all
+                .iter()
+                .filter(|m| {
+                    m.parent_session
+                        .as_deref()
+                        .is_some_and(|p| !ids.contains(p))
+                })
+                .map(|m| m.session_id.clone())
+                .collect();
+            if orphans.is_empty() {
+                return Ok(reaped);
+            }
+            for orphan in orphans {
+                self.delete_session(tenant, &orphan).await?;
+                reaped.push(orphan);
+            }
+        }
     }
 
     /// Read one session's metadata without scanning the event log.

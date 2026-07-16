@@ -59,6 +59,10 @@ fn run_start(run: &str) -> SessionEvent {
 #[tokio::test]
 async fn a_begun_child_persists_its_events_and_flushes_clean() {
     let store = Arc::new(MemorySessionStore::new());
+    store
+        .append("alice", "parent-1", &run_start("r0"))
+        .await
+        .unwrap();
     let handle = child_persistence(store.clone(), "alice", "parent-1");
 
     let sink = handle.0.begin("scout").await.unwrap();
@@ -233,6 +237,10 @@ async fn flush_timeout_stops_the_writer() {
 #[tokio::test]
 async fn a_crashed_child_stays_visibly_in_flight() {
     let store = Arc::new(MemorySessionStore::new());
+    store
+        .append("alice", "parent-1", &run_start("r0"))
+        .await
+        .unwrap();
     let handle = child_persistence(store.clone(), "alice", "parent-1");
 
     let sink = handle.0.begin("scout").await.unwrap();
@@ -268,6 +276,10 @@ async fn a_crashed_child_stays_visibly_in_flight() {
 #[tokio::test]
 async fn a_deleted_child_is_never_resurrected_by_late_appends() {
     let store = Arc::new(MemorySessionStore::new());
+    store
+        .append("alice", "parent-1", &run_start("r0"))
+        .await
+        .unwrap();
     let handle = child_persistence(store.clone(), "alice", "parent-1");
 
     let sink = handle.0.begin("scout").await.unwrap();

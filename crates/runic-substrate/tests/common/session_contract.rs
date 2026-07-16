@@ -100,6 +100,45 @@ async fn paginate(
 
 // ── core event log ──────────────────────────────────────────────────────────
 
+pub async fn orphaned_children_are_rejected_and_reapable(store: &dyn SessionStore) {
+    let (t, root) = tenant_session();
+    let err = store
+        .create_child_session(&t, "chd-x", &format!("{root}-missing"), "scout")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, runic_substrate::Error::NotFound(_)),
+        "a child cannot be created under a nonexistent parent"
+    );
+
+    store.append(&t, &root, &run_start("r1", 0)).await.unwrap();
+    store
+        .create_child_session(&t, "chd-a", &root, "scout")
+        .await
+        .unwrap();
+    store
+        .create_child_session(&t, "chd-b", "chd-a", "scribe")
+        .await
+        .unwrap();
+    store
+        .create_child_session(&t, "chd-c", "chd-b", "clerk")
+        .await
+        .unwrap();
+
+    assert!(store.delete_orphan_children(&t).await.unwrap().is_empty());
+
+    store.delete_session(&t, "chd-a").await.unwrap();
+    let mut reaped = store.delete_orphan_children(&t).await.unwrap();
+    reaped.sort();
+    assert_eq!(
+        reaped,
+        vec!["chd-b".to_string(), "chd-c".to_string()],
+        "the sweep reaps transitively orphaned descendants to a fixpoint"
+    );
+    assert!(store.session_meta(&t, "chd-c").await.unwrap().is_none());
+    assert!(store.session_meta(&t, &root).await.unwrap().is_some());
+}
+
 pub async fn strict_appends_never_resurrect_a_deleted_session(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     let err = store

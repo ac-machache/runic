@@ -168,11 +168,19 @@ async fn default_list_sessions_page_keyset_filters() {
         .await
         .unwrap();
     }
-    let first = s.list_sessions_page("t", None, 2).await.unwrap();
+    let first = s
+        .list_sessions_page("t", None, 2, runic_substrate::SessionScope::All)
+        .await
+        .unwrap();
     assert_eq!(first.len(), 2);
     let last = first.last().unwrap();
     let next = s
-        .list_sessions_page("t", Some((last.last_activity, last.session_id.clone())), 2)
+        .list_sessions_page(
+            "t",
+            Some((last.last_activity, last.session_id.clone())),
+            2,
+            runic_substrate::SessionScope::All,
+        )
         .await
         .unwrap();
     // the cursor advances — the next page starts strictly after the previous

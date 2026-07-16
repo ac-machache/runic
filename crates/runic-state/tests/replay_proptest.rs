@@ -127,32 +127,51 @@ fn event() -> impl Strategy<Value = SessionEvent> {
                     at,
                 }
             }),
-        (run_id(), 1..20u32, "[a-z]{1,6}").prop_map(move |(run_id, turn, call_id)| {
-            SessionEvent::DelegationStarted {
-                run_id,
-                turn,
-                call_id,
-                agent: "scout".into(),
-                mode: DelegationMode::Sync,
-                child_session: None,
-                at,
-            }
-        }),
-        (run_id(), 1..20u32, "[a-z]{1,6}", usage(), 0..60_000u64).prop_map(
-            move |(run_id, turn, call_id, usage, duration_ms)| {
-                SessionEvent::DelegationFinished {
+        (
+            run_id(),
+            1..20u32,
+            "[a-z]{1,6}",
+            prop::option::of("[a-z0-9]{1,8}".prop_map(|s| format!("chd-{s}")))
+        )
+            .prop_map(move |(run_id, turn, call_id, child_session)| {
+                SessionEvent::DelegationStarted {
                     run_id,
                     turn,
                     call_id,
                     agent: "scout".into(),
-                    status: DelegationStatus::Ok,
-                    usage,
-                    model: None,
-                    duration_ms,
+                    mode: DelegationMode::Sync,
+                    child_session,
                     at,
                 }
-            }
-        ),
+            }),
+        (
+            run_id(),
+            1..20u32,
+            "[a-z]{1,6}",
+            usage(),
+            0..60_000u64,
+            prop::option::of(prop_oneof![
+                Just(runic_state::ChildPersistenceStatus::Flushed),
+                "[a-z ]{1,12}".prop_map(runic_state::ChildPersistenceStatus::FlushFailed),
+            ])
+        )
+            .prop_map(
+                move |(run_id, turn, call_id, usage, duration_ms, child_persistence)| {
+                    SessionEvent::DelegationFinished {
+                        run_id,
+                        turn,
+                        call_id,
+                        agent: "scout".into(),
+                        status: DelegationStatus::Ok,
+                        usage,
+                        model: None,
+                        duration_ms,
+                        child_session: child_persistence.is_some().then(|| "chd-prop".to_string()),
+                        child_persistence,
+                        at,
+                    }
+                }
+            ),
         (run_id(), prop::collection::vec(message(), 0..4)).prop_map(move |(run_id, messages)| {
             SessionEvent::StateSnapshot {
                 run_id,

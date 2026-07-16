@@ -100,6 +100,34 @@ async fn paginate(
 
 // ── core event log ──────────────────────────────────────────────────────────
 
+pub async fn strict_appends_never_resurrect_a_deleted_session(store: &dyn SessionStore) {
+    let (t, s) = tenant_session();
+    let err = store
+        .append_batch_strict(&t, &s, &[run_start("r1", 0)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, runic_substrate::Error::NotFound(_)));
+    assert!(store.session_meta(&t, &s).await.unwrap().is_none());
+
+    store.append(&t, &s, &run_start("r1", 0)).await.unwrap();
+    store
+        .append_batch_strict(&t, &s, &[run_end("r1", Some("end_turn"), 1)])
+        .await
+        .unwrap();
+    assert_eq!(store.read(&t, &s).await.unwrap().len(), 2);
+
+    store.delete_session(&t, &s).await.unwrap();
+    let err = store
+        .append_batch_strict(&t, &s, &[run_start("r2", 2)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, runic_substrate::Error::NotFound(_)));
+    assert!(
+        store.session_meta(&t, &s).await.unwrap().is_none(),
+        "a strict append must not resurrect the deleted session"
+    );
+}
+
 pub async fn summary_columns_track_runs_and_tokens(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store.append(&t, &s, &run_start("r1", 0)).await.unwrap();
@@ -645,7 +673,7 @@ pub async fn list_sessions_page_covers_every_session_once(store: &dyn SessionSto
     let mut cursor: Option<(DateTime<Utc>, String)> = None;
     loop {
         let page = store
-            .list_sessions_page(&t, cursor.clone(), 5)
+            .list_sessions_page(&t, cursor.clone(), 5, runic_substrate::SessionScope::All)
             .await
             .unwrap();
         if page.is_empty() {
@@ -1988,5 +2016,66 @@ pub async fn search_empty_when_no_match(store: &dyn SessionStore) {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+pub async fn child_sessions_carry_hierarchy_and_scope_listings(store: &dyn SessionStore) {
+    let (t, parent) = tenant_session();
+    store
+        .append(&t, &parent, &run_start("r1", 0))
+        .await
+        .unwrap();
+
+    let mut children = Vec::new();
+    for i in 0..3 {
+        let child = format!("chd-{}", uuid::Uuid::new_v4().simple());
+        store
+            .create_child_session(&t, &child, &parent, "scout")
+            .await
+            .unwrap();
+        store
+            .append(&t, &child, &run_start("rc", 10 + i))
+            .await
+            .unwrap();
+        children.push(child);
+    }
+
+    let meta = store.session_meta(&t, &children[0]).await.unwrap().unwrap();
+    assert_eq!(meta.agent.as_deref(), Some("scout"));
+    assert_eq!(meta.parent_session.as_deref(), Some(parent.as_str()));
+
+    let roots = store
+        .list_sessions_page(&t, None, 50, runic_substrate::SessionScope::Roots)
+        .await
+        .unwrap();
+    assert!(roots.iter().any(|m| m.session_id == parent));
+    assert!(
+        roots.iter().all(|m| !children.contains(&m.session_id)),
+        "root listing must exclude children: {roots:?}"
+    );
+
+    let mut listed = std::collections::HashSet::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .list_sessions_page(
+                &t,
+                cursor.clone(),
+                2,
+                runic_substrate::SessionScope::ChildrenOf(parent.clone()),
+            )
+            .await
+            .unwrap();
+        let Some(last) = page.last() else { break };
+        cursor = Some((last.last_activity, last.session_id.clone()));
+        for m in page {
+            assert_eq!(m.parent_session.as_deref(), Some(parent.as_str()));
+            listed.insert(m.session_id);
+        }
+    }
+    assert_eq!(
+        listed,
+        children.iter().cloned().collect(),
+        "children-of paging covers every child exactly once without underfilling"
     );
 }

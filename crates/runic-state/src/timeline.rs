@@ -278,6 +278,7 @@ pub fn project<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) -> Vec<Ru
                 usage,
                 model,
                 duration_ms,
+                child_session,
                 ..
             } => {
                 let run = run_at(&mut runs, &mut index, run_id);
@@ -293,6 +294,9 @@ pub fn project<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) -> Vec<Ru
                             existing.usage = *usage;
                             existing.model = model.clone();
                             existing.duration_ms = Some(*duration_ms);
+                            if existing.child_session.is_none() {
+                                existing.child_session = child_session.clone();
+                            }
                         }
                     }
                     None => trace.delegations.push(DelegationTrace {
@@ -303,7 +307,7 @@ pub fn project<'a>(events: impl IntoIterator<Item = &'a SessionEvent>) -> Vec<Ru
                         usage: *usage,
                         model: model.clone(),
                         duration_ms: Some(*duration_ms),
-                        child_session: None,
+                        child_session: child_session.clone(),
                     }),
                 }
             }

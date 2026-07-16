@@ -24,6 +24,7 @@ use crate::wire::WireEvent;
         agents::agent_overview,
         threads::create_thread,
         threads::list_threads,
+        threads::list_thread_children,
         threads::get_thread,
         threads::update_thread,
         threads::delete_thread,

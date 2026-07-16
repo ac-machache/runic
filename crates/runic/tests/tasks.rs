@@ -173,6 +173,68 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
 }
 
 #[tokio::test]
+async fn background_delegation_emits_a_navigable_edge() {
+    let provider = ScriptedProvider::new(vec![
+        delegate_background_response("t1"),
+        text_response("spawned, moving on"),
+        text_response("done"),
+    ]);
+    let delegate = DelegateTool::new(scout_roster(), Arc::new(StubBuilder));
+    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+        .system_prompt("sys")
+        .tool(Arc::new(delegate))
+        .build();
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    agent.state_mut().set_events_tx(tx);
+
+    agent
+        .run_message(Message::user("go research"))
+        .await
+        .unwrap();
+    wait_for_finish(&mut rx).await;
+
+    agent.run_message(Message::user("and now?")).await.unwrap();
+
+    let events = agent.state().events();
+    let started = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::DelegationStarted {
+                agent,
+                mode,
+                call_id,
+                turn,
+                ..
+            } => Some((agent.clone(), *mode, call_id.clone(), *turn)),
+            _ => None,
+        })
+        .expect("background delegation start edge");
+    assert_eq!(started.0, "scout");
+    assert_eq!(started.1, runic_state::DelegationMode::Background);
+    assert_eq!(started.2, "t1");
+    assert_eq!(started.3, 1);
+
+    let finished = events
+        .iter()
+        .find_map(|e| match e {
+            SessionEvent::DelegationFinished {
+                agent,
+                status,
+                call_id,
+                ..
+            } => Some((agent.clone(), status.clone(), call_id.clone())),
+            _ => None,
+        })
+        .expect("background delegation finish edge");
+    assert_eq!(finished.0, "scout");
+    assert_eq!(finished.1, runic_state::DelegationStatus::Ok);
+    assert_eq!(finished.2, "t1");
+
+    let stats: &ThreadStats = agent.state().stats();
+    assert_eq!(stats.delegations, 1);
+}
+
+#[tokio::test]
 async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     let rebuilt_view = {
         let provider = ScriptedProvider::new(vec![

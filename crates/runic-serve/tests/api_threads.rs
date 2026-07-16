@@ -458,3 +458,97 @@ async fn events_for_wrong_tenant_is_404_not_foreign_events() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn children_are_listed_separately_and_deleted_with_the_parent() {
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let app = scripted_router_with_store(store.clone());
+
+    create_thread(&app, TENANT, "parent-1").await;
+    for (child, grandchild) in [("chd-a", None), ("chd-b", Some("chd-b-1"))] {
+        store
+            .create_child_session(TENANT, child, "parent-1", "scout")
+            .await
+            .unwrap();
+        store
+            .append(
+                TENANT,
+                child,
+                &runic_state::SessionEvent::RunStart {
+                    run_id: format!("r-{child}"),
+                    agent: Some("scout".into()),
+                    audit: None,
+                    at: chrono::Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        if let Some(grandchild) = grandchild {
+            store
+                .create_child_session(TENANT, grandchild, child, "scribe")
+                .await
+                .unwrap();
+        }
+    }
+
+    let resp = app.clone().oneshot(get("/threads", TENANT)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_json(resp).await;
+    let ids: Vec<&str> = listed["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["thread_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"parent-1"));
+    assert!(
+        !ids.iter().any(|id| id.starts_with("chd-")),
+        "thread list must exclude child sessions: {ids:?}"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(get("/threads/parent-1/children", TENANT))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let children = body_json(resp).await;
+    let rows = children["threads"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in rows {
+        assert_eq!(row["parent_thread"], "parent-1");
+        assert_eq!(row["agent"], "scout");
+    }
+
+    let resp = app
+        .clone()
+        .oneshot(get("/threads/parent-1/children", "mallory"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-tenant child listing must be rejected"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/threads/parent-1")
+                .header("x-runic-tenant", TENANT)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    for session in ["parent-1", "chd-a", "chd-b", "chd-b-1"] {
+        assert!(
+            store.session_meta(TENANT, session).await.unwrap().is_none(),
+            "{session} must be gone after recursive delete"
+        );
+    }
+}

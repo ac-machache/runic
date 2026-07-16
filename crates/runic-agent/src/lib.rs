@@ -163,6 +163,10 @@ pub struct RunContext {
     /// Invocation mode recorded on the run trace span (`stream` / `wait` /
     /// `background` / `queued`); defaults to `direct`.
     pub mode: Option<&'static str>,
+    /// Optional child-transcript persistence for this run's delegations. When
+    /// set, the delegate tool begins a durable child session per delegation;
+    /// absent → children stay ephemeral.
+    pub child_persistence: Option<runic_state::ChildPersistenceHandle>,
 }
 
 impl RunContext {
@@ -207,6 +211,11 @@ impl RunContext {
     }
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    pub fn with_child_persistence(mut self, handle: runic_state::ChildPersistenceHandle) -> Self {
+        self.child_persistence = Some(handle);
         self
     }
 
@@ -332,6 +341,7 @@ pub struct Agent {
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
     pub(crate) spill: Option<Arc<dyn ToolOutputSpill>>,
+    pub(crate) child_persistence: Option<runic_state::ChildPersistenceHandle>,
     pub(crate) transient_tool_outputs: HashMap<String, Vec<serde_json::Value>>,
     pub(crate) pending_deferral: Option<PendingDeferral>,
     pub(crate) pending_external_tx: mpsc::UnboundedSender<runic_state::SessionEvent>,
@@ -568,6 +578,7 @@ impl AgentBuilder {
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
             spill: self.spill,
+            child_persistence: None,
             transient_tool_outputs: HashMap::new(),
             pending_deferral: None,
             pending_external_tx: pending_tx,

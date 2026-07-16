@@ -122,6 +122,13 @@ async fn execute_queued_run(
         .with_agent(&record.agent)
         .with_run_id(&run_id)
         .with_mode("queued");
+    if !factory.stateless() {
+        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
+            store.clone(),
+            &tenant,
+            &thread_id,
+        ));
+    }
 
     let heartbeat = spawn_heartbeat(
         store.clone(),

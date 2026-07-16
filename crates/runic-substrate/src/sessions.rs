@@ -126,6 +126,10 @@ pub struct SessionMeta {
     pub event_count: u64,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
     #[serde(default)]
     pub run_count: u64,
     #[serde(default)]
@@ -176,6 +180,26 @@ pub(crate) fn summary_delta(event: &SessionEvent) -> SummaryDelta {
     }
 }
 
+/// Which sessions a listing covers: top-level threads (the default), the
+/// children of one parent, or everything.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SessionScope {
+    #[default]
+    Roots,
+    ChildrenOf(String),
+    All,
+}
+
+impl SessionScope {
+    pub fn matches(&self, meta: &SessionMeta) -> bool {
+        match self {
+            SessionScope::Roots => meta.parent_session.is_none(),
+            SessionScope::ChildrenOf(parent) => meta.parent_session.as_deref() == Some(parent),
+            SessionScope::All => true,
+        }
+    }
+}
+
 /// A textual-search hit from [`SessionStore::search`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatHit {
@@ -202,6 +226,23 @@ pub trait SessionStore: Send + Sync {
         session_id: &str,
         events: &[SessionEvent],
     ) -> Result<()>;
+
+    /// Like [`append_batch`](Self::append_batch), but fails with
+    /// [`Error::NotFound`] instead of materializing the session row. Detached
+    /// writers (child transcript persisters) use this so a late batch can
+    /// never resurrect a deleted session. Default is check-then-append;
+    /// override to close the race atomically.
+    async fn append_batch_strict(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        if self.session_meta(tenant, session_id).await?.is_none() {
+            return Err(Error::NotFound(format!("session {session_id}")));
+        }
+        self.append_batch(tenant, session_id, events).await
+    }
 
     /// Read every event for a session, in `seq` order.
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>>;
@@ -260,23 +301,36 @@ pub trait SessionStore: Send + Sync {
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>>;
 
     /// A page of `list_sessions` after the `(last_activity, session_id)` keyset
-    /// cursor. Default filters `list_sessions`; override to push the keyset +
-    /// LIMIT into the store.
+    /// cursor, restricted to `scope`. Default filters `list_sessions`; override
+    /// to push the keyset + scope + LIMIT into the store.
     async fn list_sessions_page(
         &self,
         tenant: &str,
         after: Option<(DateTime<Utc>, String)>,
         limit: usize,
+        scope: SessionScope,
     ) -> Result<Vec<SessionMeta>> {
         let all = self.list_sessions(tenant).await?;
         Ok(all
             .into_iter()
+            .filter(|m| scope.matches(m))
             .filter(|m| match &after {
                 Some((at, id)) => (m.last_activity, m.session_id.as_str()) < (*at, id.as_str()),
                 None => true,
             })
             .take(limit)
             .collect())
+    }
+
+    /// Materialize a child session owned by `parent_session`, run by `agent`.
+    async fn create_child_session(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _parent_session: &str,
+        _agent: &str,
+    ) -> Result<()> {
+        Err(Error::Unsupported("child sessions".to_string()))
     }
 
     /// Read one session's metadata without scanning the event log.

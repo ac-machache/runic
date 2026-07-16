@@ -104,6 +104,40 @@ struct SessionRec {
     created_at: DateTime<Utc>,
     last_activity: DateTime<Utc>,
     summary: Summary,
+    agent: Option<String>,
+    parent_session: Option<String>,
+}
+
+impl SessionRec {
+    fn new(at: DateTime<Utc>) -> Self {
+        Self {
+            events: Vec::new(),
+            label: None,
+            created_at: at,
+            last_activity: at,
+            summary: Summary::default(),
+            agent: None,
+            parent_session: None,
+        }
+    }
+
+    fn meta(&self, session_id: &str) -> SessionMeta {
+        SessionMeta {
+            session_id: session_id.to_string(),
+            label: self.label.clone(),
+            event_count: self.events.len() as u64,
+            created_at: self.created_at,
+            last_activity: self.last_activity,
+            agent: self.agent.clone(),
+            parent_session: self.parent_session.clone(),
+            run_count: self.summary.run_count,
+            errored_runs: self.summary.errored_runs,
+            input_tokens: self.summary.input_tokens,
+            output_tokens: self.summary.output_tokens,
+            last_run_status: self.summary.last_run_status.clone(),
+            last_run_at: self.summary.last_run_at,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -169,13 +203,7 @@ impl SessionStore for MemorySessionStore {
         let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
-            .or_insert_with(|| SessionRec {
-                events: Vec::new(),
-                label: None,
-                created_at: event_at(event),
-                last_activity: event_at(event),
-                summary: Summary::default(),
-            });
+            .or_insert_with(|| SessionRec::new(event_at(event)));
         let seq = rec.events.len() as u64 + 1;
         rec.last_activity = event_at(event);
         rec.summary.apply(event);
@@ -198,13 +226,29 @@ impl SessionStore for MemorySessionStore {
         let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
-            .or_insert_with(|| SessionRec {
-                events: Vec::new(),
-                label: None,
-                created_at: event_at(first),
-                last_activity: event_at(first),
-                summary: Summary::default(),
+            .or_insert_with(|| SessionRec::new(event_at(first)));
+        for event in events {
+            let seq = rec.events.len() as u64 + 1;
+            rec.last_activity = event_at(event);
+            rec.summary.apply(event);
+            rec.events.push(StoredEvent {
+                seq,
+                event: event.clone(),
             });
+        }
+        Ok(())
+    }
+
+    async fn append_batch_strict(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let Some(rec) = sessions.get_mut(&(tenant.to_string(), session_id.to_string())) else {
+            return Err(Error::NotFound(format!("session {session_id}")));
+        };
         for event in events {
             let seq = rec.events.len() as u64 + 1;
             rec.last_activity = event_at(event);
@@ -253,21 +297,9 @@ impl SessionStore for MemorySessionStore {
         let mut out: Vec<SessionMeta> = sessions
             .iter()
             .filter(|((t, _), _)| t == tenant)
-            .map(|((_, sid), rec)| SessionMeta {
-                session_id: sid.clone(),
-                label: rec.label.clone(),
-                event_count: rec.events.len() as u64,
-                created_at: rec.created_at,
-                last_activity: rec.last_activity,
-                run_count: rec.summary.run_count,
-                errored_runs: rec.summary.errored_runs,
-                input_tokens: rec.summary.input_tokens,
-                output_tokens: rec.summary.output_tokens,
-                last_run_status: rec.summary.last_run_status.clone(),
-                last_run_at: rec.summary.last_run_at,
-            })
+            .map(|((_, sid), rec)| rec.meta(sid))
             .collect();
-        out.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        out.sort_by(|a, b| (b.last_activity, &b.session_id).cmp(&(a.last_activity, &a.session_id)));
         Ok(out)
     }
 
@@ -277,19 +309,7 @@ impl SessionStore for MemorySessionStore {
             .read()
             .await
             .get(&(tenant.to_string(), session_id.to_string()))
-            .map(|rec| SessionMeta {
-                session_id: session_id.to_string(),
-                label: rec.label.clone(),
-                event_count: rec.events.len() as u64,
-                created_at: rec.created_at,
-                last_activity: rec.last_activity,
-                run_count: rec.summary.run_count,
-                errored_runs: rec.summary.errored_runs,
-                input_tokens: rec.summary.input_tokens,
-                output_tokens: rec.summary.output_tokens,
-                last_run_status: rec.summary.last_run_status.clone(),
-                last_run_at: rec.summary.last_run_at,
-            }))
+            .map(|rec| rec.meta(session_id)))
     }
 
     async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()> {
@@ -297,14 +317,25 @@ impl SessionStore for MemorySessionStore {
         let mut sessions = self.sessions.write().await;
         let rec = sessions
             .entry((tenant.to_string(), session_id.to_string()))
-            .or_insert_with(|| SessionRec {
-                events: Vec::new(),
-                label: None,
-                created_at: now,
-                last_activity: now,
-                summary: Summary::default(),
-            });
+            .or_insert_with(|| SessionRec::new(now));
         rec.label = label.map(str::to_string);
+        Ok(())
+    }
+
+    async fn create_child_session(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        parent_session: &str,
+        agent: &str,
+    ) -> Result<()> {
+        let now = Utc::now();
+        let mut sessions = self.sessions.write().await;
+        let rec = sessions
+            .entry((tenant.to_string(), session_id.to_string()))
+            .or_insert_with(|| SessionRec::new(now));
+        rec.agent = Some(agent.to_string());
+        rec.parent_session = Some(parent_session.to_string());
         Ok(())
     }
 
@@ -626,13 +657,7 @@ impl SessionStore for MemorySessionStore {
             let mut sessions = self.sessions.write().await;
             let srec = sessions
                 .entry((tenant.to_string(), session_id))
-                .or_insert_with(|| SessionRec {
-                    events: Vec::new(),
-                    label: None,
-                    created_at: event_at(event),
-                    last_activity: event_at(event),
-                    summary: Summary::default(),
-                });
+                .or_insert_with(|| SessionRec::new(event_at(event)));
             let seq = srec.events.len() as u64 + 1;
             srec.last_activity = event_at(event);
             srec.summary.apply(event);
@@ -766,6 +791,7 @@ impl SessionStore for MemorySessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionScope;
 
     #[tokio::test]
     async fn memory_artifact_roundtrip() {
@@ -805,6 +831,34 @@ mod tests {
             msg: Message::assistant(text),
             at: Utc::now(),
         }
+    }
+
+    #[tokio::test]
+    async fn keyset_pagination_survives_identical_last_activity() {
+        let s = MemorySessionStore::new();
+        let tied_at = Utc::now();
+        {
+            let mut sessions = s.sessions.write().await;
+            for idx in 0..5 {
+                sessions.insert(
+                    ("t".to_string(), format!("sess-{idx}")),
+                    SessionRec::new(tied_at),
+                );
+            }
+        }
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = s
+                .list_sessions_page("t", cursor.clone(), 2, SessionScope::All)
+                .await
+                .unwrap();
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.last_activity, last.session_id.clone()));
+            seen.extend(page.into_iter().map(|m| m.session_id));
+        }
+        seen.sort();
+        assert_eq!(seen, ["sess-0", "sess-1", "sess-2", "sess-3", "sess-4"]);
     }
 
     #[tokio::test]

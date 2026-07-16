@@ -21,6 +21,9 @@ pub struct PostgresArtifactStore {
     bytes: Arc<dyn ArtifactStore>,
     /// Label recorded in `artifacts.storage` (e.g. `"local"`, `"s3"`).
     storage: String,
+    /// Minimum age enforced on `sweep_orphans` cutoffs so a sweep can never
+    /// race the bytes-then-row window of an in-flight `put`.
+    sweep_margin: chrono::Duration,
 }
 
 impl PostgresArtifactStore {
@@ -45,7 +48,15 @@ impl PostgresArtifactStore {
             pool,
             bytes,
             storage: storage.into(),
+            sweep_margin: chrono::Duration::minutes(5),
         })
+    }
+
+    /// Override the sweep-safety margin. Anything below the margin is treated
+    /// as the margin; lowering it below put latency reintroduces the race.
+    pub fn with_sweep_margin(mut self, margin: chrono::Duration) -> Self {
+        self.sweep_margin = margin;
+        self
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -158,6 +169,40 @@ impl ArtifactStore for PostgresArtifactStore {
 
     async fn url(&self, id: &str) -> Result<Option<String>> {
         self.bytes.url(id).await
+    }
+
+    async fn sweep_orphans(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        older_than: chrono::Duration,
+    ) -> Result<usize> {
+        let stored = self.bytes.list(tenant, session_id).await?;
+        let indexed: Vec<String> = sqlx::query_scalar(
+            "SELECT artifact_id FROM artifacts WHERE tenant = $1 AND session_id = $2",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db)?;
+        let indexed: std::collections::HashSet<String> = indexed.into_iter().collect();
+
+        let cutoff = chrono::Utc::now() - older_than.max(self.sweep_margin);
+        let mut swept = 0usize;
+        for artifact in stored {
+            if indexed.contains(&artifact.id) || artifact.created_at > cutoff {
+                continue;
+            }
+            match self.bytes.delete(&artifact.id).await {
+                Ok(()) | Err(Error::NotFound(_)) => {
+                    swept += 1;
+                    tracing::info!(%tenant, %session_id, artifact_id = %artifact.id, "orphaned artifact bytes swept");
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(swept)
     }
 
     /// Bytes are dropped one at a time via the inner store; the metadata rows

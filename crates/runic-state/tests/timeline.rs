@@ -70,6 +70,8 @@ fn golden_events() -> Vec<SessionEvent> {
             usage: usage(9, 4),
             model: Some("m-child".into()),
             duration_ms: 300,
+            child_session: Some("chd-1".into()),
+            child_persistence: None,
             at: ts(5),
         },
         SessionEvent::TurnEnd {

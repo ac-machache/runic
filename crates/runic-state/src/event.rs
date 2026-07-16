@@ -59,6 +59,12 @@ pub enum DelegationStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChildPersistenceStatus {
+    Flushed,
+    FlushFailed(String),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditStamp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +146,10 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_persistence: Option<ChildPersistenceStatus>,
         at: DateTime<Utc>,
     },
 

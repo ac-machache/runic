@@ -8,6 +8,7 @@
 //! - **session metadata** — `label` (OpenFang);
 //! - keyed by **`(user_id, session_id)`**.
 
+pub mod child;
 pub mod event;
 pub mod external;
 pub mod state;
@@ -15,9 +16,10 @@ pub mod stats;
 pub mod tasks;
 pub mod timeline;
 
+pub use child::{ChildPersistence, ChildPersistenceHandle, ChildSink};
 pub use event::{
-    AuditStamp, DelegationMode, DelegationStatus, HookLifecycle, RunEndStatus, RunOutcome,
-    SessionEvent, ToolStatus,
+    AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus, HookLifecycle,
+    RunEndStatus, RunOutcome, SessionEvent, ToolStatus,
 };
 pub use external::ExternalEvents;
 pub use state::{

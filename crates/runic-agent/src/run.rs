@@ -69,6 +69,7 @@ impl Agent {
             .map(|p| std::mem::replace(&mut self.provider, p));
         self.events = ctx.events.take();
         self.human = ctx.human.take();
+        self.child_persistence = ctx.child_persistence.take();
         let cancel = ctx.cancel.take();
         let mut steering = ctx.steering.take();
         let agent_label = ctx.agent.take();
@@ -113,6 +114,7 @@ impl Agent {
 
         self.events = None; // drop the sink (closes the receiver)
         self.human = None; // drop the per-run human channel
+        self.child_persistence = None;
         self.clear_transient_tool_outputs();
         if let Some(p) = saved_provider {
             self.provider = p;

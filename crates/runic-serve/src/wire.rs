@@ -80,6 +80,8 @@ pub enum WireEvent {
         call_id: String,
         agent: String,
         mode: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_session: Option<String>,
     },
 
     /// A delegation edge closed, carrying the child's cost.
@@ -93,6 +95,10 @@ pub enum WireEvent {
         duration_ms: u64,
         input_tokens: u64,
         output_tokens: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_session: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_persisted: Option<bool>,
     },
 
     /// A complete message landed in agent state. Replay only (live runs
@@ -434,6 +440,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             call_id,
             agent,
             mode,
+            child_session,
             ..
         } => Some(WireEvent::DelegationStart {
             run_id,
@@ -444,6 +451,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
                 runic_state::DelegationMode::Parallel => "parallel".to_string(),
                 runic_state::DelegationMode::Background => "background".to_string(),
             },
+            child_session,
         }),
         SessionEvent::DelegationFinished {
             run_id,
@@ -453,6 +461,8 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             usage,
             model,
             duration_ms,
+            child_session,
+            child_persistence,
             ..
         } => Some(WireEvent::DelegationFinish {
             run_id,
@@ -463,6 +473,9 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             duration_ms,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
+            child_session,
+            child_persisted: child_persistence
+                .map(|p| matches!(p, runic_state::ChildPersistenceStatus::Flushed)),
         }),
         SessionEvent::ToolStarted { .. } | SessionEvent::StateSnapshot { .. } => None,
     }

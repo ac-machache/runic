@@ -84,6 +84,8 @@ fn ctx() -> DelegationCtx {
         config: serde_json::Map::new(),
         tenant: "alice".into(),
         session: "s1".into(),
+        child_session: None,
+        persistence: None,
     }
 }
 

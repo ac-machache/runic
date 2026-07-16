@@ -44,7 +44,8 @@ child usage land here (ephemeral children).
       estimated. Anthropic fills both (`cache_read_input_tokens`/
       `cache_creation_input_tokens`, streaming too); OpenAI fills read
       (`prompt_tokens_details.cached_tokens`); Gemini fills read
-      (`cachedContentTokenCount`); Mistral reports none → zeros.
+      (`cachedContentTokenCount`); Mistral fills read
+      (`prompt_tokens_details.cached_tokens`, added in the 1.7 review round).
       `TokenUsage::add()` added for accumulation. Tested per driver + old-log
       deserialization in `runic-types`.
 
@@ -95,10 +96,13 @@ child usage land here (ephemeral children).
       (`suspend.rs`).
 
 - [x] **1.5 Tool instrumentation at the execution boundary** — DONE.
-      `dispatch_one` returns `Dispatched { result, status, started_at, duration_ms }`
+      `dispatch_one` returns `Dispatched { result, status, duration_ms }`
       with the monotonic timer wrapping exactly one execution (shared by serial
-      + parallel paths); durable `ToolStarted` (true start timestamp) +
-      `ToolFinished { ToolStatus, duration_ms }` pushed in the collect phase.
+      + parallel paths); durable `ToolStarted` events are stamped in the
+      announce phase BEFORE any execution (deliberate: crash evidence — for
+      serial batch-mates `at` is batch start, `duration_ms` is the accurate
+      per-tool measure) and `ToolFinished { ToolStatus, duration_ms }` is
+      pushed in the collect phase.
       `ToolStatus` gained `Panic`. Substituted/guard-blocked/cancelled calls get
       a `ToolFinished` disposition with zero duration and NO `ToolStarted`;
       deferred calls get `ToolStarted` + `ToolDeferred` as their disposition.
@@ -273,48 +277,105 @@ the umbrella crate — memory becomes a consumer-owned ability.
 
 ## Phase 3 — persistent child sessions
 
-- [ ] **3.1 `ChildPersistence` protocol** (`runic-state` trait, `runic-serve` impl)
-      Async + fallible: begin failure, append failure, flush completion, final
-      status all expressed. Injected via `RunContext` (serve:
-      `build_run_context`); picked up by `DelegateTool` via `ctx.get`; absent →
-      ephemeral (unchanged). Requires `call_id` plumbing into `ToolContext`
-      (acknowledged cross-crate change).
-      *Accept:* handle-absent path byte-identical to today; begin/append/flush
-      failures each tested.
+- [x] **3.1 `ChildPersistence` protocol** — DONE. `runic_state::child`:
+      `ChildPersistence::begin(agent) -> Box<dyn ChildSink>` (async +
+      fallible), `ChildSink { session_id, sink() -> PersistSink, nested() ->
+      ChildPersistenceHandle, flush() -> Result }`; `ChildPersistenceHandle`
+      newtype rides the `ToolContext` bag. Injected via
+      `RunContext::with_child_persistence` (serve wires it on all four run
+      modes when the factory is stateful); `DelegateTool` picks it up in
+      `child_ctx`. Handle absent → ephemeral, unchanged (all prior delegate
+      tests pass untouched). Serve impl (`runic-serve/src/child.rs`):
+      opaque `chd-{uuid}` id, per-child persister with BOUNDED retries (5) —
+      give-up marks the sink failed so `flush()` returns the store error.
+      Tests: `runic/tests/child_persistence.rs` (transcript under opaque id,
+      begin-failure → ephemeral, flush-failure edge, fresh id per attempt) +
+      `runic-serve/tests/child_persistence.rs` (real store round-trip,
+      begin failure, bounded-retry flush failure, nested() grandchild rows).
 
-- [ ] **3.2 Opaque child identity + hierarchy metadata** (`runic-substrate`)
-      Child session id is opaque (uuid); `SessionMeta` gains `agent` +
-      `parent_session`; tenant, parent session, originating `call_id`, agent,
-      depth stored as explicit metadata. Store-level list filters: root-only
-      (default), children-of(parent) — part of the `SessionStore` contract,
-      implemented per backend, keyset-pagination safe.
-      *Accept:* root listing excludes children without underfilled pages;
-      contract tests across memory + postgres backends.
+- [x] **3.2 Opaque child identity + hierarchy metadata** — DONE. Child ids are
+      opaque (`chd-{uuid}`, minted by the serve impl; the interim
+      `{parent}:{def}` string survives only as the ephemeral fallback);
+      `SessionMeta` gains `agent` + `parent_session`;
+      `SessionStore::create_child_session` + `SessionScope { Roots (default),
+      ChildrenOf, All }` on `list_sessions_page` — WHERE clause in Postgres
+      (migration `0008_child_sessions.sql`: columns + parent index), filter
+      in memory, keyset-safe. Contract test
+      `child_sessions_carry_hierarchy_and_scope_listings` (roots exclude
+      children; children-of pages cover every child once).
 
-- [ ] **3.3 Honest edges** (`runic-subagent`)
-      `DelegationStarted.child_session` set only when persistence began;
-      `DelegationFinished` carries child persistence status — flush failure is
-      visible on the edge (no false durable-before-observable). Child flushed
-      before the parent's `DelegationFinished` on the success path.
-      *Accept:* flush-failure test asserts the edge reports it; ordering test
-      asserts child durability precedes edge visibility.
+- [x] **3.3 Honest edges** — DONE. `begin()` runs BEFORE `emit_started`, so
+      `DelegationStarted.child_session` is set only when persistence actually
+      began; `DelegationFinished` gains `child_session` +
+      `child_persistence: Option<ChildPersistenceStatus{Flushed|FlushFailed}}`;
+      `run_child` flushes the sink before the edge is emitted on every path
+      (success and child failure). Wire `delegation_start`/`delegation_finish`
+      carry `child_session` (+ `child_persisted` bool); timeline
+      `DelegationTrace.child_session` fills from either edge; replay proptest
+      extended over the new fields.
 
-- [ ] **3.4 Lifecycle semantics** (`runic-subagent` + `runic-substrate`)
-      Retry idempotency (a retried delegation never appends to a previous
-      child's transcript — new opaque id per attempt), concurrent same-agent
-      children isolated, cancellation while flushing, process shutdown with an
-      active child (detectably incomplete), recursive parent deletion removes
-      descendants + their artifacts, nested handle propagation.
-      *Accept:* child-persistence test list from `critique-v2.md` in full.
+- [x] **3.4 Lifecycle semantics** — DONE. Retry idempotency (fresh opaque id
+      per attempt, tested), concurrent children isolated (per-sink channels),
+      nested handle propagation e2e (`nested()` re-scoped to the child; a
+      running mid-agent delegates to a leaf — three-level hierarchy walkable,
+      the child's own transcript carries its delegation edge pointing at the
+      grandchild's session), recursive parent deletion via serve
+      `DELETE /threads/{id}` (walks `ChildrenOf` pages, deletes leaf-first
+      incl. each session's artifacts — grandchild-deep test). Cancellation
+      while flushing: `ChildSink::flush` is deadline-bounded (15s) on top of
+      the bounded-retry persister, so a hung store cannot hang a delegation —
+      paused-time test proves the timeout and reports the backlog. Process
+      shutdown with an active child: the child's dangling `RunStart` projects
+      as `InFlight` and the child stays reachable via `ChildrenOf` (tested).
+      Artifact GC: `ArtifactStore::sweep_orphans(tenant, session, older_than)`
+      (default 0 for single-layer backends); `PostgresArtifactStore` diffs the
+      inner byte store against the metadata rows and deletes unindexed bytes
+      older than the cutoff — idempotent, never races an in-flight `put`
+      (live-Postgres test). Scheduling the sweep (a maintenance endpoint or a
+      reaper-style background task in serve) is left to the consumer for now.
 
-- [ ] **3.5 Serve exposure** (`runic-serve`)
-      Children listing per thread, child timeline access, tenant ownership
-      enforced on every child lookup.
-      *Accept:* cross-tenant child access rejected; child timeline reachable
-      from the parent edge.
+- [x] **3.5 Serve exposure** — DONE. `GET /threads/{id}/children`
+      (keyset-paginated, `ThreadSummary` gains `agent` + `parent_thread`,
+      404 on unknown/foreign-tenant parent); child timelines/events/state are
+      reachable through the existing thread endpoints since a child IS a
+      session (tenant scoping applies everywhere). Test: children listed +
+      excluded from the root thread list + cross-tenant rejected + recursive
+      delete removes the whole tree.
 
 **Phase 3 exit gate:** gate questions 8 (begin/flush failure reporting),
 9 (retries, deletion, artifact cleanup).
+
+### Phase 3 review round (post-landing)
+
+Fixed: deleted children can no longer be resurrected as root threads by a
+late persister batch — `SessionStore::append_batch_strict` (memory atomic,
+Postgres row-lock, default check-then-append) fails `NotFound` instead of
+upserting the sessions row; the child persister uses it and gives up
+immediately on `NotFound` (no pointless retries), so the edge reports
+`FlushFailed` and the tree stays clean (contract test on every backend +
+serve race test). A flush timeout now also STOPS the writer: the timeout
+marks the sink failed and fires a `watch` stop signal the persister selects
+on between batches and during retry backoff (the one in-flight batch may
+still land; nothing enqueued after the timeout does — paused-time test).
+The stop sender lives on the shared progress state, not the sink, so a
+normal sink drop never kills a draining persister. `sweep_orphans` cutoffs
+are clamped to a store-level margin (default 5 min,
+`with_sweep_margin` to override) so a small `older_than` can never race an
+in-flight put. Parallel and background delegation edges are now pinned by
+tests (previously sync-only — background exercises the out-of-run
+`ExternalEvents` path). Memory-store session listing gained the
+`session_id` keyset tiebreak (identical `last_activity` could skip a child
+during paged walks). OpenAI got the missing provenance-absence request-body
+test; its `complete`/`stream` message conversion was deduplicated into one
+`build_messages` (the stream path had drifted and silently dropped user
+image/file parts).
+
+Known-open (accepted): a late append to a deleted PARENT thread still
+recreates it via the upsert path — parents are driven by live request
+handlers, not detached writers, so the window is the pre-existing
+delete-during-active-run case, out of Phase 3 scope. Orphaned child rows
+from a `begin()` racing a tree delete are invisible (never in root lists)
+and harmless; a future maintenance sweep can reap them.
 
 ---
 

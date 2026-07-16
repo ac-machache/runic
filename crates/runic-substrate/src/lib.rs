@@ -36,7 +36,8 @@ pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{
-    ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionStore, StoredEvent,
+    ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore,
+    StoredEvent,
 };
 pub use tool::SearchChatsTool;
 

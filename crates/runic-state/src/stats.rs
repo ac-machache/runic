@@ -263,6 +263,8 @@ mod tests {
             },
             model: None,
             duration_ms: 40,
+            child_session: None,
+            child_persistence: None,
             at: Utc::now(),
         });
         stats.fold(&SessionEvent::DelegationFinished {
@@ -274,6 +276,8 @@ mod tests {
             usage: TokenUsage::default(),
             model: None,
             duration_ms: 1,
+            child_session: None,
+            child_persistence: None,
             at: Utc::now(),
         });
 

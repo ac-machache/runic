@@ -447,3 +447,63 @@ async fn schema_has_required_columns_indexes_and_fks() {
     .unwrap();
     assert!(fk >= 1, "artifacts must FK to sessions");
 }
+
+#[tokio::test]
+async fn sweep_orphans_removes_unindexed_bytes_idempotently() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let bytes: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
+    let store = PostgresArtifactStore::from_pool(pool, bytes.clone(), "memory")
+        .await
+        .unwrap();
+    let (t, s) = tenant_session();
+
+    let kept = store
+        .put(
+            &t,
+            &s,
+            "text/plain",
+            runic_substrate::ArtifactSource::ToolOutput,
+            b"keep me",
+        )
+        .await
+        .unwrap();
+    let orphan = bytes
+        .put(
+            &t,
+            &s,
+            "text/plain",
+            runic_substrate::ArtifactSource::ToolOutput,
+            b"crashed before the row landed",
+        )
+        .await
+        .unwrap();
+
+    let swept = store
+        .sweep_orphans(&t, &s, chrono::Duration::zero())
+        .await
+        .unwrap();
+    assert_eq!(
+        swept, 0,
+        "a zero cutoff is clamped to the sweep margin — young orphans are never raced"
+    );
+
+    let store = store.with_sweep_margin(chrono::Duration::zero());
+    let swept = store
+        .sweep_orphans(&t, &s, chrono::Duration::zero())
+        .await
+        .unwrap();
+    assert_eq!(swept, 1);
+    assert!(matches!(
+        bytes.get(&orphan.id).await,
+        Err(Error::NotFound(_))
+    ));
+    assert!(bytes.get(&kept.id).await.is_ok(), "indexed bytes survive");
+
+    let again = store
+        .sweep_orphans(&t, &s, chrono::Duration::zero())
+        .await
+        .unwrap();
+    assert_eq!(again, 0, "sweeping is idempotent");
+}

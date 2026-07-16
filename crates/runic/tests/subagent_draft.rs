@@ -394,6 +394,90 @@ async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
 }
 
 #[tokio::test]
+async fn parallel_delegation_emits_an_edge_per_child() {
+    let child_a = ScriptedProvider::new(vec![text("a done")]);
+    let child_b = ScriptedProvider::new(vec![text("b done")]);
+    let main_provider = ScriptedProvider::new(vec![
+        call(
+            "c1",
+            "delegate",
+            serde_json::json!({ "parallel": ["sub-a", "sub-b"], "prompt": "go" }),
+        ),
+        text("done"),
+    ]);
+
+    let mut agent = Composer::new(main_provider, "main-model")
+        .with(
+            subagent("sub-a", "a expert")
+                .prompt("you are a")
+                .provider(child_a.clone())
+                .tool(NamedTool("only-a")),
+        )
+        .with(
+            subagent("sub-b", "b expert")
+                .prompt("you are b")
+                .provider(child_b.clone())
+                .tool(NamedTool("only-b")),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    let events = agent.state().events();
+    let mut started: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            runic_state::SessionEvent::DelegationStarted {
+                agent,
+                mode,
+                call_id,
+                turn,
+                ..
+            } => Some((agent.clone(), *mode, call_id.clone(), *turn)),
+            _ => None,
+        })
+        .collect();
+    started.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        started,
+        vec![
+            (
+                "sub-a".to_string(),
+                runic_state::DelegationMode::Parallel,
+                "c1".to_string(),
+                1
+            ),
+            (
+                "sub-b".to_string(),
+                runic_state::DelegationMode::Parallel,
+                "c1".to_string(),
+                1
+            ),
+        ]
+    );
+
+    let mut finished: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            runic_state::SessionEvent::DelegationFinished { agent, status, .. } => {
+                Some((agent.clone(), status.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    finished.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        finished,
+        vec![
+            ("sub-a".to_string(), runic_state::DelegationStatus::Ok),
+            ("sub-b".to_string(), runic_state::DelegationStatus::Ok),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn owned_tools_with_allowed_tools_list_is_a_build_error() {
     let markdown = "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig purchases";
     let draft = runic::subagent::from_markdown(markdown)

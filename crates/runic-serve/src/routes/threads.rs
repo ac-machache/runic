@@ -172,6 +172,26 @@ pub struct ThreadSummary {
     pub last_run_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_thread: Option<String>,
+}
+
+fn summary_from_meta(meta: runic_substrate::SessionMeta) -> ThreadSummary {
+    ThreadSummary {
+        thread_id: meta.session_id,
+        label: meta.label,
+        event_count: meta.event_count,
+        run_count: meta.run_count,
+        errored_runs: meta.errored_runs,
+        input_tokens: meta.input_tokens,
+        output_tokens: meta.output_tokens,
+        last_run_status: meta.last_run_status,
+        last_run_at: meta.last_run_at,
+        agent: meta.agent,
+        parent_thread: meta.parent_session,
+    }
 }
 
 #[derive(Debug, Deserialize, Default, ToSchema)]
@@ -289,27 +309,79 @@ pub async fn list_threads(
     };
     let mut metas = state
         .session_store
-        .list_sessions_page(&tenant, after, limit + 1)
+        .list_sessions_page(
+            &tenant,
+            after,
+            limit + 1,
+            runic_substrate::SessionScope::Roots,
+        )
         .await?;
 
     let next_cursor = (metas.len() > limit).then(|| {
         metas.truncate(limit);
         encode_cursor(metas.last().expect("non-empty page"))
     });
-    let threads = metas
-        .into_iter()
-        .map(|m| ThreadSummary {
-            thread_id: m.session_id,
-            label: m.label,
-            event_count: m.event_count,
-            run_count: m.run_count,
-            errored_runs: m.errored_runs,
-            input_tokens: m.input_tokens,
-            output_tokens: m.output_tokens,
-            last_run_status: m.last_run_status,
-            last_run_at: m.last_run_at,
-        })
-        .collect();
+    let threads = metas.into_iter().map(summary_from_meta).collect();
+    Ok(Json(ThreadList {
+        threads,
+        next_cursor,
+    }))
+}
+
+/// `GET /threads/:id/children?limit=&cursor=` — a page of the thread's child
+/// sessions (subagent transcripts), most-recently-active first.
+#[utoipa::path(
+    get,
+    path = "/threads/{thread_id}/children",
+    tag = "threads",
+    params(
+        ListThreadsQuery,
+        ("thread_id" = String, Path, description = "Parent thread id"),
+        ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
+    ),
+    responses(
+        (status = 200, description = "A page of child sessions", body = ThreadList),
+        (status = 400, description = "Invalid cursor", body = ErrorBody),
+        (status = 404, description = "Unknown thread", body = ErrorBody)
+    )
+)]
+pub async fn list_thread_children(
+    State(state): State<AppState>,
+    Tenant(tenant): Tenant,
+    Path(thread_id): Path<String>,
+    Query(q): Query<ListThreadsQuery>,
+) -> Result<Json<ThreadList>, ServeError> {
+    state
+        .session_store
+        .session_meta(&tenant, &thread_id)
+        .await?
+        .ok_or_else(|| ServeError::ThreadNotFound {
+            id: thread_id.clone(),
+        })?;
+
+    let limit = q.limit.clamp(1, 200);
+    let after = match q.cursor.as_deref() {
+        Some(cursor) => Some(
+            decode_cursor(cursor)
+                .ok_or_else(|| ServeError::BadRequest("invalid thread cursor".into()))?,
+        ),
+        None => None,
+    };
+    let mut metas = state
+        .session_store
+        .list_sessions_page(
+            &tenant,
+            after,
+            limit + 1,
+            runic_substrate::SessionScope::ChildrenOf(thread_id),
+        )
+        .await?;
+
+    let next_cursor = (metas.len() > limit).then(|| {
+        metas.truncate(limit);
+        encode_cursor(metas.last().expect("non-empty page"))
+    });
+    let threads = metas.into_iter().map(summary_from_meta).collect();
     Ok(Json(ThreadList {
         threads,
         next_cursor,
@@ -526,15 +598,37 @@ pub async fn delete_thread(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
-    state.runs.forget_thread(&tenant, &thread_id).await;
-    let artifact_count = state
-        .artifact_store
-        .delete_session_artifacts(&tenant, &thread_id)
-        .await?;
-    state
-        .session_store
-        .delete_session(&tenant, &thread_id)
-        .await?;
-    tracing::info!(%tenant, %thread_id, artifact_count, "thread deleted");
+    let mut pending = vec![thread_id.clone()];
+    let mut order = Vec::new();
+    while let Some(session) = pending.pop() {
+        let mut cursor = None;
+        loop {
+            let page = state
+                .session_store
+                .list_sessions_page(
+                    &tenant,
+                    cursor,
+                    500,
+                    runic_substrate::SessionScope::ChildrenOf(session.clone()),
+                )
+                .await?;
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.last_activity, last.session_id.clone()));
+            pending.extend(page.into_iter().map(|m| m.session_id));
+        }
+        order.push(session);
+    }
+
+    let descendant_count = order.len() - 1;
+    let mut artifact_count = 0usize;
+    for session in order.iter().rev() {
+        state.runs.forget_thread(&tenant, session).await;
+        artifact_count += state
+            .artifact_store
+            .delete_session_artifacts(&tenant, session)
+            .await?;
+        state.session_store.delete_session(&tenant, session).await?;
+    }
+    tracing::info!(%tenant, %thread_id, artifact_count, descendant_count, "thread deleted");
     Ok(StatusCode::NO_CONTENT)
 }

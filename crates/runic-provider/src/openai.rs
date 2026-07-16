@@ -115,6 +115,123 @@ impl OpenAIDriver {
         }
         builder
     }
+
+    fn build_messages(&self, request: &CompletionRequest) -> Vec<OaiMessage> {
+        let mut oai_messages: Vec<OaiMessage> = Vec::new();
+
+        if let Some(ref system) = request.system {
+            oai_messages.push(OaiMessage {
+                role: "system".to_string(),
+                content: Some(OaiMessageContent::Text(system.clone())),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning: None,
+            });
+        }
+
+        for msg in &request.messages {
+            match (&msg.role, &msg.content) {
+                (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
+                    oai_messages.push(OaiMessage {
+                        role: "system".to_string(),
+                        content: Some(OaiMessageContent::Text(text.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        reasoning: None,
+                    });
+                }
+                (Role::User, MessageContent::Text(text)) => {
+                    oai_messages.push(OaiMessage {
+                        role: "user".to_string(),
+                        content: Some(OaiMessageContent::Text(text.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        reasoning: None,
+                    });
+                }
+                (Role::Assistant, MessageContent::Text(text)) => {
+                    oai_messages.push(OaiMessage {
+                        role: "assistant".to_string(),
+                        content: Some(OaiMessageContent::Text(text.clone())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        reasoning: None,
+                    });
+                }
+                (Role::User, MessageContent::Blocks(blocks)) => {
+                    let mut parts: Vec<OaiContentPart> = Vec::new();
+                    let mut has_tool_results = false;
+                    for block in blocks {
+                        match block {
+                            ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                                ..
+                            } => {
+                                has_tool_results = true;
+                                oai_messages.push(OaiMessage {
+                                    role: "tool".to_string(),
+                                    content: Some(OaiMessageContent::Text(tool_result_text(
+                                        content, *is_error,
+                                    ))),
+                                    tool_calls: None,
+                                    tool_call_id: Some(tool_use_id.clone()),
+                                    reasoning_content: None,
+                                    reasoning: None,
+                                });
+                            }
+                            ContentBlock::Text { text, .. } => {
+                                parts.push(OaiContentPart::Text { text: text.clone() });
+                            }
+                            ContentBlock::Image { media_type, data } => {
+                                parts.push(OaiContentPart::ImageUrl {
+                                    image_url: OaiImageUrl {
+                                        url: format!("data:{media_type};base64,{data}"),
+                                    },
+                                });
+                            }
+                            ContentBlock::File { media_type, data } => {
+                                let ext = media_type.rsplit('/').next().unwrap_or("bin");
+                                parts.push(OaiContentPart::File {
+                                    file: OaiFileData {
+                                        filename: format!("file.{ext}"),
+                                        file_data: format!("data:{media_type};base64,{data}"),
+                                    },
+                                });
+                            }
+                            ContentBlock::Thinking { .. } => {}
+                            ContentBlock::ArtifactRef { id, .. } => {
+                                tracing::warn!(artifact = %id, "unresolved ArtifactRef reached OpenAI — dropping");
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !parts.is_empty() && !has_tool_results {
+                        oai_messages.push(OaiMessage {
+                            role: "user".to_string(),
+                            content: Some(OaiMessageContent::Parts(parts)),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            reasoning_content: None,
+                            reasoning: None,
+                        });
+                    }
+                }
+                (Role::Assistant, MessageContent::Blocks(blocks)) => {
+                    oai_messages.push(assemble_assistant_message(blocks, &request.model, self));
+                }
+                _ => {}
+            }
+        }
+
+        strip_trailing_empty_assistant(&mut oai_messages);
+        oai_messages
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -478,123 +595,7 @@ impl Provider for OpenAIDriver {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
-        let mut oai_messages: Vec<OaiMessage> = Vec::new();
-
-        // Add system message if present
-        if let Some(ref system) = request.system {
-            oai_messages.push(OaiMessage {
-                role: "system".to_string(),
-                content: Some(OaiMessageContent::Text(system.clone())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                reasoning: None,
-            });
-        }
-
-        // Convert messages
-        for msg in &request.messages {
-            match (&msg.role, &msg.content) {
-                (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
-                    oai_messages.push(OaiMessage {
-                        role: "system".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::User, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "user".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::Assistant, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "assistant".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::User, MessageContent::Blocks(blocks)) => {
-                    // Handle tool results and images in user messages
-                    let mut parts: Vec<OaiContentPart> = Vec::new();
-                    let mut has_tool_results = false;
-                    for block in blocks {
-                        match block {
-                            ContentBlock::ToolResult {
-                                tool_use_id,
-                                content,
-                                is_error,
-                                ..
-                            } => {
-                                has_tool_results = true;
-                                oai_messages.push(OaiMessage {
-                                    role: "tool".to_string(),
-                                    content: Some(OaiMessageContent::Text(tool_result_text(
-                                        content, *is_error,
-                                    ))),
-                                    tool_calls: None,
-                                    tool_call_id: Some(tool_use_id.clone()),
-                                    reasoning_content: None,
-                                    reasoning: None,
-                                });
-                            }
-                            ContentBlock::Text { text, .. } => {
-                                parts.push(OaiContentPart::Text { text: text.clone() });
-                            }
-                            ContentBlock::Image { media_type, data } => {
-                                parts.push(OaiContentPart::ImageUrl {
-                                    image_url: OaiImageUrl {
-                                        url: format!("data:{media_type};base64,{data}"),
-                                    },
-                                });
-                            }
-                            ContentBlock::File { media_type, data } => {
-                                let ext = media_type.rsplit('/').next().unwrap_or("bin");
-                                parts.push(OaiContentPart::File {
-                                    file: OaiFileData {
-                                        filename: format!("file.{ext}"),
-                                        file_data: format!("data:{media_type};base64,{data}"),
-                                    },
-                                });
-                            }
-                            ContentBlock::Thinking { .. } => {}
-                            ContentBlock::ArtifactRef { id, .. } => {
-                                tracing::warn!(artifact = %id, "unresolved ArtifactRef reached OpenAI — dropping");
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !parts.is_empty() && !has_tool_results {
-                        oai_messages.push(OaiMessage {
-                            role: "user".to_string(),
-                            content: Some(OaiMessageContent::Parts(parts)),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            reasoning_content: None,
-                            reasoning: None,
-                        });
-                    }
-                }
-                (Role::Assistant, MessageContent::Blocks(blocks)) => {
-                    let assembled = assemble_assistant_message(blocks, &request.model, self);
-                    oai_messages.push(assembled);
-                }
-                _ => {}
-            }
-        }
-
-        strip_trailing_empty_assistant(&mut oai_messages);
+        let oai_messages = self.build_messages(&request);
 
         let oai_tools: Vec<OaiTool> = request
             .tools
@@ -950,83 +951,7 @@ impl Provider for OpenAIDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, ProviderError> {
-        // Build request (same as complete but with stream: true)
-        let mut oai_messages: Vec<OaiMessage> = Vec::new();
-
-        if let Some(ref system) = request.system {
-            oai_messages.push(OaiMessage {
-                role: "system".to_string(),
-                content: Some(OaiMessageContent::Text(system.clone())),
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                reasoning: None,
-            });
-        }
-
-        for msg in &request.messages {
-            match (&msg.role, &msg.content) {
-                (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
-                    oai_messages.push(OaiMessage {
-                        role: "system".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::User, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "user".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::Assistant, MessageContent::Text(text)) => {
-                    oai_messages.push(OaiMessage {
-                        role: "assistant".to_string(),
-                        content: Some(OaiMessageContent::Text(text.clone())),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        reasoning_content: None,
-                        reasoning: None,
-                    });
-                }
-                (Role::User, MessageContent::Blocks(blocks)) => {
-                    for block in blocks {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            is_error,
-                            ..
-                        } = block
-                        {
-                            oai_messages.push(OaiMessage {
-                                role: "tool".to_string(),
-                                content: Some(OaiMessageContent::Text(tool_result_text(
-                                    content, *is_error,
-                                ))),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_use_id.clone()),
-                                reasoning_content: None,
-                                reasoning: None,
-                            });
-                        }
-                    }
-                }
-                (Role::Assistant, MessageContent::Blocks(blocks)) => {
-                    let assembled = assemble_assistant_message(blocks, &request.model, self);
-                    oai_messages.push(assembled);
-                }
-                _ => {}
-            }
-        }
-
-        strip_trailing_empty_assistant(&mut oai_messages);
+        let oai_messages = self.build_messages(&request);
 
         let oai_tools: Vec<OaiTool> = request
             .tools
@@ -2372,5 +2297,35 @@ mod tests {
         );
         assert!(artifact.starts_with("head"));
         assert!(artifact.contains("art-3"));
+    }
+
+    #[test]
+    fn provenance_never_reaches_the_request_body() {
+        let driver = OpenAIDriver::new("test".to_string(), "https://api.openai.com/v1".to_string());
+        let request = CompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![runic_types::Message::user_with_blocks(vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    tool_name: "probe".into(),
+                    content: "answer".into(),
+                    is_error: false,
+                    provenance: vec![
+                        runic_types::ProvenanceSource::new("s1", "https://example.com/doc")
+                            .with_snippet("SNIPPET_MARKER"),
+                    ],
+                },
+            ])],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: 0.7,
+            system: None,
+            thinking: None,
+        };
+        let body = serde_json::to_string(&driver.build_messages(&request)).unwrap();
+        assert!(body.contains("call_1"));
+        assert!(!body.contains("provenance"));
+        assert!(!body.contains("SNIPPET_MARKER"));
+        assert!(!body.contains("example.com"));
     }
 }

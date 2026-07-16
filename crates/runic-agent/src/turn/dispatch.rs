@@ -511,6 +511,9 @@ impl Agent {
         ctx.insert(runic_tool::ActivatedToolNames(std::sync::Arc::new(
             self.activated.names(),
         )));
+        if let Some(handle) = &self.child_persistence {
+            ctx.insert(handle.clone());
+        }
         ctx
     }
 

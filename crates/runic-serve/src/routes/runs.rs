@@ -275,6 +275,13 @@ pub async fn create_and_stream_run(
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("stream");
+    if !state.agents.factory(&agent_name)?.stateless() {
+        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
+            state.session_store.clone(),
+            &tenant,
+            &thread_id,
+        ));
+    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "run stream accepted");
 
@@ -469,6 +476,13 @@ pub async fn wait_run(
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("wait");
+    if !state.agents.factory(&agent_name)?.stateless() {
+        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
+            state.session_store.clone(),
+            &tenant,
+            &thread_id,
+        ));
+    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "wait run accepted");
 
@@ -660,6 +674,13 @@ pub async fn background_run(
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("background");
+    if !state.agents.factory(&agent_name)?.stateless() {
+        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
+            state.session_store.clone(),
+            &tenant,
+            &thread_id,
+        ));
+    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run accepted");
 

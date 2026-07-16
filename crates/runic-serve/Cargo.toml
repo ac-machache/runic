@@ -41,5 +41,6 @@ docs-ui = ["dep:utoipa-swagger-ui", "utoipa-swagger-ui/vendored"]
 runic-provider = { path = "../runic-provider" }
 runic = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 proptest = { workspace = true }

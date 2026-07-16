@@ -78,7 +78,7 @@ pub async fn one_thousand_threads_one_tenant(store: &dyn SessionStore) {
     let mut cursor: Option<(DateTime<Utc>, String)> = None;
     loop {
         let page = store
-            .list_sessions_page(&t, cursor.clone(), 50)
+            .list_sessions_page(&t, cursor.clone(), 50, runic_substrate::SessionScope::All)
             .await
             .unwrap();
         if page.is_empty() {

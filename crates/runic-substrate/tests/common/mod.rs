@@ -151,6 +151,8 @@ macro_rules! session_store_contract_suite {
             cancelling_an_unclaimed_queued_run_drops_it,
             cancelling_a_pending_run_flags_it_for_the_owner,
             summary_columns_track_runs_and_tokens,
+            child_sessions_carry_hierarchy_and_scope_listings,
+            strict_appends_never_resurrect_a_deleted_session,
             cancelled_queued_runs_are_not_dequeued,
             steering_is_rejected_after_a_queued_run_is_cancelled,
             terminal_runs_reject_late_signals,

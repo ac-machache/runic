@@ -22,7 +22,7 @@ pub(super) fn serde(e: serde_json::Error) -> Error {
 /// Arbitrary fixed key for the migration advisory lock (ascii "runicsub").
 const MIGRATION_LOCK_KEY: i64 = 0x72756e6963737562_u64 as i64;
 
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     include_str!("../../migrations/0001_sessions.sql"),
     include_str!("../../migrations/0002_chat_search.sql"),
     include_str!("../../migrations/0003_artifacts.sql"),
@@ -30,6 +30,7 @@ const MIGRATIONS: [&str; 7] = [
     include_str!("../../migrations/0005_run_inputs.sql"),
     include_str!("../../migrations/0006_thread_leases_and_signals.sql"),
     include_str!("../../migrations/0007_session_summaries.sql"),
+    include_str!("../../migrations/0008_child_sessions.sql"),
 ];
 
 const SCHEMA_VERSION: i32 = MIGRATIONS.len() as i32;

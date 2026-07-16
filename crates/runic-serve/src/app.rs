@@ -163,6 +163,10 @@ fn routes(state: AppState) -> Router {
                 .patch(threads::update_thread)
                 .delete(threads::delete_thread),
         )
+        .route(
+            "/threads/{thread_id}/children",
+            get(threads::list_thread_children),
+        )
         .route("/threads/{thread_id}/events", get(threads::thread_events))
         .route("/threads/{thread_id}/state", get(threads::thread_state))
         .route(

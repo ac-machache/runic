@@ -12,8 +12,8 @@ use runic_state::SessionEvent;
 use runic_types::Role;
 
 use super::{db, migrate, serde};
-use crate::sessions::event_at;
-use crate::{ChatHit, Result, SessionMeta, SessionStore, StoredEvent};
+use crate::sessions::{SessionScope, event_at};
+use crate::{ChatHit, Error, Result, SessionMeta, SessionStore, StoredEvent};
 
 /// A Postgres session store over a connection pool.
 pub struct PostgresSessionStore {
@@ -101,6 +101,8 @@ fn row_to_meta(row: sqlx::postgres::PgRow) -> Result<SessionMeta> {
         event_count: row.try_get::<i64, _>("event_count").map_err(db)? as u64,
         created_at: row.try_get("created_at").map_err(db)?,
         last_activity: row.try_get("last_activity").map_err(db)?,
+        agent: row.try_get("agent").map_err(db)?,
+        parent_session: row.try_get("parent_session").map_err(db)?,
         run_count: row.try_get::<i64, _>("run_count").map_err(db)? as u64,
         errored_runs: row.try_get::<i64, _>("errored_runs").map_err(db)? as u64,
         input_tokens: row.try_get::<i64, _>("input_tokens").map_err(db)? as u64,
@@ -224,6 +226,34 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
+    async fn append_batch_strict(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        events: &[SessionEvent],
+    ) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM sessions WHERE tenant = $1 AND session_id = $2 FOR UPDATE",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        if exists.is_none() {
+            return Err(Error::NotFound(format!("session {session_id}")));
+        }
+        for event in events {
+            write_event(&mut tx, tenant, session_id, event).await?;
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(())
+    }
+
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
             "SELECT seq, event FROM session_events
@@ -321,29 +351,47 @@ impl SessionStore for PostgresSessionStore {
         tenant: &str,
         after: Option<(DateTime<Utc>, String)>,
         limit: usize,
+        scope: SessionScope,
     ) -> Result<Vec<SessionMeta>> {
+        let (scope_kind, scope_parent) = match &scope {
+            SessionScope::Roots => ("roots", None),
+            SessionScope::ChildrenOf(parent) => ("children", Some(parent.clone())),
+            SessionScope::All => ("all", None),
+        };
         let rows = match after {
             Some((at, id)) => sqlx::query(
                 "SELECT session_id, label, event_count, created_at, last_activity,
+                        agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
                  FROM sessions
                  WHERE tenant = $1 AND (last_activity, session_id) < ($2, $3)
+                   AND (($5 = 'all')
+                     OR ($5 = 'roots' AND parent_session IS NULL)
+                     OR ($5 = 'children' AND parent_session = $6))
                  ORDER BY last_activity DESC, session_id DESC LIMIT $4",
             )
             .bind(tenant)
             .bind(at)
             .bind(id)
-            .bind(limit as i64),
+            .bind(limit as i64)
+            .bind(scope_kind)
+            .bind(scope_parent),
             None => sqlx::query(
                 "SELECT session_id, label, event_count, created_at, last_activity,
+                        agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
                  FROM sessions WHERE tenant = $1
+                   AND (($3 = 'all')
+                     OR ($3 = 'roots' AND parent_session IS NULL)
+                     OR ($3 = 'children' AND parent_session = $4))
                  ORDER BY last_activity DESC, session_id DESC LIMIT $2",
             )
             .bind(tenant)
-            .bind(limit as i64),
+            .bind(limit as i64)
+            .bind(scope_kind)
+            .bind(scope_parent),
         }
         .fetch_all(&self.pool)
         .await
@@ -351,9 +399,34 @@ impl SessionStore for PostgresSessionStore {
         rows.into_iter().map(row_to_meta).collect()
     }
 
+    async fn create_child_session(
+        &self,
+        tenant: &str,
+        session_id: &str,
+        parent_session: &str,
+        agent: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO sessions (tenant, session_id, parent_session, agent)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant, session_id) DO UPDATE
+               SET parent_session = EXCLUDED.parent_session,
+                   agent = EXCLUDED.agent",
+        )
+        .bind(tenant)
+        .bind(session_id)
+        .bind(parent_session)
+        .bind(agent)
+        .execute(&self.pool)
+        .await
+        .map_err(db)?;
+        Ok(())
+    }
+
     async fn list_sessions(&self, tenant: &str) -> Result<Vec<SessionMeta>> {
         let rows = sqlx::query(
             "SELECT session_id, label, event_count, created_at, last_activity,
+                        agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
              FROM sessions WHERE tenant = $1 ORDER BY last_activity DESC",
@@ -373,6 +446,7 @@ impl SessionStore for PostgresSessionStore {
     async fn session_meta(&self, tenant: &str, session_id: &str) -> Result<Option<SessionMeta>> {
         let row = sqlx::query(
             "SELECT session_id, label, event_count, created_at, last_activity,
+                        agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
              FROM sessions WHERE tenant = $1 AND session_id = $2",

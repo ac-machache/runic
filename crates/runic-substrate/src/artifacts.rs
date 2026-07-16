@@ -97,6 +97,19 @@ pub trait ArtifactStore: Send + Sync {
         }
         Ok(artifacts.len())
     }
+
+    /// Remove artifacts orphaned by a partial write (bytes stored but never
+    /// indexed), skipping anything younger than `older_than` so an in-flight
+    /// `put` is never raced. Idempotent; returns how many were swept. Default
+    /// `0` — single-layer backends have no bytes/index split to orphan.
+    async fn sweep_orphans(
+        &self,
+        _tenant: &str,
+        _session_id: &str,
+        _older_than: chrono::Duration,
+    ) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 /// Generate a fresh artifact id.

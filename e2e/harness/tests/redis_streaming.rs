@@ -62,8 +62,10 @@ fn redis_broker_round_trips_an_event() {
         let mut rx = b.subscribe(t, th).await.expect("subscribe failed");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let evt = SessionEvent::TurnBoundary {
+        let evt = SessionEvent::RunStart {
             run_id: "r1".into(),
+            agent: None,
+            audit: None,
             at: chrono::Utc::now(),
         };
         b.publish(t, th, &evt).await;
@@ -73,7 +75,7 @@ fn redis_broker_round_trips_an_event() {
             .expect("no event within timeout")
             .expect("broker channel closed");
         match got {
-            SessionEvent::TurnBoundary { run_id, .. } => assert_eq!(run_id, "r1"),
+            SessionEvent::RunStart { run_id, .. } => assert_eq!(run_id, "r1"),
             other => panic!("unexpected event over redis: {other:?}"),
         }
     });
@@ -94,8 +96,10 @@ fn cross_tenant_channels_do_not_leak() {
         b.publish(
             "tenantY",
             "th",
-            &SessionEvent::TurnBoundary {
+            &SessionEvent::RunStart {
                 run_id: "foreign".into(),
+                agent: None,
+                audit: None,
                 at: chrono::Utc::now(),
             },
         )
@@ -103,8 +107,10 @@ fn cross_tenant_channels_do_not_leak() {
         b.publish(
             "tenantX",
             "th",
-            &SessionEvent::TurnBoundary {
+            &SessionEvent::RunStart {
                 run_id: "mine".into(),
+                agent: None,
+                audit: None,
                 at: chrono::Utc::now(),
             },
         )
@@ -115,7 +121,7 @@ fn cross_tenant_channels_do_not_leak() {
             .expect("no event within timeout")
             .expect("broker channel closed");
         match got {
-            SessionEvent::TurnBoundary { run_id, .. } => {
+            SessionEvent::RunStart { run_id, .. } => {
                 assert_eq!(
                     run_id, "mine",
                     "received an event from another tenant's channel"

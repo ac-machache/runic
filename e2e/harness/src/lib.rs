@@ -11,7 +11,7 @@ use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderEr
 use runic_serve::{AgentFactory, BoxedAgentFactory, single_agent};
 use runic_skills::SkillSet;
 use runic_state::AgentState;
-use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic_subagent::{SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 
@@ -30,7 +30,7 @@ pub struct DummyFactory {
 
 #[async_trait]
 impl AgentFactory for DummyFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> Agent {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
         let provider: Arc<dyn Provider> = if self.real_mistral {
             let key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
             Arc::new(runic_provider::mistral::MistralDriver::new(key))
@@ -38,7 +38,7 @@ impl AgentFactory for DummyFactory {
             Arc::new(ScriptedProvider)
         };
         let model = std::env::var("RUNIC_MODEL").unwrap_or_else(|_| "mistral-medium-latest".into());
-        Composer::new(provider, model)
+        let agent = Composer::new(provider, model)
             .instructions("e2e harness agent")
             .with(
                 ability("core")
@@ -63,8 +63,8 @@ impl AgentFactory for DummyFactory {
             )
             .subagent_builder(Arc::new(ChildBuilder))
             .build(tenant, session_id)
-            .await
-            .expect("harness composer build")
+            .await?;
+        Ok(agent)
     }
 }
 
@@ -80,17 +80,10 @@ async fn docs_skill() -> Arc<SkillSet> {
     Arc::new(SkillSet::load_dir("docs", dir.path()).await)
 }
 
-fn docs_worker() -> AgentDef {
-    AgentDef {
-        name: DOCS_WORKER.to_string(),
-        description: "a gated harness worker".to_string(),
-        provider: None,
-        model: None,
-        allowed_tools: vec![],
-        skills: vec![],
-        max_turns: Some(3),
-        system_prompt: "you are a harness worker".to_string(),
-    }
+fn docs_worker() -> runic::subagent::SubagentDraft {
+    runic::subagent::subagent(DOCS_WORKER, "a gated harness worker")
+        .prompt("you are a harness worker")
+        .max_turns(3)
 }
 
 struct ChildProvider;
@@ -189,7 +182,7 @@ fn completed_tool_names(messages: &[Message]) -> HashSet<String> {
         .collect()
 }
 
-fn result_content_for<'a>(messages: &'a [Message], tool_name: &str) -> Option<&'a str> {
+fn result_content_for(messages: &[Message], tool_name: &str) -> Option<String> {
     messages
         .iter()
         .rev()
@@ -203,7 +196,7 @@ fn result_content_for<'a>(messages: &'a [Message], tool_name: &str) -> Option<&'
                 tool_name: name,
                 content,
                 ..
-            } if name == tool_name => Some(content.as_str()),
+            } if name == tool_name => Some(content.text()),
             _ => None,
         })
 }
@@ -311,6 +304,7 @@ fn tool_call(name: &str, input: serde_json::Value) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         },
     }
 }
@@ -326,6 +320,7 @@ fn text_response(text: String) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         },
     }
 }

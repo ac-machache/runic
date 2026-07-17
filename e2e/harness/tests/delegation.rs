@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use proptest::prelude::*;
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
+use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 
@@ -23,6 +23,7 @@ fn text(t: &str) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: 1,
             output_tokens: 1,
+            ..TokenUsage::default()
         },
     }
 }
@@ -44,6 +45,7 @@ fn tool_call(id: String, name: &str, input: serde_json::Value) -> CompletionResp
         usage: TokenUsage {
             input_tokens: 1,
             output_tokens: 1,
+            ..TokenUsage::default()
         },
     }
 }
@@ -141,17 +143,13 @@ impl SubagentBuilder for Builder {
     }
 }
 
-fn roster() -> Arc<AgentRoster> {
-    Arc::new(AgentRoster::new(vec![AgentDef {
-        name: "worker".into(),
-        description: "a worker subagent".into(),
-        provider: None,
-        model: None,
-        allowed_tools: vec!["*".into()],
-        skills: vec![],
-        max_turns: Some(4),
-        system_prompt: "you are a worker".into(),
-    }]))
+fn roster() -> Vec<Subagent> {
+    vec![
+        Subagent::new("worker", "a worker subagent")
+            .prompt("you are a worker")
+            .allowed_tools(["*"])
+            .max_turns(4),
+    ]
 }
 
 #[derive(Debug, Clone)]

@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "runic"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1752,7 +1752,6 @@ dependencies = [
  "runic-hook",
  "runic-macros",
  "runic-mcp",
- "runic-memory",
  "runic-provider",
  "runic-skills",
  "runic-state",
@@ -1771,8 +1770,9 @@ dependencies = [
 
 [[package]]
 name = "runic-agent"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "futures",
@@ -1789,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "runic-commands"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "serde",
@@ -1828,7 +1828,7 @@ dependencies = [
 
 [[package]]
 name = "runic-hook"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "runic-state",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "runic-macros"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "runic-mcp"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1865,25 +1865,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "runic-memory"
-version = "0.8.3"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "libc",
- "regex",
- "runic-tool",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "runic-provider"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "futures",
@@ -1899,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "runic-serve"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1929,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "runic-skills"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1943,8 +1926,10 @@ dependencies = [
 
 [[package]]
 name = "runic-state"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "chrono",
  "runic-types",
  "serde",
@@ -1955,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "runic-subagent"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1966,9 +1951,8 @@ dependencies = [
  "runic-skills",
  "runic-state",
  "runic-tool",
- "serde",
+ "runic-types",
  "serde_json",
- "serde_yml",
  "tokio",
  "tracing",
  "uuid",
@@ -1976,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "runic-substrate"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1996,17 +1980,18 @@ dependencies = [
 
 [[package]]
 name = "runic-tool"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "anyhow",
  "async-trait",
+ "runic-types",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "runic-transcriber"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2019,10 +2004,11 @@ dependencies = [
 
 [[package]]
 name = "runic-types"
-version = "0.8.3"
+version = "0.9.13"
 dependencies = [
  "serde",
  "serde_json",
+ "url",
  "uuid",
 ]
 

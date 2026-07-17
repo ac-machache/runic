@@ -79,6 +79,7 @@ impl Provider for ScriptProvider {
                     usage: TokenUsage {
                         input_tokens: 1,
                         output_tokens: 1,
+                        ..TokenUsage::default()
                     },
                 })
             }
@@ -92,6 +93,7 @@ impl Provider for ScriptProvider {
                 usage: TokenUsage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    ..TokenUsage::default()
                 },
             }),
         }

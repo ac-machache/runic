@@ -9,7 +9,11 @@ use zeroize::Zeroizing;
 
 const DEFAULT_BASE_URL: &str = "https://api.mistral.ai/v1";
 const USER_AGENT: &str = "runic/0.1.0";
-const MAX_RETRIES: u32 = 3;
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 50 * 1024 * 1024;
+const MAX_IMAGES_PER_REQUEST: usize = 8;
 
 pub struct MistralDriver {
     api_key: Zeroizing<String>,
@@ -29,6 +33,8 @@ impl MistralDriver {
             base_url,
             client: reqwest::Client::builder()
                 .user_agent(USER_AGENT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             reasoning_effort: None,
@@ -43,6 +49,80 @@ impl MistralDriver {
     fn chat_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+}
+
+fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|secs| secs.saturating_mul(1000))
+}
+
+fn http_error(status: u16, retry_after: Option<u64>, message: String) -> ProviderError {
+    match status {
+        429 => ProviderError::RateLimited {
+            retry_after_ms: retry_after.unwrap_or(5000),
+        },
+        401 | 403 => ProviderError::AuthenticationFailed(message),
+        s if s >= 500 => ProviderError::Overloaded {
+            retry_after_ms: retry_after.unwrap_or(2000),
+        },
+        _ => ProviderError::Api { status, message },
+    }
+}
+
+fn base64_len_bytes(data: &str) -> usize {
+    data.len() / 4 * 3
+}
+
+fn validate_media(request: &CompletionRequest) -> Result<(), ProviderError> {
+    let mut images = 0usize;
+    for msg in &request.messages {
+        let MessageContent::Blocks(blocks) = &msg.content else {
+            continue;
+        };
+        for block in blocks {
+            match block {
+                ContentBlock::Image { data, .. } => {
+                    images += 1;
+                    if base64_len_bytes(data) > MAX_IMAGE_BYTES {
+                        return Err(ProviderError::Api {
+                            status: 413,
+                            message: format!(
+                                "image exceeds Mistral's {} MB limit",
+                                MAX_IMAGE_BYTES / (1024 * 1024)
+                            ),
+                        });
+                    }
+                }
+                ContentBlock::File { data, .. } => {
+                    if base64_len_bytes(data) > MAX_DOCUMENT_BYTES {
+                        return Err(ProviderError::Api {
+                            status: 413,
+                            message: format!(
+                                "document exceeds Mistral's {} MB limit",
+                                MAX_DOCUMENT_BYTES / (1024 * 1024)
+                            ),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if images > MAX_IMAGES_PER_REQUEST {
+        return Err(ProviderError::Api {
+            status: 413,
+            message: format!(
+                "request has {images} images; Mistral allows {MAX_IMAGES_PER_REQUEST}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -430,9 +510,13 @@ fn build_request(
             Some(t) if t.enabled => Some("reasoning"),
             _ => None,
         },
-        reasoning_effort: match &request.thinking {
-            Some(t) if !t.enabled => Some("none".to_string()),
-            _ => driver_effort.map(str::to_string),
+        reasoning_effort: if request.model.starts_with("magistral") {
+            None
+        } else {
+            match &request.thinking {
+                Some(t) if !t.enabled => Some("none".to_string()),
+                _ => driver_effort.map(str::to_string),
+            }
         },
         stream,
     }
@@ -575,6 +659,255 @@ fn parse_response(response: MistralResponse) -> Result<CompletionResponse, Provi
     })
 }
 
+struct StreamAccumulator {
+    text_content: String,
+    thinking_content: String,
+    think_filter: StreamingThinkFilter,
+    tool_accum: Vec<(String, String, String)>,
+    finish_reason: Option<String>,
+    usage: TokenUsage,
+    events: Vec<StreamEvent>,
+}
+
+impl StreamAccumulator {
+    fn new() -> Self {
+        Self {
+            text_content: String::new(),
+            thinking_content: String::new(),
+            think_filter: StreamingThinkFilter::new(),
+            tool_accum: Vec::new(),
+            finish_reason: None,
+            usage: TokenUsage::default(),
+            events: Vec::new(),
+        }
+    }
+
+    fn drain_events(&mut self) -> Vec<StreamEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn handle_line(&mut self, line: &str) -> Result<bool, ProviderError> {
+        let line = line.trim_end();
+        if line.is_empty() || line.starts_with(':') {
+            return Ok(false);
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            return Ok(false);
+        };
+        let data = data.trim_start();
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+        let json: serde_json::Value = match serde_json::from_str(data) {
+            Ok(value) => value,
+            Err(_) => {
+                warn!(chunk = %data, "unparseable Mistral stream chunk");
+                return Ok(false);
+            }
+        };
+        if json["object"].as_str() == Some("error") || json.get("error").is_some() {
+            return Err(ProviderError::Api {
+                status: 200,
+                message: data.to_string(),
+            });
+        }
+
+        if let Some(u) = json.get("usage") {
+            if let Some(pt) = u["prompt_tokens"].as_u64() {
+                self.usage.input_tokens = pt;
+            }
+            if let Some(ct) = u["completion_tokens"].as_u64() {
+                self.usage.output_tokens = ct;
+            }
+            if let Some(cr) = u["prompt_tokens_details"]["cached_tokens"].as_u64() {
+                self.usage.cache_read_tokens = cr;
+            }
+        }
+
+        let Some(choices) = json["choices"].as_array() else {
+            return Ok(false);
+        };
+        for choice in choices {
+            let delta = &choice["delta"];
+
+            match &delta["content"] {
+                serde_json::Value::String(text) if !text.is_empty() => {
+                    self.text_content.push_str(text);
+                    let actions = self.think_filter.process(text);
+                    for action in actions {
+                        match action {
+                            FilterAction::EmitText(t) => {
+                                self.events.push(StreamEvent::TextDelta { text: t });
+                            }
+                            FilterAction::EmitThinking(t) => {
+                                self.thinking_content.push_str(&t);
+                                self.events.push(StreamEvent::ThinkingDelta { text: t });
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Array(chunks) => {
+                    for part in chunks {
+                        match part.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                if let Some(t) = part.get("text").and_then(|t| t.as_str())
+                                    && !t.is_empty()
+                                {
+                                    self.text_content.push_str(t);
+                                    self.events.push(StreamEvent::TextDelta {
+                                        text: t.to_string(),
+                                    });
+                                }
+                            }
+                            Some("thinking") => {
+                                let joined = part
+                                    .get("thinking")
+                                    .and_then(|t| t.as_array())
+                                    .map(|parts| {
+                                        parts
+                                            .iter()
+                                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                            .collect::<Vec<_>>()
+                                            .join("")
+                                    })
+                                    .unwrap_or_default();
+                                if !joined.is_empty() {
+                                    self.thinking_content.push_str(&joined);
+                                    self.events
+                                        .push(StreamEvent::ThinkingDelta { text: joined });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if let Some(calls) = delta["tool_calls"].as_array() {
+                for call in calls {
+                    let idx = call["index"].as_u64().unwrap_or(0) as usize;
+                    while self.tool_accum.len() <= idx {
+                        self.tool_accum
+                            .push((String::new(), String::new(), String::new()));
+                    }
+                    if let Some(id) = call["id"].as_str()
+                        && !id.is_empty()
+                    {
+                        self.tool_accum[idx].0 = id.to_string();
+                    }
+                    if let Some(func) = call.get("function") {
+                        if let Some(name) = func["name"].as_str() {
+                            self.tool_accum[idx].1 = name.to_string();
+                            self.events.push(StreamEvent::ToolUseStart {
+                                id: self.tool_accum[idx].0.clone(),
+                                name: name.to_string(),
+                            });
+                        }
+                        match &func["arguments"] {
+                            serde_json::Value::String(args) => {
+                                self.tool_accum[idx].2.push_str(args);
+                                if !args.is_empty() {
+                                    self.events
+                                        .push(StreamEvent::ToolInputDelta { text: args.clone() });
+                                }
+                            }
+                            serde_json::Value::Object(_) => {
+                                let args = func["arguments"].to_string();
+                                self.tool_accum[idx].2 = args.clone();
+                                self.events.push(StreamEvent::ToolInputDelta { text: args });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            if let Some(fr) = choice["finish_reason"].as_str() {
+                self.finish_reason = Some(fr.to_string());
+            }
+        }
+        Ok(false)
+    }
+
+    fn finish(mut self) -> (CompletionResponse, Vec<StreamEvent>) {
+        let actions = self.think_filter.flush();
+        for action in actions {
+            match action {
+                FilterAction::EmitText(t) => {
+                    self.events.push(StreamEvent::TextDelta { text: t });
+                }
+                FilterAction::EmitThinking(t) => {
+                    self.thinking_content.push_str(&t);
+                    self.events.push(StreamEvent::ThinkingDelta { text: t });
+                }
+            }
+        }
+
+        let mut content = Vec::new();
+        if !self.thinking_content.is_empty() {
+            content.push(ContentBlock::Thinking {
+                thinking: self.thinking_content.clone(),
+                signature: None,
+                provider_metadata: Some(serde_json::json!({ "format": "mistral" })),
+            });
+        }
+        if !self.text_content.is_empty() {
+            let (visible, _) = split_think(&self.text_content);
+            if !visible.is_empty() {
+                content.push(ContentBlock::Text {
+                    text: visible,
+                    provider_metadata: None,
+                });
+            }
+        }
+
+        let mut tool_calls = Vec::new();
+        for (id, name, arguments) in &self.tool_accum {
+            if id.is_empty() || name.is_empty() {
+                warn!(tool_id = %id, tool_name = %name, "skipping malformed streamed tool call");
+                continue;
+            }
+            let input: serde_json::Value =
+                serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
+            content.push(ContentBlock::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                provider_metadata: None,
+            });
+            tool_calls.push(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            });
+            self.events.push(StreamEvent::ToolUseEnd {
+                id: id.clone(),
+                name: name.clone(),
+                input,
+            });
+        }
+
+        let stop_reason = map_stop_reason(self.finish_reason.as_deref(), !tool_calls.is_empty());
+        let mut usage = self.usage;
+        if !content.is_empty() && usage.input_tokens == 0 && usage.output_tokens == 0 {
+            usage.output_tokens = 1;
+        }
+        self.events
+            .push(StreamEvent::ContentComplete { stop_reason, usage });
+
+        (
+            CompletionResponse {
+                content,
+                stop_reason,
+                tool_calls,
+                usage,
+            },
+            self.events,
+        )
+    }
+}
+
 #[async_trait]
 impl Provider for MistralDriver {
     fn name(&self) -> &str {
@@ -585,51 +918,34 @@ impl Provider for MistralDriver {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, ProviderError> {
+        validate_media(&request)?;
         let body = build_request(&request, false, self.reasoning_effort.as_deref());
+        let url = self.chat_url();
+        debug!(url = %url, "sending Mistral request");
+        let resp = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", self.api_key.as_str()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
 
-        for attempt in 0..=MAX_RETRIES {
-            let url = self.chat_url();
-            debug!(url = %url, attempt, "sending Mistral request");
-            let resp = self
-                .client
-                .post(&url)
-                .header("content-type", "application/json")
-                .header("authorization", format!("Bearer {}", self.api_key.as_str()))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| ProviderError::Http(e.to_string()))?;
-
-            let status = resp.status().as_u16();
-            if status == 429 {
-                if attempt < MAX_RETRIES {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "rate limited, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-                    continue;
-                }
-                return Err(ProviderError::RateLimited {
-                    retry_after_ms: 5000,
-                });
-            }
-            if !resp.status().is_success() {
-                let message = resp.text().await.unwrap_or_default();
-                return Err(ProviderError::Api { status, message });
-            }
-
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| ProviderError::Http(e.to_string()))?;
-            let parsed: MistralResponse =
-                serde_json::from_str(&text).map_err(|e| ProviderError::Parse(e.to_string()))?;
-            return parse_response(parsed);
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let retry_after = retry_after_ms(resp.headers());
+            let message = resp.text().await.unwrap_or_default();
+            return Err(http_error(status, retry_after, message));
         }
 
-        Err(ProviderError::Api {
-            status: 0,
-            message: "max retries exceeded".to_string(),
-        })
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
+        let parsed: MistralResponse =
+            serde_json::from_str(&text).map_err(|e| ProviderError::Parse(e.to_string()))?;
+        parse_response(parsed)
     }
 
     async fn stream(
@@ -637,284 +953,52 @@ impl Provider for MistralDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, ProviderError> {
+        validate_media(&request)?;
         let body = build_request(&request, true, self.reasoning_effort.as_deref());
+        let url = self.chat_url();
+        debug!(url = %url, "sending Mistral stream request");
+        let resp = self
+            .client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .header("authorization", format!("Bearer {}", self.api_key.as_str()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Http(e.to_string()))?;
 
-        for attempt in 0..=MAX_RETRIES {
-            let url = self.chat_url();
-            debug!(url = %url, attempt, "sending Mistral stream request");
-            let resp = self
-                .client
-                .post(&url)
-                .header("content-type", "application/json")
-                .header("accept", "text/event-stream")
-                .header("authorization", format!("Bearer {}", self.api_key.as_str()))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| ProviderError::Http(e.to_string()))?;
-
-            let status = resp.status().as_u16();
-            if status == 429 {
-                if attempt < MAX_RETRIES {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "rate limited (stream), retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-                    continue;
-                }
-                return Err(ProviderError::RateLimited {
-                    retry_after_ms: 5000,
-                });
-            }
-            if !resp.status().is_success() {
-                let message = resp.text().await.unwrap_or_default();
-                return Err(ProviderError::Api { status, message });
-            }
-
-            let mut buffer = String::new();
-            let mut text_content = String::new();
-            let mut thinking_content = String::new();
-            let mut think_filter = StreamingThinkFilter::new();
-            let mut tool_accum: Vec<(String, String, String)> = Vec::new();
-            let mut finish_reason: Option<String> = None;
-            let mut usage = TokenUsage::default();
-
-            let mut byte_stream = resp.bytes_stream();
-            while let Some(chunk_result) = byte_stream.next().await {
-                let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim_end().to_string();
-                    buffer = buffer[pos + 1..].to_string();
-
-                    if line.is_empty() || line.starts_with(':') {
-                        continue;
-                    }
-                    let data = match line.strip_prefix("data:") {
-                        Some(d) => d.trim_start(),
-                        None => continue,
-                    };
-                    if data == "[DONE]" {
-                        continue;
-                    }
-                    let json: serde_json::Value = match serde_json::from_str(data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    if let Some(u) = json.get("usage") {
-                        if let Some(pt) = u["prompt_tokens"].as_u64() {
-                            usage.input_tokens = pt;
-                        }
-                        if let Some(ct) = u["completion_tokens"].as_u64() {
-                            usage.output_tokens = ct;
-                        }
-                        if let Some(cr) = u["prompt_tokens_details"]["cached_tokens"].as_u64() {
-                            usage.cache_read_tokens = cr;
-                        }
-                    }
-
-                    let choices = match json["choices"].as_array() {
-                        Some(c) => c,
-                        None => continue,
-                    };
-                    for choice in choices {
-                        let delta = &choice["delta"];
-
-                        match &delta["content"] {
-                            serde_json::Value::String(text) if !text.is_empty() => {
-                                text_content.push_str(text);
-                                for action in think_filter.process(text) {
-                                    match action {
-                                        FilterAction::EmitText(t) => {
-                                            let _ =
-                                                tx.send(StreamEvent::TextDelta { text: t }).await;
-                                        }
-                                        FilterAction::EmitThinking(t) => {
-                                            thinking_content.push_str(&t);
-                                            let _ = tx
-                                                .send(StreamEvent::ThinkingDelta { text: t })
-                                                .await;
-                                        }
-                                    }
-                                }
-                            }
-                            serde_json::Value::Array(chunks) => {
-                                for part in chunks {
-                                    match part.get("type").and_then(|t| t.as_str()) {
-                                        Some("text") => {
-                                            if let Some(t) =
-                                                part.get("text").and_then(|t| t.as_str())
-                                                && !t.is_empty()
-                                            {
-                                                text_content.push_str(t);
-                                                let _ = tx
-                                                    .send(StreamEvent::TextDelta {
-                                                        text: t.to_string(),
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                        Some("thinking") => {
-                                            let joined = part
-                                                .get("thinking")
-                                                .and_then(|t| t.as_array())
-                                                .map(|parts| {
-                                                    parts
-                                                        .iter()
-                                                        .filter_map(|p| {
-                                                            p.get("text").and_then(|t| t.as_str())
-                                                        })
-                                                        .collect::<Vec<_>>()
-                                                        .join("")
-                                                })
-                                                .unwrap_or_default();
-                                            if !joined.is_empty() {
-                                                thinking_content.push_str(&joined);
-                                                let _ = tx
-                                                    .send(StreamEvent::ThinkingDelta {
-                                                        text: joined,
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-
-                        if let Some(calls) = delta["tool_calls"].as_array() {
-                            for call in calls {
-                                let idx = call["index"].as_u64().unwrap_or(0) as usize;
-                                while tool_accum.len() <= idx {
-                                    tool_accum.push((String::new(), String::new(), String::new()));
-                                }
-                                if let Some(id) = call["id"].as_str()
-                                    && !id.is_empty()
-                                {
-                                    tool_accum[idx].0 = id.to_string();
-                                }
-                                if let Some(func) = call.get("function") {
-                                    if let Some(name) = func["name"].as_str() {
-                                        tool_accum[idx].1 = name.to_string();
-                                        let _ = tx
-                                            .send(StreamEvent::ToolUseStart {
-                                                id: tool_accum[idx].0.clone(),
-                                                name: name.to_string(),
-                                            })
-                                            .await;
-                                    }
-                                    match &func["arguments"] {
-                                        serde_json::Value::String(args) => {
-                                            tool_accum[idx].2.push_str(args);
-                                            if !args.is_empty() {
-                                                let _ = tx
-                                                    .send(StreamEvent::ToolInputDelta {
-                                                        text: args.clone(),
-                                                    })
-                                                    .await;
-                                            }
-                                        }
-                                        serde_json::Value::Object(_) => {
-                                            let args = func["arguments"].to_string();
-                                            tool_accum[idx].2 = args.clone();
-                                            let _ = tx
-                                                .send(StreamEvent::ToolInputDelta { text: args })
-                                                .await;
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(fr) = choice["finish_reason"].as_str() {
-                            finish_reason = Some(fr.to_string());
-                        }
-                    }
-                }
-            }
-
-            for action in think_filter.flush() {
-                match action {
-                    FilterAction::EmitText(t) => {
-                        let _ = tx.send(StreamEvent::TextDelta { text: t }).await;
-                    }
-                    FilterAction::EmitThinking(t) => {
-                        thinking_content.push_str(&t);
-                        let _ = tx.send(StreamEvent::ThinkingDelta { text: t }).await;
-                    }
-                }
-            }
-
-            let mut content = Vec::new();
-            if !thinking_content.is_empty() {
-                content.push(ContentBlock::Thinking {
-                    thinking: thinking_content.clone(),
-                    signature: None,
-                    provider_metadata: Some(serde_json::json!({ "format": "mistral" })),
-                });
-            }
-            if !text_content.is_empty() {
-                let (visible, _) = split_think(&text_content);
-                if !visible.is_empty() {
-                    content.push(ContentBlock::Text {
-                        text: visible,
-                        provider_metadata: None,
-                    });
-                }
-            }
-
-            let mut tool_calls = Vec::new();
-            for (id, name, arguments) in &tool_accum {
-                if id.is_empty() || name.is_empty() {
-                    warn!(tool_id = %id, tool_name = %name, "skipping malformed streamed tool call");
-                    continue;
-                }
-                let input: serde_json::Value =
-                    serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({}));
-                content.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    provider_metadata: None,
-                });
-                tool_calls.push(ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                });
-                let _ = tx
-                    .send(StreamEvent::ToolUseEnd {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input,
-                    })
-                    .await;
-            }
-
-            let stop_reason = map_stop_reason(finish_reason.as_deref(), !tool_calls.is_empty());
-            if !content.is_empty() && usage.input_tokens == 0 && usage.output_tokens == 0 {
-                usage.output_tokens = 1;
-            }
-            let _ = tx
-                .send(StreamEvent::ContentComplete { stop_reason, usage })
-                .await;
-
-            return Ok(CompletionResponse {
-                content,
-                stop_reason,
-                tool_calls,
-                usage,
-            });
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let retry_after = retry_after_ms(resp.headers());
+            let message = resp.text().await.unwrap_or_default();
+            return Err(http_error(status, retry_after, message));
         }
 
-        Err(ProviderError::Api {
-            status: 0,
-            message: "max retries exceeded".to_string(),
-        })
+        let mut accum = StreamAccumulator::new();
+        let mut buffer = String::new();
+        let mut byte_stream = resp.bytes_stream();
+        'read: while let Some(chunk_result) = byte_stream.next().await {
+            let chunk = chunk_result.map_err(|e| ProviderError::Http(e.to_string()))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].to_string();
+                buffer = buffer[pos + 1..].to_string();
+                if accum.handle_line(&line)? {
+                    break 'read;
+                }
+            }
+            for event in accum.drain_events() {
+                let _ = tx.send(event).await;
+            }
+        }
+
+        let (response, events) = accum.finish();
+        for event in events {
+            let _ = tx.send(event).await;
+        }
+        Ok(response)
     }
 }
 
@@ -1328,5 +1412,268 @@ mod tests {
         );
         let custom = MistralDriver::with_base_url("key".into(), "https://proxy/v1/".into());
         assert_eq!(custom.chat_url(), "https://proxy/v1/chat/completions");
+    }
+
+    #[test]
+    fn magistral_models_never_receive_reasoning_effort() {
+        let mut req = request_with(vec![Message::user("hi")]);
+        req.model = "magistral-medium-latest".to_string();
+        req.thinking = Some(crate::ThinkingConfig {
+            enabled: false,
+            budget_tokens: None,
+        });
+        let v = serde_json::to_value(build_request(&req, false, Some("high"))).unwrap();
+        assert!(v.get("reasoning_effort").is_none());
+
+        req.thinking = None;
+        let v = serde_json::to_value(build_request(&req, false, Some("high"))).unwrap();
+        assert!(v.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn http_errors_classify_by_status() {
+        assert!(matches!(
+            http_error(429, Some(12_000), "slow down".into()),
+            ProviderError::RateLimited {
+                retry_after_ms: 12_000
+            }
+        ));
+        assert!(matches!(
+            http_error(429, None, String::new()),
+            ProviderError::RateLimited {
+                retry_after_ms: 5000
+            }
+        ));
+        assert!(matches!(
+            http_error(503, None, String::new()),
+            ProviderError::Overloaded { .. }
+        ));
+        assert!(matches!(
+            http_error(401, None, String::new()),
+            ProviderError::AuthenticationFailed(_)
+        ));
+        assert!(matches!(
+            http_error(422, None, String::new()),
+            ProviderError::Api { status: 422, .. }
+        ));
+    }
+
+    #[test]
+    fn retry_after_header_parses_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "7".parse().unwrap());
+        assert_eq!(retry_after_ms(&headers), Some(7000));
+        headers.insert("retry-after", "soon".parse().unwrap());
+        assert_eq!(retry_after_ms(&headers), None);
+        assert_eq!(retry_after_ms(&reqwest::header::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn media_preflight_enforces_mistral_limits() {
+        let big_image = "A".repeat((MAX_IMAGE_BYTES + 1024) * 4 / 3);
+        let req = request_with(vec![user_blocks(vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: big_image,
+        }])]);
+        assert!(matches!(
+            validate_media(&req),
+            Err(ProviderError::Api { status: 413, .. })
+        ));
+
+        let big_doc = "A".repeat((MAX_DOCUMENT_BYTES + 1024) * 4 / 3);
+        let req = request_with(vec![user_blocks(vec![ContentBlock::File {
+            media_type: "application/pdf".into(),
+            data: big_doc,
+        }])]);
+        assert!(matches!(
+            validate_media(&req),
+            Err(ProviderError::Api { status: 413, .. })
+        ));
+
+        let nine_images: Vec<ContentBlock> = (0..9)
+            .map(|_| ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            })
+            .collect();
+        let req = request_with(vec![user_blocks(nine_images)]);
+        assert!(matches!(
+            validate_media(&req),
+            Err(ProviderError::Api { status: 413, .. })
+        ));
+
+        let req = request_with(vec![user_blocks(vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        }])]);
+        assert!(validate_media(&req).is_ok());
+    }
+
+    fn feed(accum: &mut StreamAccumulator, lines: &[&str]) -> bool {
+        for line in lines {
+            if accum.handle_line(line).unwrap() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn stream_accumulates_text_deltas_and_finishes_on_done() {
+        let mut accum = StreamAccumulator::new();
+        let done = feed(
+            &mut accum,
+            &[
+                r#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":"lo"}}]}"#,
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+                "data: [DONE]",
+            ],
+        );
+        assert!(done);
+        let (response, events) = accum.finish();
+        assert_eq!(response.content.len(), 1);
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "Hello"
+        ));
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert_eq!(response.usage.input_tokens, 10);
+        assert_eq!(response.usage.output_tokens, 2);
+        assert_eq!(response.usage.cache_read_tokens, 4);
+        let deltas: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, "Hello");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ContentComplete { .. }))
+        );
+    }
+
+    #[test]
+    fn stream_accumulates_parallel_tool_calls_by_index() {
+        let mut accum = StreamAccumulator::new();
+        feed(
+            &mut accum,
+            &[
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"abc123def","function":{"name":"lookup","arguments":"{\"q\":"}}]}}]}"#,
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"xyz789ghi","function":{"name":"fetch","arguments":{"url":"https://x"}}}]}}]}"#,
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"rust\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ],
+        );
+        let (response, events) = accum.finish();
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].name, "lookup");
+        assert_eq!(
+            response.tool_calls[0].input,
+            serde_json::json!({"q":"rust"})
+        );
+        assert_eq!(response.tool_calls[1].name, "fetch");
+        assert_eq!(
+            response.tool_calls[1].input,
+            serde_json::json!({"url":"https://x"})
+        );
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::ToolUseStart { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, StreamEvent::ToolUseEnd { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn stream_splits_think_tags_across_chunk_boundaries() {
+        let mut accum = StreamAccumulator::new();
+        feed(
+            &mut accum,
+            &[
+                r#"data: {"choices":[{"delta":{"content":"<th"}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":"ink>secret</think>public"}}]}"#,
+            ],
+        );
+        let (response, events) = accum.finish();
+        let thinking: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let visible: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, "secret");
+        assert_eq!(visible, "public");
+        assert!(
+            response.content.iter().any(
+                |b| matches!(b, ContentBlock::Thinking { thinking, .. } if thinking == "secret")
+            )
+        );
+        assert!(
+            response
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text == "public"))
+        );
+    }
+
+    #[test]
+    fn stream_surfaces_in_band_error_payloads() {
+        let mut accum = StreamAccumulator::new();
+        let err = accum
+            .handle_line(r#"data: {"object":"error","message":"capacity exceeded","code":3505}"#)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderError::Api { status: 200, ref message } if message.contains("capacity exceeded")
+        ));
+
+        let mut accum = StreamAccumulator::new();
+        assert!(
+            accum
+                .handle_line(r#"data: {"error":{"message":"boom"}}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn stream_tolerates_garbage_and_skips_malformed_calls() {
+        let mut accum = StreamAccumulator::new();
+        feed(
+            &mut accum,
+            &[
+                "data: not-json",
+                ": keepalive comment",
+                "",
+                "event: something",
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"","arguments":"{}"}}]}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+            ],
+        );
+        let (response, _) = accum.finish();
+        assert!(response.tool_calls.is_empty());
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text, .. } if text == "ok"
+        ));
     }
 }

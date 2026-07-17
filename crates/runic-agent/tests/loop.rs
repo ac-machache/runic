@@ -806,6 +806,60 @@ async fn prepare_request_carries_system_tools_and_user_message() {
     );
 }
 
+struct Named(&'static str);
+
+#[async_trait]
+impl Tool for Named {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        "named"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("ok"))
+    }
+}
+
+#[tokio::test]
+async fn prepare_request_orders_tools_deterministically_across_rebuilds() {
+    let mut orders = Vec::new();
+    for names in [
+        ["zeta", "alpha", "midway"],
+        ["midway", "zeta", "alpha"],
+        ["alpha", "midway", "zeta"],
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+        let mut builder = Agent::builder(provider.clone(), "u1", "s1").model("test");
+        for name in names {
+            builder = builder.tool(Arc::new(Named(name)));
+        }
+        let mut agent = builder
+            .output_schema(serde_json::json!({ "type": "object" }))
+            .build();
+        agent.run("hi").await.unwrap();
+
+        let listed: Vec<String> = provider
+            .last_request()
+            .tools
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        orders.push(listed);
+    }
+
+    assert_eq!(orders[0], vec!["alpha", "midway", "zeta", "final_answer"]);
+    assert_eq!(orders[0], orders[1]);
+    assert_eq!(orders[1], orders[2]);
+}
+
 #[tokio::test]
 async fn prepare_request_injects_final_answer_tool_when_schema_set() {
     let schema =

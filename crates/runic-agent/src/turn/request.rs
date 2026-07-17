@@ -52,6 +52,7 @@ impl Agent {
 
         // On-demand activations (materialized from state at the turn top).
         tools.extend(self.activated.specs().into_iter().map(spec_to_def));
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
 
         if let Some(schema) = &self.config.output_schema {
             tools.push(ToolDefinition {

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use runic::ability::{Ability, AbilityBundle, BuildCtx};
 use runic::composer::Composer;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -109,21 +109,15 @@ impl Tool for NamedTool {
     }
 }
 
-fn subagent_def(name: &str) -> AgentDef {
-    AgentDef {
-        name: name.into(),
-        description: format!("{name} subagent"),
-        provider: None,
-        model: None,
-        allowed_tools: vec!["*".into()],
-        skills: vec![],
-        max_turns: Some(3),
-        system_prompt: format!("you are {name}"),
-    }
+fn subagent_def(name: &str) -> Subagent {
+    Subagent::new(name, format!("{name} subagent"))
+        .allowed_tools(["*"])
+        .max_turns(3)
+        .prompt(format!("you are {name}"))
 }
 
 struct SubagentOwner {
-    def: AgentDef,
+    def: Subagent,
     tool_name: &'static str,
     child_provider: Arc<ScriptedProvider>,
 }

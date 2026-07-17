@@ -10,7 +10,7 @@ use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::AgentState;
-use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 
@@ -116,7 +116,7 @@ struct DeferredAbility {
     tools: Vec<Arc<dyn Tool>>,
     hooks: Vec<Arc<dyn WriteHook>>,
     skills: Vec<Arc<SkillSet>>,
-    subagents: Vec<AgentDef>,
+    subagents: Vec<Subagent>,
 }
 
 impl DeferredAbility {
@@ -152,7 +152,7 @@ impl DeferredAbility {
         self
     }
 
-    fn subagent(mut self, def: AgentDef) -> Self {
+    fn subagent(mut self, def: Subagent) -> Self {
         self.subagents.push(def);
         self
     }
@@ -204,17 +204,10 @@ async fn skill_catalog(namespace: &str, skill_name: &str, body: &str) -> Arc<Ski
     Arc::new(SkillSet::load_dir(namespace, dir.path()).await)
 }
 
-fn worker_def() -> AgentDef {
-    AgentDef {
-        name: "worker".into(),
-        description: "a worker subagent".into(),
-        provider: None,
-        model: None,
-        allowed_tools: vec![],
-        skills: vec![],
-        max_turns: Some(3),
-        system_prompt: "you are a worker".into(),
-    }
+fn worker_def() -> Subagent {
+    Subagent::new("worker", "a worker subagent")
+        .max_turns(3)
+        .prompt("you are a worker")
 }
 
 struct ChildBuilder;

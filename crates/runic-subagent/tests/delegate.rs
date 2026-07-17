@@ -7,9 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{
-    AgentDef, AgentRoster, DelegateTool, SpawnBudget, SubagentBuilder, SubagentReq,
-};
+use runic_subagent::{DelegateTool, SpawnBudget, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -40,7 +38,7 @@ struct FakeBuilder;
 #[async_trait]
 impl SubagentBuilder for FakeBuilder {
     async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(OneShot(format!("done: {}", req.def.name)))
+        Arc::new(OneShot(format!("done: {}", req.subagent.name)))
     }
 
     fn default_model(&self, _req: &SubagentReq<'_>) -> String {
@@ -48,13 +46,11 @@ impl SubagentBuilder for FakeBuilder {
     }
 }
 
-fn roster() -> Arc<AgentRoster> {
-    Arc::new(AgentRoster::new(vec![
-        AgentDef::parse_markdown("---\nname: reviewer\ndescription: reviews\n---\nReview things.")
-            .unwrap(),
-        AgentDef::parse_markdown("---\nname: researcher\ndescription: researches\n---\nResearch.")
-            .unwrap(),
-    ]))
+fn roster() -> Vec<Subagent> {
+    vec![
+        Subagent::new("reviewer", "reviews").prompt("Review things."),
+        Subagent::new("researcher", "researches").prompt("Research."),
+    ]
 }
 
 fn ctx() -> ToolContext {

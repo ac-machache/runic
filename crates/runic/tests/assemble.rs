@@ -8,7 +8,7 @@ use runic::ability::{
 use runic::composer::Composer;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_subagent::subagents;
+use runic_subagent::Subagent;
 use runic_substrate::sessions_memory;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -70,31 +70,20 @@ async fn write_skill(root: &std::path::Path, dir: &str, name: &str, description:
     .unwrap();
 }
 
-async fn write_agent(root: &std::path::Path, dir: &str, name: &str, description: &str) {
-    let dir = root.join(dir);
-    tokio::fs::create_dir_all(&dir).await.unwrap();
-    tokio::fs::write(
-        dir.join("AGENT.md"),
-        format!("---\nname: {name}\ndescription: {description}\n---\nAct carefully."),
-    )
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn composes_prompt_sections_in_order() {
     let provider = Arc::new(RecordingProvider::default());
     let skill_dir = tempfile::tempdir().unwrap();
-    let agent_dir = tempfile::tempdir().unwrap();
 
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
-    write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let agent = base(provider)
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation(subagents(agent_dir.path())))
+        .with(Delegation(vec![
+            Subagent::new("researcher", "researches").prompt("Act carefully."),
+        ]))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -112,10 +101,8 @@ async fn composes_prompt_sections_in_order() {
 async fn registers_enabled_tool_surfaces() {
     let provider = Arc::new(RecordingProvider::default());
     let skill_dir = tempfile::tempdir().unwrap();
-    let agent_dir = tempfile::tempdir().unwrap();
 
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
-    write_agent(agent_dir.path(), "researcher", "researcher", "researches").await;
 
     let mut agent = base(provider.clone())
         .with(basics())
@@ -125,7 +112,9 @@ async fn registers_enabled_tool_surfaces() {
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation(subagents(agent_dir.path())))
+        .with(Delegation(vec![
+            Subagent::new("researcher", "researches").prompt("Act carefully."),
+        ]))
         .with(Sessions(sessions_memory()))
         .build("alice", "s1")
         .await

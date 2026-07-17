@@ -8,7 +8,7 @@ use runic_agent::{Agent, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
 use runic_state::{TaskStatus, ThreadStats};
-use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
+use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage, ToolCall};
 
@@ -94,17 +94,8 @@ impl SubagentBuilder for StubBuilder {
     }
 }
 
-fn scout_roster() -> Arc<AgentRoster> {
-    Arc::new(AgentRoster::new(vec![AgentDef {
-        name: "scout".into(),
-        description: "research".into(),
-        provider: None,
-        model: None,
-        allowed_tools: vec![],
-        skills: vec![],
-        max_turns: None,
-        system_prompt: "you research".into(),
-    }]))
+fn scout_roster() -> Vec<Subagent> {
+    vec![Subagent::new("scout", "research").prompt("you research")]
 }
 
 async fn wait_for_finish(rx: &mut tokio::sync::broadcast::Receiver<Arc<SessionEvent>>) {

@@ -8,7 +8,7 @@ use runic::mcp::McpClient;
 use runic::provider::Provider;
 use runic::skills::SkillSet;
 use runic::state::AgentState;
-use runic::subagent::AgentRoster;
+use runic::subagent::Subagent;
 use runic::substrate::SessionStore;
 use runic::tool::{Tool, ToolContext, ToolResult};
 use runic::tools::default_tools;
@@ -23,7 +23,7 @@ fn assert_types_reachable() {
     fn _provider(_: &dyn Provider) {}
     fn _skill_set(_: SkillSet) {}
     fn _agent_state(_: AgentState) {}
-    fn _agent_roster(_: AgentRoster) {}
+    fn _subagent(_: Subagent) {}
     fn _session_store(_: &dyn SessionStore) {}
     fn _tool(_: &dyn Tool) {}
     fn _tool_context(_: ToolContext) {}

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use runic_agent::AgentBuilder;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::{ChildPersistence, ChildPersistenceHandle, ChildSink, PersistSink, SessionEvent};
-use runic_subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
+use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 use tokio::sync::mpsc;
@@ -62,14 +62,14 @@ fn delegate_to(agent: &str) -> CompletionResponse {
 }
 
 struct NestedBuilder {
-    roster: Arc<AgentRoster>,
+    roster: Vec<Subagent>,
     me: Weak<NestedBuilder>,
 }
 
 #[async_trait]
 impl SubagentBuilder for NestedBuilder {
     async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        let responses = match req.def.name.as_str() {
+        let responses = match req.subagent.name.as_str() {
             "mid" => vec![delegate_to("leaf"), text("mid done")],
             _ => vec![text("leaf done")],
         };
@@ -164,12 +164,10 @@ impl ChildSink for SharedSink {
 
 #[tokio::test]
 async fn nested_delegation_produces_a_walkable_persisted_hierarchy() {
-    let roster = Arc::new(AgentRoster::new(vec![
-        AgentDef::parse_markdown("---\nname: mid\ndescription: middle\n---\nDelegate onward.")
-            .unwrap(),
-        AgentDef::parse_markdown("---\nname: leaf\ndescription: leaf\n---\nAnswer directly.")
-            .unwrap(),
-    ]));
+    let roster = vec![
+        Subagent::new("mid", "middle").prompt("Delegate onward."),
+        Subagent::new("leaf", "leaf").prompt("Answer directly."),
+    ];
     let builder = Arc::new_cyclic(|weak| NestedBuilder {
         roster: roster.clone(),
         me: weak.clone(),

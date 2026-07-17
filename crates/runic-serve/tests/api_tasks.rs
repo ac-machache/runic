@@ -9,7 +9,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use runic::agent::Agent;
-use runic::subagent::{AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq};
+use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_state::SessionEvent;
@@ -95,16 +95,7 @@ impl AgentFactory for DelegatingFactory {
                 vec![delegate_background_response(), text_response("spawned")].into(),
             ),
         });
-        let roster = Arc::new(AgentRoster::new(vec![AgentDef {
-            name: "scout".into(),
-            description: "research".into(),
-            provider: None,
-            model: None,
-            allowed_tools: vec![],
-            skills: vec![],
-            max_turns: None,
-            system_prompt: "dig".into(),
-        }]));
+        let roster = vec![Subagent::new("scout", "research").prompt("dig")];
         Ok(Agent::builder(provider, tenant, session_id)
             .system_prompt("sys")
             .tool(Arc::new(DelegateTool::new(roster, Arc::new(StubBuilder))))

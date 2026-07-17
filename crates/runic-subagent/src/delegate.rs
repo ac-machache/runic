@@ -26,7 +26,7 @@ use runic_state::SessionEvent;
 use runic_state::{ChildPersistenceHandle, ChildPersistenceStatus, ChildSink, ExternalEvents};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
-use crate::def::{AgentDef, AgentRoster};
+use crate::subagent::{Subagent, roster_prompt_section};
 
 /// Default maximum delegation depth (parent=0, so this allows 3 levels).
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
@@ -54,7 +54,7 @@ pub struct DelegationCtx {
 }
 
 pub struct SubagentReq<'a> {
-    pub def: &'a AgentDef,
+    pub subagent: &'a Subagent,
     pub dctx: &'a DelegationCtx,
 }
 
@@ -78,7 +78,7 @@ pub trait SubagentBuilder: Send + Sync {
             req.dctx
                 .child_session
                 .clone()
-                .unwrap_or_else(|| format!("{}:{}", req.dctx.session, req.def.name)),
+                .unwrap_or_else(|| format!("{}:{}", req.dctx.session, req.subagent.name)),
         )
     }
 
@@ -91,7 +91,7 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
     let (tenant, session) = builder.identity(req);
     let provider = builder.provider(req).await;
     let model = req
-        .def
+        .subagent
         .model
         .clone()
         .unwrap_or_else(|| builder.default_model(req));
@@ -99,11 +99,11 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
 
     let scoped = builder
         .skill_catalog(req)
-        .filter(|_| !req.def.skills.is_empty())
-        .map(|catalog| Arc::new(catalog.scope_glob(&req.def.skills)))
+        .filter(|_| !req.subagent.skills.is_empty())
+        .map(|catalog| Arc::new(catalog.scope_glob(&req.subagent.skills)))
         .filter(|set| !set.is_empty());
 
-    let mut prompt = req.def.system_prompt.clone();
+    let mut prompt = req.subagent.system_prompt.clone();
     if let Some(set) = &scoped {
         prompt = format!("{prompt}\n\n{}", set.prompt_section());
     }
@@ -111,7 +111,7 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
     let mut b = Agent::builder(provider, tenant, session)
         .model(model)
         .system_prompt(prompt);
-    for t in req.def.scope_tools(&pool) {
+    for t in req.subagent.scope_tools(&pool) {
         b = b.tool(t);
     }
     if let Some(set) = &scoped
@@ -119,7 +119,7 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
     {
         b = b.tool(tool);
     }
-    if let Some(max_turns) = req.def.max_turns {
+    if let Some(max_turns) = req.subagent.max_turns {
         b = b.max_turns(max_turns);
     }
     builder.decorate(b, req).build()
@@ -201,7 +201,7 @@ pub struct BackgroundTask {
 
 /// The `delegate` tool.
 pub struct DelegateTool {
-    roster: Arc<AgentRoster>,
+    subagents: Vec<Subagent>,
     builder: Arc<dyn SubagentBuilder>,
     depth: u32,
     max_depth: u32,
@@ -212,9 +212,12 @@ pub struct DelegateTool {
 
 impl DelegateTool {
     /// A root delegate tool (depth 0) with default safeguards.
-    pub fn new(roster: Arc<AgentRoster>, builder: Arc<dyn SubagentBuilder>) -> Self {
+    pub fn new(
+        subagents: impl IntoIterator<Item = Subagent>,
+        builder: Arc<dyn SubagentBuilder>,
+    ) -> Self {
         Self {
-            roster,
+            subagents: subagents.into_iter().collect(),
             builder,
             depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
@@ -222,6 +225,22 @@ impl DelegateTool {
             cancel: CancelToken::new(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn roster_section(&self) -> String {
+        roster_prompt_section(&self.subagents)
+    }
+
+    fn find(&self, name: &str) -> Option<&Subagent> {
+        self.subagents.iter().find(|s| s.name == name)
+    }
+
+    fn roster_lines(&self) -> String {
+        self.subagents
+            .iter()
+            .map(Subagent::roster_line)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn with_depth(mut self, depth: u32) -> Self {
@@ -260,10 +279,10 @@ impl DelegateTool {
     }
 
     async fn delegate_one(&self, agent: &str, prompt: String, ctx: &ToolContext) -> ToolResult {
-        let Some(def) = self.roster.get(agent).cloned() else {
+        let Some(sub) = self.find(agent).cloned() else {
             return ToolResult::error(format!(
                 "unknown subagent '{agent}'. Available:\n{}",
-                self.roster.roster_lines()
+                self.roster_lines()
             ));
         };
         let guard = match self.budget.acquire() {
@@ -284,7 +303,7 @@ impl DelegateTool {
             dctx.child_session.clone(),
         );
         let started = std::time::Instant::now();
-        let outcome = run_child(&self.builder, &def, &dctx, &prompt, sink).await;
+        let outcome = run_child(&self.builder, &sub, &dctx, &prompt, sink).await;
         emit_finished(
             &external,
             &ctx.run_id,
@@ -310,7 +329,7 @@ impl DelegateTool {
         let futures = agents.iter().map(|name| {
             let name = name.clone();
             let prompt = prompt.clone();
-            let def = self.roster.get(&name).cloned();
+            let sub = self.find(&name).cloned();
             let builder = self.builder.clone();
             let acquired = self.budget.acquire();
             let mut dctx = self.child_ctx(self.cancel.clone(), ctx);
@@ -318,7 +337,7 @@ impl DelegateTool {
             let (call_id, turn) = edge_keys(ctx);
             let run_id = ctx.run_id.clone();
             async move {
-                let Some(def) = def else {
+                let Some(sub) = sub else {
                     return format!("[{name}] error: unknown subagent");
                 };
                 let guard = match acquired {
@@ -336,7 +355,7 @@ impl DelegateTool {
                     dctx.child_session.clone(),
                 );
                 let started = std::time::Instant::now();
-                let outcome = run_child(&builder, &def, &dctx, &prompt, sink).await;
+                let outcome = run_child(&builder, &sub, &dctx, &prompt, sink).await;
                 emit_finished(&external, &run_id, turn, &call_id, &name, &outcome, started);
                 let out = match outcome.result {
                     Ok(child) => format!("[{name}]\n{}", child.text),
@@ -356,7 +375,7 @@ impl DelegateTool {
         prompt: String,
         ctx: &ToolContext,
     ) -> ToolResult {
-        let Some(def) = self.roster.get(agent).cloned() else {
+        let Some(sub) = self.find(agent).cloned() else {
             return ToolResult::error(format!("unknown subagent '{agent}'"));
         };
         let guard = match self.budget.acquire() {
@@ -409,7 +428,7 @@ impl DelegateTool {
                 dctx.child_session.clone(),
             );
             let started = std::time::Instant::now();
-            let outcome = run_child(&builder, &def, &dctx, &prompt, sink).await;
+            let outcome = run_child(&builder, &sub, &dctx, &prompt, sink).await;
             emit_finished(
                 &external,
                 &run_id,
@@ -593,12 +612,12 @@ async fn begin_child(dctx: &mut DelegationCtx, agent: &str) -> Option<Box<dyn Ch
 
 async fn run_child(
     builder: &Arc<dyn SubagentBuilder>,
-    def: &AgentDef,
+    subagent: &Subagent,
     dctx: &DelegationCtx,
     prompt: &str,
     sink: Option<Box<dyn ChildSink>>,
 ) -> ChildOutcome {
-    let req = SubagentReq { def, dctx };
+    let req = SubagentReq { subagent, dctx };
     let mut child = assemble_subagent(builder.as_ref(), &req).await;
     let configured = child.model().to_string();
     if let Some(sink) = &sink {

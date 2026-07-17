@@ -42,43 +42,33 @@ async fn write_skill(root: &std::path::Path, name: &str) {
     .unwrap();
 }
 
-async fn write_agent(root: &std::path::Path, name: &str) {
-    tokio::fs::write(
-        root.join(format!("{name}.md")),
-        format!(
-            "---\nname: {name}\ndescription: handles {name} work\n---\nYou are {name}. {}",
-            "detail ".repeat(120)
-        ),
-    )
-    .await
-    .unwrap();
+fn bench_subagent(name: &str) -> runic_subagent::Subagent {
+    runic_subagent::Subagent::new(name, format!("handles {name} work"))
+        .prompt(format!("You are {name}. {}", "detail ".repeat(120)))
 }
 
 struct Fixture {
     skill_dir: tempfile::TempDir,
-    agent_dir: tempfile::TempDir,
 }
 
 async fn fixture() -> Fixture {
     let skill_dir = tempfile::tempdir().unwrap();
-    let agent_dir = tempfile::tempdir().unwrap();
     for name in ["review", "research", "deploy", "triage", "summarize"] {
         write_skill(skill_dir.path(), name).await;
     }
-    for name in ["scout", "coder", "critic"] {
-        write_agent(agent_dir.path(), name).await;
-    }
-    Fixture {
-        skill_dir,
-        agent_dir,
-    }
+    Fixture { skill_dir }
 }
 
-fn assembly(fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
+fn assembly(_fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
     Composer::new(Arc::new(NoopProvider), "bench")
         .instructions("you are the bench agent ".repeat(50))
         .with(Skills(skills))
-        .with(Delegation(runic_subagent::subagents(fx.agent_dir.path())))
+        .with(Delegation(
+            ["scout", "coder", "critic"]
+                .into_iter()
+                .map(bench_subagent)
+                .collect(),
+        ))
         .with(basics())
 }
 

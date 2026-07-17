@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use runic::ability::ability;
 use runic::composer::Composer;
-use runic::subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::routes::agents::{
@@ -177,16 +177,11 @@ async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
                 .deferred()
                 .tool(RefundTool)
                 .skills(billing_skills().await)
-                .subagent_def(AgentDef {
-                    name: "billing-worker".into(),
-                    description: "handles billing disputes".into(),
-                    provider: None,
-                    model: None,
-                    allowed_tools: vec![],
-                    skills: vec![],
-                    max_turns: Some(3),
-                    system_prompt: "you are a billing worker".into(),
-                }),
+                .subagent_def(
+                    Subagent::new("billing-worker", "handles billing disputes")
+                        .max_turns(3)
+                        .prompt("you are a billing worker"),
+                ),
         )
         .subagent_builder(Arc::new(ChildBuilder))
 }

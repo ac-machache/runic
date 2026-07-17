@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::AgentDef;
+use runic_subagent::Subagent;
 use runic_tool::{Tool, ToolCatalog};
 
 use super::subagent::SubagentDraft;
@@ -32,7 +32,7 @@ pub struct AbilityDraft {
     tools: Vec<Arc<dyn Tool>>,
     hooks: Vec<Arc<dyn WriteHook>>,
     skills: Vec<Arc<SkillSet>>,
-    subagents: Vec<AgentDef>,
+    subagents: Vec<Subagent>,
     nested: Vec<Arc<dyn Ability>>,
     tool_catalog: Option<Arc<dyn ToolCatalog>>,
 }
@@ -88,13 +88,13 @@ impl AbilityDraft {
         self
     }
 
-    pub fn subagent_def(mut self, def: AgentDef) -> Self {
-        self.subagents.push(def);
+    pub fn subagent_def(mut self, subagent: Subagent) -> Self {
+        self.subagents.push(subagent);
         self
     }
 
-    pub fn subagents(mut self, defs: impl IntoIterator<Item = AgentDef>) -> Self {
-        self.subagents.extend(defs);
+    pub fn subagents(mut self, subagents: impl IntoIterator<Item = Subagent>) -> Self {
+        self.subagents.extend(subagents);
         self
     }
 

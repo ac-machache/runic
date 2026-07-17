@@ -9,7 +9,7 @@ use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::SessionEvent;
-use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 
@@ -359,17 +359,10 @@ async fn skill_for(id: &str) -> Arc<SkillSet> {
     Arc::new(SkillSet::load_dir(id, dir.path()).await)
 }
 
-fn worker_def(id: &str) -> AgentDef {
-    AgentDef {
-        name: format!("{id}-worker"),
-        description: format!("worker for {id}"),
-        provider: None,
-        model: None,
-        allowed_tools: vec![],
-        skills: vec![],
-        max_turns: Some(3),
-        system_prompt: "you are a worker".into(),
-    }
+fn worker_def(id: &str) -> Subagent {
+    Subagent::new(format!("{id}-worker"), format!("worker for {id}"))
+        .max_turns(3)
+        .prompt("you are a worker")
 }
 
 fn build_live_gate_script(specs: &[GatedSpec]) -> Vec<CompletionResponse> {

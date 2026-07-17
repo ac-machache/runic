@@ -6,7 +6,7 @@ use runic::FoundrySubagentBuilder;
 use runic_agent::{Agent, AgentError};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_subagent::{AgentDef, DelegationCtx, SubagentBuilder, SubagentReq, assemble_subagent};
+use runic_subagent::{DelegationCtx, Subagent, SubagentBuilder, SubagentReq, assemble_subagent};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -72,10 +72,6 @@ fn tool_use_response(name: &str) -> CompletionResponse {
     }
 }
 
-fn def(src: &str) -> AgentDef {
-    AgentDef::parse_markdown(src).unwrap()
-}
-
 fn ctx() -> DelegationCtx {
     DelegationCtx {
         depth: 1,
@@ -97,8 +93,15 @@ fn builder(provider: Arc<dyn Provider>) -> FoundrySubagentBuilder {
     }
 }
 
-async fn assemble(b: &dyn SubagentBuilder, def: &AgentDef) -> Agent {
-    assemble_subagent(b, &SubagentReq { def, dctx: &ctx() }).await
+async fn assemble(b: &dyn SubagentBuilder, subagent: &Subagent) -> Agent {
+    assemble_subagent(
+        b,
+        &SubagentReq {
+            subagent,
+            dctx: &ctx(),
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -106,7 +109,7 @@ async fn children_inherit_the_parent_tenant() {
     let provider = Arc::new(ScriptedProvider::new(vec![]));
     let agent = assemble(
         &builder(provider),
-        &def("---\nname: worker\ndescription: d\n---\nbody"),
+        &Subagent::new("worker", "d").prompt("body"),
     )
     .await;
 
@@ -142,9 +145,9 @@ fn builder_with_skills(
 #[tokio::test]
 async fn child_uses_def_prompt_and_model_override() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def = def(
-        "---\nname: reviewer\ndescription: reviews\nmodel: child-model\n---\nChild instructions.",
-    );
+    let def = Subagent::new("reviewer", "reviews")
+        .model("child-model")
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -157,7 +160,7 @@ async fn child_uses_def_prompt_and_model_override() {
 #[tokio::test]
 async fn child_falls_back_to_parent_model() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def = def("---\nname: reviewer\ndescription: reviews\n---\nChild instructions.");
+    let def = Subagent::new("reviewer", "reviews").prompt("Child instructions.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -168,7 +171,7 @@ async fn child_falls_back_to_parent_model() {
 #[tokio::test]
 async fn child_without_allowed_tools_gets_no_tools_at_all() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def = def("---\nname: reviewer\ndescription: reviews\n---\nChild instructions.");
+    let def = Subagent::new("reviewer", "reviews").prompt("Child instructions.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -179,8 +182,9 @@ async fn child_without_allowed_tools_gets_no_tools_at_all() {
 #[tokio::test]
 async fn child_wildcard_gets_the_base_pool_but_never_privileged_tools() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def =
-        def("---\nname: reviewer\ndescription: reviews\ntools: [\"*\"]\n---\nChild instructions.");
+    let def = Subagent::new("reviewer", "reviews")
+        .allowed_tools(["*"])
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -222,9 +226,9 @@ async fn child_wildcard_gets_the_base_pool_but_never_privileged_tools() {
 #[tokio::test]
 async fn child_allowed_tools_narrows_even_base_tools() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def = def(
-        "---\nname: reviewer\ndescription: reviews\nallowed-tools: [calculator]\n---\nChild instructions.",
-    );
+    let def = Subagent::new("reviewer", "reviews")
+        .allowed_tools(["calculator"])
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -243,8 +247,9 @@ async fn child_allowed_tools_narrows_even_base_tools() {
 async fn child_gets_only_the_skills_its_def_lists() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let catalog = crm_catalog().await;
-    let def =
-        def("---\nname: crm\ndescription: crm\nskills: [crm:pipeline]\n---\nChild instructions.");
+    let def = Subagent::new("crm", "crm")
+        .skills(["crm:pipeline"])
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder_with_skills(provider.clone(), catalog), &def).await;
 
     agent.run("go").await.unwrap();
@@ -263,7 +268,9 @@ async fn child_gets_only_the_skills_its_def_lists() {
 async fn child_wildcard_gets_the_whole_catalog() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let catalog = crm_catalog().await;
-    let def = def("---\nname: crm\ndescription: crm\nskills: [\"*\"]\n---\nChild instructions.");
+    let def = Subagent::new("crm", "crm")
+        .skills(["*"])
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder_with_skills(provider.clone(), catalog), &def).await;
 
     agent.run("go").await.unwrap();
@@ -277,7 +284,7 @@ async fn child_wildcard_gets_the_whole_catalog() {
 async fn child_without_listed_skills_gets_none_even_with_a_catalog() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let catalog = crm_catalog().await;
-    let def = def("---\nname: crm\ndescription: crm\n---\nChild instructions.");
+    let def = Subagent::new("crm", "crm").prompt("Child instructions.");
     let mut agent = assemble(&builder_with_skills(provider.clone(), catalog), &def).await;
 
     agent.run("go").await.unwrap();
@@ -296,7 +303,9 @@ async fn child_without_listed_skills_gets_none_even_with_a_catalog() {
 #[tokio::test]
 async fn child_with_skills_listed_but_no_catalog_gets_none() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
-    let def = def("---\nname: crm\ndescription: crm\nskills: [crm:pipeline]\n---\nChild.");
+    let def = Subagent::new("crm", "crm")
+        .skills(["crm:pipeline"])
+        .prompt("Child.");
     let mut agent = assemble(&builder(provider.clone()), &def).await;
 
     agent.run("go").await.unwrap();
@@ -316,7 +325,9 @@ async fn child_with_skills_listed_but_no_catalog_gets_none() {
 async fn child_listing_unknown_skills_gets_no_empty_section_or_tool() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let catalog = crm_catalog().await;
-    let def = def("---\nname: crm\ndescription: crm\nskills: [ghost:*]\n---\nChild.");
+    let def = Subagent::new("crm", "crm")
+        .skills(["ghost:*"])
+        .prompt("Child.");
     let mut agent = assemble(&builder_with_skills(provider.clone(), catalog), &def).await;
 
     agent.run("go").await.unwrap();
@@ -336,9 +347,10 @@ async fn child_listing_unknown_skills_gets_no_empty_section_or_tool() {
 async fn skills_are_independent_of_the_tool_allow_list() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("done")]));
     let catalog = crm_catalog().await;
-    let def = def(
-        "---\nname: crm\ndescription: crm\nallowed-tools: [calculator]\nskills: [crm:pipeline]\n---\nChild.",
-    );
+    let def = Subagent::new("crm", "crm")
+        .allowed_tools(["calculator"])
+        .skills(["crm:pipeline"])
+        .prompt("Child.");
     let mut agent = assemble(&builder_with_skills(provider.clone(), catalog), &def).await;
 
     agent.run("go").await.unwrap();
@@ -356,9 +368,10 @@ async fn skills_are_independent_of_the_tool_allow_list() {
 #[tokio::test]
 async fn child_respects_max_turns() {
     let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response("calculator")]));
-    let def = def(
-        "---\nname: reviewer\ndescription: reviews\nmax-turns: 1\ntools: [calculator]\n---\nChild instructions.",
-    );
+    let def = Subagent::new("reviewer", "reviews")
+        .max_turns(1)
+        .allowed_tools(["calculator"])
+        .prompt("Child instructions.");
     let mut agent = assemble(&builder(provider), &def).await;
 
     let err = agent.run("go").await.unwrap_err();

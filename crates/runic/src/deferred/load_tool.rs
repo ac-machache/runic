@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use chrono::Utc;
 use runic_skills::SkillSet;
 use runic_state::{ExternalEvents, SessionEvent};
-use runic_subagent::AgentRoster;
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
 
 use super::gate::LoadedAbilities;
@@ -106,7 +105,13 @@ impl Tool for LoadAbilityTool {
         }
         if !entry.bundle.subagents.is_empty() {
             output.push_str("Unlocked subagents (dispatch with the `delegate` tool):\n");
-            output.push_str(&AgentRoster::new(entry.bundle.subagents.clone()).roster_lines());
+            let lines: Vec<String> = entry
+                .bundle
+                .subagents
+                .iter()
+                .map(runic_subagent::Subagent::roster_line)
+                .collect();
+            output.push_str(&lines.join("\n"));
             output.push_str("\n\n");
         }
         if !entry.bundle.tools.is_empty() {

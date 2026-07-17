@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::Subagents;
+use runic_subagent::Subagent;
 use runic_substrate::Sessions as SessionsConfig;
 use runic_tool::Tool;
 
@@ -30,7 +30,7 @@ impl Ability for Skills {
     }
 }
 
-pub struct Delegation(pub Subagents);
+pub struct Delegation(pub Vec<Subagent>);
 
 #[async_trait]
 impl Ability for Delegation {
@@ -39,8 +39,8 @@ impl Ability for Delegation {
         bundle: &mut AbilityBundle,
         _ctx: &BuildCtx<'_>,
     ) -> anyhow::Result<()> {
-        for def in self.0.roster().all() {
-            bundle.subagent(def.clone());
+        for subagent in &self.0 {
+            bundle.subagent(subagent.clone());
         }
         Ok(())
     }

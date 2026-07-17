@@ -8,7 +8,7 @@ use runic_agent::RunContext;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
-use runic_subagent::AgentDef;
+use runic_subagent::Subagent;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -478,36 +478,8 @@ async fn parallel_delegation_emits_an_edge_per_child() {
 }
 
 #[tokio::test]
-async fn owned_tools_with_allowed_tools_list_is_a_build_error() {
-    let markdown = "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig purchases";
-    let draft = runic::subagent::from_markdown(markdown)
-        .unwrap()
-        .tool(NamedTool("query"));
-
-    let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
-        .with(draft)
-        .build("alice", "s1")
-        .await
-    else {
-        panic!("owned tools + allowed-tools must not compose");
-    };
-    assert!(err.to_string().contains("purchase-expert"));
-    assert!(format!("{err:#}").contains("owned tools"));
-}
-
-#[tokio::test]
 async fn nested_subagents_inside_a_draft_are_rejected() {
-    let def = AgentDef {
-        name: "inner".into(),
-        description: "inner".into(),
-        provider: None,
-        model: None,
-        allowed_tools: vec![],
-        skills: vec![],
-        max_turns: None,
-        system_prompt: "inner".into(),
-    };
+    let def = Subagent::new("inner", "inner").prompt("inner");
     let provider = ScriptedProvider::new(vec![]);
     let Err(err) = Composer::new(provider, "main-model")
         .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(def)))
@@ -604,42 +576,4 @@ async fn grouped_deferred_draft_is_rejected() {
         panic!("a deferred draft nested in an ability must not compose");
     };
     assert!(format!("{err:#}").contains("outer ability controls activation"));
-}
-
-#[tokio::test]
-async fn markdown_allowed_tools_with_other_owned_config_is_a_build_error() {
-    let markdown =
-        "---\nname: purchase-expert\ndescription: purchases\ntools: [query]\n---\nyou dig";
-    let draft = runic::subagent::from_markdown(markdown)
-        .unwrap()
-        .hook(InjectUserId);
-
-    let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
-        .with(draft)
-        .build("alice", "s1")
-        .await
-    else {
-        panic!("pool-scoped tools must not silently vanish on a composed draft");
-    };
-    assert!(format!("{err:#}").contains("no shared pool"));
-}
-
-#[tokio::test]
-async fn markdown_skills_without_owned_skills_is_a_build_error() {
-    let markdown =
-        "---\nname: purchase-expert\ndescription: purchases\nskills: [pricing]\n---\nyou dig";
-    let draft = runic::subagent::from_markdown(markdown)
-        .unwrap()
-        .tool(NamedTool("query"));
-
-    let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
-        .with(draft)
-        .build("alice", "s1")
-        .await
-    else {
-        panic!("skill scoping without owned skills must not silently vanish");
-    };
-    assert!(format!("{err:#}").contains("owns no skill sets"));
 }

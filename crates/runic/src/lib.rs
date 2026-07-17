@@ -50,7 +50,7 @@ pub mod state {
     pub use runic_state::*;
 }
 pub mod subagent {
-    pub use crate::ability::subagent::{SubagentDraft, from_markdown, subagent};
+    pub use crate::ability::subagent::{SubagentDraft, subagent};
     pub use runic_subagent::*;
 }
 pub mod substrate {

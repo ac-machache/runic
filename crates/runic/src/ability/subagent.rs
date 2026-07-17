@@ -5,7 +5,7 @@ use runic_agent::AgentBuilder;
 use runic_hook::WriteHook;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{AgentDef, SubagentBuilder, SubagentReq};
+use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolCatalog};
 
 use super::builtin::{Hooks, Skills, Tools};
@@ -14,33 +14,15 @@ use crate::models;
 
 pub fn subagent(name: impl Into<String>, description: impl Into<String>) -> SubagentDraft {
     SubagentDraft {
-        def: AgentDef {
-            name: name.into(),
-            description: description.into(),
-            provider: None,
-            model: None,
-            allowed_tools: Vec::new(),
-            skills: Vec::new(),
-            max_turns: None,
-            system_prompt: String::new(),
-        },
+        def: Subagent::new(name, description),
         activation: ActivationPolicy::Eager,
         abilities: Vec::new(),
         provider: None,
     }
 }
 
-pub fn from_markdown(src: &str) -> anyhow::Result<SubagentDraft> {
-    Ok(SubagentDraft {
-        def: AgentDef::parse_markdown(src)?,
-        activation: ActivationPolicy::Eager,
-        abilities: Vec::new(),
-        provider: None,
-    })
-}
-
 pub struct SubagentDraft {
-    def: AgentDef,
+    def: Subagent,
     activation: ActivationPolicy,
     abilities: Vec<Arc<dyn Ability>>,
     provider: Option<Arc<dyn Provider>>,
@@ -48,17 +30,12 @@ pub struct SubagentDraft {
 
 impl SubagentDraft {
     pub fn prompt(mut self, text: impl Into<String>) -> Self {
-        let text = text.into();
-        if self.def.system_prompt.is_empty() {
-            self.def.system_prompt = text;
-        } else {
-            self.def.system_prompt = format!("{}\n\n{text}", self.def.system_prompt);
-        }
+        self.def = self.def.prompt(text);
         self
     }
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.def.model = Some(model.into());
+        self.def = self.def.model(model);
         self
     }
 
@@ -171,25 +148,6 @@ impl Ability for SubagentDraft {
             return Ok(());
         }
 
-        if !child.tools.is_empty() && !self.def.allowed_tools.is_empty() {
-            anyhow::bail!(
-                "subagent `{}` has both owned tools and an `allowed-tools` list; owned tools are already the allow-list — drop `tools:` from the definition",
-                self.def.name
-            );
-        }
-        if child.tools.is_empty() && !self.def.allowed_tools.is_empty() {
-            anyhow::bail!(
-                "subagent `{}` declares `allowed-tools` (shared-pool scoping) but its other owned config moves it onto its own builder, which has no shared pool — give it owned tools or drop the owned config",
-                self.def.name
-            );
-        }
-        if child.skills.is_empty() && !self.def.skills.is_empty() {
-            anyhow::bail!(
-                "subagent `{}` declares `skills:` but owns no skill sets — add them via .skills(...) or drop `skills:` from the definition",
-                self.def.name
-            );
-        }
-
         let mut def = self.def.clone();
         if !child.tools.is_empty() {
             def.allowed_tools = vec!["*".to_string()];
@@ -197,7 +155,7 @@ impl Ability for SubagentDraft {
 
         let skills = (!child.skills.is_empty())
             .then(|| Arc::new(SkillSet::merge(child.skills.iter().cloned())));
-        if skills.is_some() && def.skills.is_empty() {
+        if skills.is_some() {
             def.skills = vec!["*".to_string()];
         }
 

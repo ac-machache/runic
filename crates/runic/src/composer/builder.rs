@@ -1,9 +1,7 @@
 use runic_agent::{Agent, AgentBuilder};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{
-    AgentDef, AgentRoster, DelegateTool, SubagentBuilder, SubagentReq, roster_prompt_section,
-};
+use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq, roster_prompt_section};
 use runic_substrate::ArtifactStore;
 use runic_tool::{Tool, ToolCatalog};
 use std::{
@@ -93,7 +91,9 @@ struct DispatchingSubagentBuilder {
 
 impl DispatchingSubagentBuilder {
     fn for_req(&self, req: &SubagentReq<'_>) -> &Arc<dyn SubagentBuilder> {
-        self.by_name.get(&req.def.name).unwrap_or(&self.default)
+        self.by_name
+            .get(&req.subagent.name)
+            .unwrap_or(&self.default)
     }
 }
 
@@ -351,26 +351,23 @@ impl Composer {
             }
         }
 
-        let deferred_defs: Vec<AgentDef> = registry
+        let deferred_defs: Vec<Subagent> = registry
             .entries
             .iter()
             .flat_map(|entry| entry.bundle.subagents.iter().cloned())
             .collect();
         if !composition.subagents.is_empty() || !deferred_defs.is_empty() {
             if !composition.subagents.is_empty() {
-                composition.prompt.fragment(
-                    Layer::Stable,
-                    roster_prompt_section(&AgentRoster::new(composition.subagents.clone())),
-                );
-            }
-            let full_roster = Arc::new(AgentRoster::new(
                 composition
-                    .subagents
-                    .iter()
-                    .cloned()
-                    .chain(deferred_defs)
-                    .collect(),
-            ));
+                    .prompt
+                    .fragment(Layer::Stable, roster_prompt_section(&composition.subagents));
+            }
+            let full_roster: Vec<Subagent> = composition
+                .subagents
+                .iter()
+                .cloned()
+                .chain(deferred_defs)
+                .collect();
             let default_builder = self.subagent_builder.clone().unwrap_or_else(|| {
                 Arc::new(FoundrySubagentBuilder {
                     provider: self.provider.clone(),

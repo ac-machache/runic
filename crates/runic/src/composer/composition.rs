@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::AgentDef;
+use runic_subagent::Subagent;
 use runic_tool::{Tool, ToolCatalog};
 
 use crate::ability::AbilityBundle;
@@ -14,7 +14,7 @@ pub struct Composition {
     pub(super) write_hooks: Vec<Arc<dyn WriteHook>>,
     pub(super) tool_catalogs: Vec<Arc<dyn ToolCatalog>>,
     pub(super) skills: Vec<Arc<SkillSet>>,
-    pub(super) subagents: Vec<AgentDef>,
+    pub(super) subagents: Vec<Subagent>,
 }
 
 impl Composition {

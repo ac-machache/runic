@@ -20,4 +20,4 @@ pub use delegate::{
     DelegateTool, DelegationCtx, SpawnBudget, SubagentBuilder, SubagentReq, TaskStatus,
     assemble_subagent,
 };
-pub use subagent::{Subagent, roster_prompt_section};
+pub use subagent::{RosterVoice, Subagent, roster_prompt_section};

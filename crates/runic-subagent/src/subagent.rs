@@ -91,20 +91,47 @@ pub(crate) fn default_intro(tool_name: &str) -> String {
     )
 }
 
-pub(crate) fn render_roster(tag: &str, intro: &str, subagents: &[Subagent]) -> String {
-    if subagents.is_empty() {
-        return String::new();
+#[derive(Clone, Default)]
+pub struct RosterVoice {
+    pub tag: Option<String>,
+    pub intro: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_description: Option<String>,
+}
+
+impl RosterVoice {
+    pub fn resolved_tool_name(&self) -> &str {
+        self.tool_name
+            .as_deref()
+            .unwrap_or(crate::delegate::DEFAULT_TOOL_NAME)
     }
-    let lines: Vec<String> = subagents.iter().map(Subagent::roster_line).collect();
-    format!("<{tag}>\n{intro}\n{}\n</{tag}>", lines.join("\n"))
+
+    pub fn roster_section(&self, subagents: &[Subagent]) -> String {
+        if subagents.is_empty() {
+            return String::new();
+        }
+        let tag = self.tag.as_deref().unwrap_or(DEFAULT_TAG);
+        let intro = match &self.intro {
+            Some(text) => text.clone(),
+            None => default_intro(self.resolved_tool_name()),
+        };
+        let lines: Vec<String> = subagents.iter().map(Subagent::roster_line).collect();
+        format!("<{tag}>\n{intro}\n{}\n</{tag}>", lines.join("\n"))
+    }
+
+    pub fn merge_first_wins(&mut self, other: &RosterVoice) {
+        self.tag = self.tag.take().or_else(|| other.tag.clone());
+        self.intro = self.intro.take().or_else(|| other.intro.clone());
+        self.tool_name = self.tool_name.take().or_else(|| other.tool_name.clone());
+        self.tool_description = self
+            .tool_description
+            .take()
+            .or_else(|| other.tool_description.clone());
+    }
 }
 
 pub fn roster_prompt_section(subagents: &[Subagent]) -> String {
-    render_roster(
-        DEFAULT_TAG,
-        &default_intro(crate::delegate::DEFAULT_TOOL_NAME),
-        subagents,
-    )
+    RosterVoice::default().roster_section(subagents)
 }
 
 #[cfg(test)]

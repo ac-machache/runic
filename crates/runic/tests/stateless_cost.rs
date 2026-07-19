@@ -63,11 +63,8 @@ fn assembly(_fx: &Fixture, skills: Arc<SkillSet>) -> Composer {
     Composer::new(Arc::new(NoopProvider), "bench")
         .instructions("you are the bench agent ".repeat(50))
         .with(Skills(skills))
-        .with(Delegation(
-            ["scout", "coder", "critic"]
-                .into_iter()
-                .map(bench_subagent)
-                .collect(),
+        .with(Delegation::new(
+            ["scout", "coder", "critic"].into_iter().map(bench_subagent),
         ))
         .with(basics())
 }

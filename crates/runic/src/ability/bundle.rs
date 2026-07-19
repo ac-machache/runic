@@ -1,6 +1,6 @@
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::{Subagent, SubagentBuilder};
+use runic_subagent::{RosterVoice, Subagent, SubagentBuilder};
 use runic_tool::{Tool, ToolCatalog};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ pub struct AbilityBundle {
     pub tool_catalog: Option<Arc<dyn ToolCatalog>>,
     pub skills: Vec<Arc<SkillSet>>,
     pub subagents: Vec<Subagent>,
+    pub delegation_voice: RosterVoice,
     pub subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>>,
 }
 

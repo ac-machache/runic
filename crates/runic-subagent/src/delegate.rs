@@ -229,10 +229,7 @@ pub struct DelegateTool {
     budget: Arc<SpawnBudget>,
     cancel: CancelToken,
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
-    tag: Option<String>,
-    intro: Option<String>,
-    tool_name: Option<String>,
-    tool_description: Option<String>,
+    voice: crate::subagent::RosterVoice,
 }
 
 impl DelegateTool {
@@ -262,44 +259,37 @@ impl DelegateTool {
             budget: SpawnBudget::new(DEFAULT_MAX_TOTAL_SPAWNS, DEFAULT_MAX_CONCURRENT),
             cancel: CancelToken::new(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            tag: None,
-            intro: None,
-            tool_name: None,
-            tool_description: None,
+            voice: crate::subagent::RosterVoice::default(),
         }
     }
 
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
-        self.tag = Some(tag.into());
+        self.voice.tag = Some(tag.into());
         self
     }
 
     pub fn intro(mut self, text: impl Into<String>) -> Self {
-        self.intro = Some(text.into());
+        self.voice.intro = Some(text.into());
         self
     }
 
     pub fn tool_name(mut self, name: impl Into<String>) -> Self {
-        self.tool_name = Some(name.into());
+        self.voice.tool_name = Some(name.into());
         self
     }
 
     pub fn tool_description(mut self, text: impl Into<String>) -> Self {
-        self.tool_description = Some(text.into());
+        self.voice.tool_description = Some(text.into());
+        self
+    }
+
+    pub fn voice(mut self, voice: crate::subagent::RosterVoice) -> Self {
+        self.voice = voice;
         self
     }
 
     pub fn roster_section(&self) -> String {
-        let tag = self.tag.as_deref().unwrap_or(crate::subagent::DEFAULT_TAG);
-        let intro = match &self.intro {
-            Some(text) => text.clone(),
-            None => crate::subagent::default_intro(self.resolved_tool_name()),
-        };
-        crate::subagent::render_roster(tag, &intro, &self.subagents)
-    }
-
-    fn resolved_tool_name(&self) -> &str {
-        self.tool_name.as_deref().unwrap_or(DEFAULT_TOOL_NAME)
+        self.voice.roster_section(&self.subagents)
     }
 
     fn find(&self, name: &str) -> Option<&Subagent> {
@@ -816,11 +806,12 @@ fn compose_prompt(context: Option<&str>, prompt: &str) -> String {
 #[async_trait]
 impl Tool for DelegateTool {
     fn name(&self) -> &str {
-        self.resolved_tool_name()
+        self.voice.resolved_tool_name()
     }
 
     fn description(&self) -> &str {
-        self.tool_description
+        self.voice
+            .tool_description
             .as_deref()
             .unwrap_or(DEFAULT_TOOL_DESCRIPTION)
     }

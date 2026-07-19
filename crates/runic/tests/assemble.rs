@@ -81,8 +81,8 @@ async fn composes_prompt_sections_in_order() {
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation(vec![
-            Subagent::new("researcher", "researches").prompt("Act carefully."),
+        .with(Delegation::new([
+            Subagent::new("researcher", "researches").prompt("Act carefully.")
         ]))
         .build("alice", "s1")
         .await
@@ -95,6 +95,33 @@ async fn composes_prompt_sections_in_order() {
 
     assert!(instructions < skills);
     assert!(skills < subagents);
+}
+
+#[tokio::test]
+async fn delegation_voice_flows_through_the_composer() {
+    let provider = Arc::new(RecordingProvider::default());
+    let agent = base(provider)
+        .with(
+            Delegation::new([Subagent::new("researcher", "researches").prompt("dig")])
+                .tag("team")
+                .intro("Hand self-contained work to your team:")
+                .tool_name("dispatch")
+                .tool_description("Send a teammate a task."),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    let system = &agent.state().system_prompt;
+    assert!(system.contains("<team>"));
+    assert!(system.contains("Hand self-contained work to your team:"));
+    assert!(system.contains("- researcher: researches"));
+    assert!(!system.contains("<subagents>"));
+
+    let specs = agent.tool_specs();
+    let dispatch = specs.iter().find(|s| s.name == "dispatch").unwrap();
+    assert_eq!(dispatch.description, "Send a teammate a task.");
+    assert!(!specs.iter().any(|s| s.name == "delegate"));
 }
 
 #[tokio::test]
@@ -112,8 +139,8 @@ async fn registers_enabled_tool_surfaces() {
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation(vec![
-            Subagent::new("researcher", "researches").prompt("Act carefully."),
+        .with(Delegation::new([
+            Subagent::new("researcher", "researches").prompt("Act carefully.")
         ]))
         .with(Sessions(sessions_memory()))
         .build("alice", "s1")

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::Subagent;
+use runic_subagent::{RosterVoice, Subagent};
 use runic_substrate::Sessions as SessionsConfig;
 use runic_tool::Tool;
 
@@ -30,7 +30,39 @@ impl Ability for Skills {
     }
 }
 
-pub struct Delegation(pub Vec<Subagent>);
+pub struct Delegation {
+    subagents: Vec<Subagent>,
+    voice: RosterVoice,
+}
+
+impl Delegation {
+    pub fn new(subagents: impl IntoIterator<Item = Subagent>) -> Self {
+        Self {
+            subagents: subagents.into_iter().collect(),
+            voice: RosterVoice::default(),
+        }
+    }
+
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.voice.tag = Some(tag.into());
+        self
+    }
+
+    pub fn intro(mut self, text: impl Into<String>) -> Self {
+        self.voice.intro = Some(text.into());
+        self
+    }
+
+    pub fn tool_name(mut self, name: impl Into<String>) -> Self {
+        self.voice.tool_name = Some(name.into());
+        self
+    }
+
+    pub fn tool_description(mut self, text: impl Into<String>) -> Self {
+        self.voice.tool_description = Some(text.into());
+        self
+    }
+}
 
 #[async_trait]
 impl Ability for Delegation {
@@ -39,9 +71,10 @@ impl Ability for Delegation {
         bundle: &mut AbilityBundle,
         _ctx: &BuildCtx<'_>,
     ) -> anyhow::Result<()> {
-        for subagent in &self.0 {
+        for subagent in &self.subagents {
             bundle.subagent(subagent.clone());
         }
+        bundle.delegation_voice.merge_first_wins(&self.voice);
         Ok(())
     }
 }

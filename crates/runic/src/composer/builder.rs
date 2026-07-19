@@ -1,7 +1,7 @@
 use runic_agent::{Agent, AgentBuilder};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq, roster_prompt_section};
+use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_substrate::ArtifactStore;
 use runic_tool::{Tool, ToolCatalog};
 use std::{
@@ -358,9 +358,12 @@ impl Composer {
             .collect();
         if !composition.subagents.is_empty() || !deferred_defs.is_empty() {
             if !composition.subagents.is_empty() {
-                composition
-                    .prompt
-                    .fragment(Layer::Stable, roster_prompt_section(&composition.subagents));
+                composition.prompt.fragment(
+                    Layer::Stable,
+                    composition
+                        .delegation_voice
+                        .roster_section(&composition.subagents),
+                );
             }
             let full_roster: Vec<Subagent> = composition
                 .subagents
@@ -383,8 +386,10 @@ impl Composer {
                     default: default_builder,
                 })
             };
-            let delegate: Arc<dyn Tool> =
-                Arc::new(DelegateTool::with_builder(full_roster, builder));
+            let delegate: Arc<dyn Tool> = Arc::new(
+                DelegateTool::with_builder(full_roster, builder)
+                    .voice(composition.delegation_voice.clone()),
+            );
             composition.tools.push(Arc::new(GatedTool::new(
                 delegate,
                 loaded.clone(),

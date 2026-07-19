@@ -84,11 +84,20 @@ fn parse_skill(namespace: &str, entry: &str, src: &str) -> anyhow::Result<Skill>
     })
 }
 
+pub(crate) const DEFAULT_TAG: &str = "available-skills";
+pub(crate) const DEFAULT_TOOL_NAME: &str = "skill_view";
+pub(crate) const DEFAULT_TOOL_DESCRIPTION: &str = "Load a skill's full instructions by `name`, \
+     or a file inside the skill's folder by also passing a relative `path`.";
+
 /// What one agent can see. Build a different one per tenant/agent.
 #[derive(Clone, Default)]
 pub struct SkillSet {
     skills: Vec<Skill>,
     sources: HashMap<String, Arc<dyn SkillSource>>,
+    tag: Option<String>,
+    intro: Option<String>,
+    tool_name: Option<String>,
+    tool_description: Option<String>,
 }
 
 impl SkillSet {
@@ -130,7 +139,45 @@ impl SkillSet {
             skills = skills.len(),
             "skills loaded"
         );
-        Self { skills, sources }
+        Self {
+            skills,
+            sources,
+            ..Self::default()
+        }
+    }
+
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    pub fn intro(mut self, text: impl Into<String>) -> Self {
+        self.intro = Some(text.into());
+        self
+    }
+
+    pub fn tool_name(mut self, name: impl Into<String>) -> Self {
+        self.tool_name = Some(name.into());
+        self
+    }
+
+    pub fn tool_description(mut self, text: impl Into<String>) -> Self {
+        self.tool_description = Some(text.into());
+        self
+    }
+
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
+    pub(crate) fn resolved_tool_name(&self) -> &str {
+        self.tool_name.as_deref().unwrap_or(DEFAULT_TOOL_NAME)
+    }
+
+    pub(crate) fn resolved_tool_description(&self) -> &str {
+        self.tool_description
+            .as_deref()
+            .unwrap_or(DEFAULT_TOOL_DESCRIPTION)
     }
 
     /// Single-namespace local convenience.
@@ -147,6 +194,7 @@ impl SkillSet {
         let mut skills: Vec<Skill> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut sources: HashMap<String, Arc<dyn SkillSource>> = HashMap::new();
+        let mut merged = SkillSet::default();
         for set in sets {
             for skill in &set.skills {
                 if seen.insert(skill.id()) {
@@ -158,8 +206,16 @@ impl SkillSet {
                     .entry(namespace.clone())
                     .or_insert_with(|| source.clone());
             }
+            merged.tag = merged.tag.or_else(|| set.tag.clone());
+            merged.intro = merged.intro.or_else(|| set.intro.clone());
+            merged.tool_name = merged.tool_name.or_else(|| set.tool_name.clone());
+            merged.tool_description = merged
+                .tool_description
+                .or_else(|| set.tool_description.clone());
         }
-        SkillSet { skills, sources }
+        merged.skills = skills;
+        merged.sources = sources;
+        merged
     }
 
     pub fn scope<S: AsRef<str>>(&self, allowed: &[S]) -> SkillSet {
@@ -177,7 +233,14 @@ impl SkillSet {
             .filter(|(k, _)| used.contains(k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        SkillSet { skills, sources }
+        SkillSet {
+            skills,
+            sources,
+            tag: self.tag.clone(),
+            intro: self.intro.clone(),
+            tool_name: self.tool_name.clone(),
+            tool_description: self.tool_description.clone(),
+        }
     }
 
     pub fn scope_glob<S: AsRef<str>>(&self, patterns: &[S]) -> SkillSet {
@@ -198,7 +261,14 @@ impl SkillSet {
             .filter(|(k, _)| used.contains(k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        SkillSet { skills, sources }
+        SkillSet {
+            skills,
+            sources,
+            tag: self.tag.clone(),
+            intro: self.intro.clone(),
+            tool_name: self.tool_name.clone(),
+            tool_description: self.tool_description.clone(),
+        }
     }
 
     /// The compact index injected into the system prompt (id + description).
@@ -206,15 +276,21 @@ impl SkillSet {
         if self.skills.is_empty() {
             return String::new();
         }
-        let mut out = String::from(
-            "<available-skills>\nEach skill is a focused workflow. To load a skill's \
-             full instructions call `skill_view` with its `name`; for a file inside \
-             the skill pass `name` + a relative `path`.\n",
-        );
+        let tag = self.tag.as_deref().unwrap_or(DEFAULT_TAG);
+        let intro = match &self.intro {
+            Some(text) => text.clone(),
+            None => format!(
+                "Each skill is a focused workflow. To load a skill's full instructions \
+                 call `{}` with its `name`; for a file inside the skill pass `name` + a \
+                 relative `path`.",
+                self.resolved_tool_name()
+            ),
+        };
+        let mut out = format!("<{tag}>\n{intro}\n");
         for s in &self.skills {
             out.push_str(&format!("- {}: {}\n", s.id(), s.description));
         }
-        out.push_str("</available-skills>");
+        out.push_str(&format!("</{tag}>"));
         out
     }
 
@@ -414,8 +490,126 @@ mod tests {
         let src = MapSource::arc(&[("greeter/SKILL.md", &skill_md("greeter", "says hi"))]);
         let set = SkillSet::load(HashMap::from([("core".to_string(), src)])).await;
         let section = set.prompt_section();
+        assert!(section.starts_with("<available-skills>"));
         assert!(section.contains("skill_view"));
         assert!(section.contains("- core:greeter: says hi"));
         assert!(SkillSet::default().prompt_section().is_empty());
+    }
+
+    #[tokio::test]
+    async fn customized_voice_renders_tag_intro_and_tool() {
+        let src = MapSource::arc(&[("deploy/SKILL.md", &skill_md("deploy", "ship it"))]);
+        let set = SkillSet::load(HashMap::from([("core".to_string(), src)]))
+            .await
+            .tag("playbooks")
+            .intro("Consult the relevant playbook before acting:")
+            .tool_name("open_playbook")
+            .tool_description("Open a playbook by id.");
+
+        let section = set.prompt_section();
+        assert!(section.starts_with("<playbooks>\n"));
+        assert!(section.ends_with("</playbooks>"));
+        assert!(section.contains("Consult the relevant playbook before acting:"));
+        assert!(!section.contains("skill_view"));
+        assert!(section.contains("- core:deploy: ship it"));
+
+        let tool = Arc::new(set).view_tool().unwrap();
+        assert_eq!(tool.name(), "open_playbook");
+        assert_eq!(tool.description(), "Open a playbook by id.");
+    }
+
+    #[tokio::test]
+    async fn default_intro_interpolates_a_renamed_tool() {
+        let src = MapSource::arc(&[("deploy/SKILL.md", &skill_md("deploy", "ship it"))]);
+        let set = SkillSet::load(HashMap::from([("core".to_string(), src)]))
+            .await
+            .tool_name("open_playbook");
+        let section = set.prompt_section();
+        assert!(section.contains("call `open_playbook` with its `name`"));
+        assert!(!section.contains("skill_view"));
+    }
+
+    #[tokio::test]
+    async fn scoping_preserves_the_configured_voice() {
+        let src = MapSource::arc(&[
+            ("a/SKILL.md", &skill_md("a", "da")),
+            ("b/SKILL.md", &skill_md("b", "db")),
+        ]);
+        let set = SkillSet::load(HashMap::from([("ns".to_string(), src)]))
+            .await
+            .tag("playbooks")
+            .tool_name("open_playbook");
+
+        for narrowed in [set.scope(&["ns:a"]), set.scope_glob(&["ns:*"])] {
+            let section = narrowed.prompt_section();
+            assert!(section.starts_with("<playbooks>"));
+            assert_eq!(
+                Arc::new(narrowed).view_tool().unwrap().name(),
+                "open_playbook"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_keeps_the_first_configured_voice_and_can_be_restated() {
+        let first = MapSource::arc(&[("a/SKILL.md", &skill_md("a", "da"))]);
+        let second = MapSource::arc(&[("b/SKILL.md", &skill_md("b", "db"))]);
+        let plain = SkillSet::load(HashMap::from([("one".to_string(), first)])).await;
+        let voiced = SkillSet::load(HashMap::from([("two".to_string(), second)]))
+            .await
+            .tag("playbooks")
+            .intro("second voice");
+
+        let merged = SkillSet::merge([Arc::new(plain), Arc::new(voiced)]);
+        assert!(merged.prompt_section().starts_with("<playbooks>"));
+        assert!(merged.prompt_section().contains("second voice"));
+
+        let restated = merged.intro("one voice for all");
+        assert!(restated.prompt_section().contains("one voice for all"));
+        assert!(!restated.prompt_section().contains("second voice"));
+    }
+
+    #[tokio::test]
+    async fn the_docs_examples_load_as_real_skills() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/examples");
+        let set = SkillSet::load_dir("docs", dir).await;
+        let mut ids = set.ids();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "docs:code-review",
+                "docs:customer-onboarding",
+                "docs:deploy"
+            ]
+        );
+
+        let tool = Arc::new(set).view_tool().unwrap();
+        let ctx = runic_tool::ToolContext::new("u", "s", "r");
+        let body = tool
+            .execute(serde_json::json!({ "name": "docs:deploy" }), &ctx)
+            .await
+            .unwrap();
+        assert!(body.text().contains("canary"));
+        let sub = tool
+            .execute(
+                serde_json::json!({ "name": "docs:deploy", "path": "checklist.md" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(sub.text().contains("Pre-flight"));
+    }
+
+    #[tokio::test]
+    async fn skills_accessor_supports_hand_rolled_sections() {
+        let src = MapSource::arc(&[("deploy/SKILL.md", &skill_md("deploy", "ship it"))]);
+        let set = SkillSet::load(HashMap::from([("core".to_string(), src)])).await;
+        let mine: Vec<String> = set
+            .skills()
+            .iter()
+            .map(|s| format!("* {} — {}", s.id(), s.description))
+            .collect();
+        assert_eq!(mine, vec!["* core:deploy — ship it"]);
     }
 }

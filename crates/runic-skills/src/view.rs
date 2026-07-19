@@ -14,23 +14,30 @@ use crate::set::SkillSet;
 /// from S3 — the tool never knows where the skill lives.
 pub struct SkillViewTool {
     set: Arc<SkillSet>,
+    name: String,
+    description: String,
 }
 
 impl SkillViewTool {
     pub fn new(set: Arc<SkillSet>) -> Self {
-        Self { set }
+        let name = set.resolved_tool_name().to_string();
+        let description = set.resolved_tool_description().to_string();
+        Self {
+            set,
+            name,
+            description,
+        }
     }
 }
 
 #[async_trait]
 impl Tool for SkillViewTool {
     fn name(&self) -> &str {
-        "skill_view"
+        &self.name
     }
 
     fn description(&self) -> &str {
-        "Load a skill's full instructions by `name`, or a file inside the \
-         skill's folder by also passing a relative `path`."
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -50,7 +57,7 @@ impl Tool for SkillViewTool {
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         let Some(name) = args.get("name").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("skill_view requires `name`"));
+            return Ok(ToolResult::error(format!("{} requires `name`", self.name)));
         };
         let Some(skill) = self.set.get(name) else {
             return Ok(ToolResult::error(format!("unknown skill '{name}'")));

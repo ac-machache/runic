@@ -383,7 +383,8 @@ impl Composer {
                     default: default_builder,
                 })
             };
-            let delegate: Arc<dyn Tool> = Arc::new(DelegateTool::new(full_roster, builder));
+            let delegate: Arc<dyn Tool> =
+                Arc::new(DelegateTool::with_builder(full_roster, builder));
             composition.tools.push(Arc::new(GatedTool::new(
                 delegate,
                 loaded.clone(),

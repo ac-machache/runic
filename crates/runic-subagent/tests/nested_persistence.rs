@@ -85,7 +85,7 @@ impl SubagentBuilder for NestedBuilder {
     fn decorate(&self, b: AgentBuilder, req: &SubagentReq<'_>) -> AgentBuilder {
         match self.me.upgrade() {
             Some(me) => b.tool(Arc::new(
-                DelegateTool::new(self.roster.clone(), me).with_depth(req.dctx.depth),
+                DelegateTool::with_builder(self.roster.clone(), me).with_depth(req.dctx.depth),
             )),
             None => b,
         }
@@ -177,7 +177,7 @@ async fn nested_delegation_produces_a_walkable_persisted_hierarchy() {
         sinks: Mutex::new(Vec::new()),
     });
 
-    let tool = DelegateTool::new(roster, builder);
+    let tool = DelegateTool::with_builder(roster, builder);
     let mut ctx = ToolContext::new("alice", "root-thread", "r1");
     ctx.insert(ChildPersistenceHandle(Arc::new(FakeHandle {
         inner: inner.clone(),

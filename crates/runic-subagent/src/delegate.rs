@@ -26,7 +26,7 @@ use runic_state::SessionEvent;
 use runic_state::{ChildPersistenceHandle, ChildPersistenceStatus, ChildSink, ExternalEvents};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
-use crate::subagent::{Subagent, roster_prompt_section};
+use crate::subagent::Subagent;
 
 /// Default maximum delegation depth (parent=0, so this allows 3 levels).
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
@@ -199,7 +199,28 @@ pub struct BackgroundTask {
     pub cancel: CancelToken,
 }
 
-/// The `delegate` tool.
+pub(crate) const DEFAULT_TOOL_NAME: &str = "delegate";
+const DEFAULT_TOOL_DESCRIPTION: &str = "Delegate a self-contained task to a subagent (it does NOT see this \
+     conversation). Pick `agent` from the roster. Use `parallel` to run \
+     several at once, or `background` for long tasks (poll with \
+     check_result).";
+
+struct StaticBuilder {
+    provider: Arc<dyn Provider>,
+    model: String,
+}
+
+#[async_trait]
+impl SubagentBuilder for StaticBuilder {
+    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
+    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
+        self.model.clone()
+    }
+}
+
 pub struct DelegateTool {
     subagents: Vec<Subagent>,
     builder: Arc<dyn SubagentBuilder>,
@@ -208,11 +229,28 @@ pub struct DelegateTool {
     budget: Arc<SpawnBudget>,
     cancel: CancelToken,
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
+    tag: Option<String>,
+    intro: Option<String>,
+    tool_name: Option<String>,
+    tool_description: Option<String>,
 }
 
 impl DelegateTool {
-    /// A root delegate tool (depth 0) with default safeguards.
     pub fn new(
+        subagents: impl IntoIterator<Item = Subagent>,
+        provider: Arc<dyn Provider>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::with_builder(
+            subagents,
+            Arc::new(StaticBuilder {
+                provider,
+                model: model.into(),
+            }),
+        )
+    }
+
+    pub fn with_builder(
         subagents: impl IntoIterator<Item = Subagent>,
         builder: Arc<dyn SubagentBuilder>,
     ) -> Self {
@@ -224,11 +262,44 @@ impl DelegateTool {
             budget: SpawnBudget::new(DEFAULT_MAX_TOTAL_SPAWNS, DEFAULT_MAX_CONCURRENT),
             cancel: CancelToken::new(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            tag: None,
+            intro: None,
+            tool_name: None,
+            tool_description: None,
         }
     }
 
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    pub fn intro(mut self, text: impl Into<String>) -> Self {
+        self.intro = Some(text.into());
+        self
+    }
+
+    pub fn tool_name(mut self, name: impl Into<String>) -> Self {
+        self.tool_name = Some(name.into());
+        self
+    }
+
+    pub fn tool_description(mut self, text: impl Into<String>) -> Self {
+        self.tool_description = Some(text.into());
+        self
+    }
+
     pub fn roster_section(&self) -> String {
-        roster_prompt_section(&self.subagents)
+        let tag = self.tag.as_deref().unwrap_or(crate::subagent::DEFAULT_TAG);
+        let intro = match &self.intro {
+            Some(text) => text.clone(),
+            None => crate::subagent::default_intro(self.resolved_tool_name()),
+        };
+        crate::subagent::render_roster(tag, &intro, &self.subagents)
+    }
+
+    fn resolved_tool_name(&self) -> &str {
+        self.tool_name.as_deref().unwrap_or(DEFAULT_TOOL_NAME)
     }
 
     fn find(&self, name: &str) -> Option<&Subagent> {
@@ -745,16 +816,13 @@ fn compose_prompt(context: Option<&str>, prompt: &str) -> String {
 #[async_trait]
 impl Tool for DelegateTool {
     fn name(&self) -> &str {
-        "delegate"
+        self.resolved_tool_name()
     }
 
     fn description(&self) -> &str {
-        // Static base; the roster is surfaced via the system prompt, like MCP
-        // deferred tools (kept out of this &str which must be 'static-ish).
-        "Delegate a self-contained task to a subagent (it does NOT see this \
-         conversation). Pick `agent` from the roster. Use `parallel` to run \
-         several at once, or `background` for long tasks (poll with \
-         check_result)."
+        self.tool_description
+            .as_deref()
+            .unwrap_or(DEFAULT_TOOL_DESCRIPTION)
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -82,15 +82,28 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
-pub fn roster_prompt_section(subagents: &[Subagent]) -> String {
+pub(crate) const DEFAULT_TAG: &str = "subagents";
+
+pub(crate) fn default_intro(tool_name: &str) -> String {
+    format!(
+        "You can delegate self-contained tasks to these subagents via the \
+         `{tool_name}` tool (they do NOT see this conversation):"
+    )
+}
+
+pub(crate) fn render_roster(tag: &str, intro: &str, subagents: &[Subagent]) -> String {
     if subagents.is_empty() {
         return String::new();
     }
     let lines: Vec<String> = subagents.iter().map(Subagent::roster_line).collect();
-    format!(
-        "<subagents>\nYou can delegate self-contained tasks to these subagents \
-         via the `delegate` tool (they do NOT see this conversation):\n{}\n</subagents>",
-        lines.join("\n")
+    format!("<{tag}>\n{intro}\n{}\n</{tag}>", lines.join("\n"))
+}
+
+pub fn roster_prompt_section(subagents: &[Subagent]) -> String {
+    render_roster(
+        DEFAULT_TAG,
+        &default_intro(crate::delegate::DEFAULT_TOOL_NAME),
+        subagents,
     )
 }
 

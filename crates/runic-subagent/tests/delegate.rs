@@ -59,7 +59,7 @@ fn ctx() -> ToolContext {
 
 #[tokio::test]
 async fn delegate_sync_returns_child_answer() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
     let r = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "look at this" }),
@@ -72,8 +72,53 @@ async fn delegate_sync_returns_child_answer() {
 }
 
 #[tokio::test]
+async fn new_runs_children_without_a_builder_impl() {
+    let provider: Arc<dyn Provider> = Arc::new(OneShot("child says hi".into()));
+    let tool = DelegateTool::new(roster(), provider, "mistral-large-latest");
+    let r = tool
+        .execute(
+            serde_json::json!({ "agent": "reviewer", "prompt": "go" }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert!(!r.is_error());
+    assert_eq!(r.text(), "child says hi");
+}
+
+#[tokio::test]
+async fn voice_knobs_render_section_and_rename_the_tool() {
+    let provider: Arc<dyn Provider> = Arc::new(OneShot("x".into()));
+    let tool = DelegateTool::new(roster(), provider, "m")
+        .tag("team")
+        .intro("Hand self-contained work to your team:")
+        .tool_name("dispatch")
+        .tool_description("Send a teammate a task.");
+
+    let section = tool.roster_section();
+    assert!(section.starts_with("<team>\n"));
+    assert!(section.ends_with("</team>"));
+    assert!(section.contains("Hand self-contained work to your team:"));
+    assert!(section.contains("- reviewer: reviews"));
+    assert!(!section.contains("subagents"));
+
+    assert_eq!(tool.name(), "dispatch");
+    assert_eq!(tool.description(), "Send a teammate a task.");
+}
+
+#[tokio::test]
+async fn default_intro_interpolates_a_renamed_tool() {
+    let provider: Arc<dyn Provider> = Arc::new(OneShot("x".into()));
+    let tool = DelegateTool::new(roster(), provider, "m").tool_name("dispatch");
+    let section = tool.roster_section();
+    assert!(section.starts_with("<subagents>"));
+    assert!(section.contains("via the `dispatch` tool"));
+    assert!(!section.contains("`delegate`"));
+}
+
+#[tokio::test]
 async fn unknown_agent_lists_roster() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
     let r = tool
         .execute(
             serde_json::json!({ "agent": "ghost", "prompt": "x" }),
@@ -87,7 +132,7 @@ async fn unknown_agent_lists_roster() {
 
 #[tokio::test]
 async fn depth_limit_refuses_delegation() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder))
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder))
         .with_depth(3)
         .with_max_depth(3);
     let r = tool
@@ -103,8 +148,8 @@ async fn depth_limit_refuses_delegation() {
 
 #[tokio::test]
 async fn spawn_budget_caps_total() {
-    let tool =
-        DelegateTool::new(roster(), Arc::new(FakeBuilder)).with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder))
+        .with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
     let first = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "x" }),
@@ -126,7 +171,7 @@ async fn spawn_budget_caps_total() {
 
 #[tokio::test]
 async fn parallel_runs_several_and_aggregates() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
     let r = tool
         .execute(
             serde_json::json!({ "parallel": ["reviewer", "researcher"], "prompt": "go" }),
@@ -141,7 +186,7 @@ async fn parallel_runs_several_and_aggregates() {
 
 #[tokio::test]
 async fn background_then_check_result() {
-    let tool = DelegateTool::new(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
     let start = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "x", "background": true }),

@@ -115,7 +115,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
         text_response("spawned, moving on"),
         text_response("done"),
     ]);
-    let delegate = DelegateTool::new(scout_roster(), Arc::new(StubBuilder));
+    let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
     let mut agent = Agent::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
@@ -170,7 +170,7 @@ async fn background_delegation_emits_a_navigable_edge() {
         text_response("spawned, moving on"),
         text_response("done"),
     ]);
-    let delegate = DelegateTool::new(scout_roster(), Arc::new(StubBuilder));
+    let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
     let mut agent = Agent::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
@@ -233,7 +233,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
             text_response("spawned"),
             text_response("later"),
         ]);
-        let delegate = DelegateTool::new(scout_roster(), Arc::new(StubBuilder));
+        let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
         let mut agent = Agent::builder(provider, "u1", "s1")
             .system_prompt("sys")
             .tool(Arc::new(delegate))
@@ -248,7 +248,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     assert_eq!(rebuilt_view.len(), 1);
     let task_id = rebuilt_view.keys().next().unwrap().clone();
 
-    let fresh_delegate = DelegateTool::new(scout_roster(), Arc::new(StubBuilder));
+    let fresh_delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
     let mut ctx = ToolContext::new("u1", "s1", "r9");
     ctx.insert(TasksSnapshot(Arc::new(rebuilt_view)));
 

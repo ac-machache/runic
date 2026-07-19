@@ -98,7 +98,10 @@ impl AgentFactory for DelegatingFactory {
         let roster = vec![Subagent::new("scout", "research").prompt("dig")];
         Ok(Agent::builder(provider, tenant, session_id)
             .system_prompt("sys")
-            .tool(Arc::new(DelegateTool::new(roster, Arc::new(StubBuilder))))
+            .tool(Arc::new(DelegateTool::with_builder(
+                roster,
+                Arc::new(StubBuilder),
+            )))
             .build())
     }
 }

@@ -75,7 +75,7 @@ impl Agent {
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             system,
-            thinking: None,
+            thinking: self.config.thinking.clone(),
         }
     }
 }

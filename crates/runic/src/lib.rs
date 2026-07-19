@@ -6,6 +6,7 @@ pub mod composer;
 mod context;
 pub mod deferred;
 pub mod hooks;
+mod llm;
 mod models;
 pub mod output;
 pub mod tools;
@@ -17,6 +18,7 @@ pub use child::FoundrySubagentBuilder;
 pub use composer::{Compose, ComposeError, Composer};
 pub use context::Context;
 pub use hooks::Compaction;
+pub use llm::{Llm, LlmOutput};
 pub use output::StructuredOutput;
 pub use runic_macros::tool;
 

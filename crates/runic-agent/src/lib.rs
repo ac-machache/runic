@@ -238,24 +238,14 @@ impl RunContext {
 /// Tunable knobs for a run.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Model identifier passed to the provider.
     pub model: String,
-    /// Max output tokens per model call.
     pub max_tokens: u32,
-    /// Sampling temperature.
     pub temperature: f32,
-    /// Hard backstop on model turns per run.
     pub max_turns: u32,
-    /// Per-tool execution timeout.
     pub tool_timeout: Duration,
-    /// On hitting `max_turns`: if `true`, make one final tools-free call to
-    /// extract a best-effort answer; if `false`, error out.
     pub graceful_max_turns: bool,
-    /// JSON schema for a synthetic `final_answer` tool; its call is captured as
-    /// the run's structured output.
     pub output_schema: Option<serde_json::Value>,
-    /// Serialized-byte threshold above which a `Retention::Full` tool output is
-    /// spilled to the artifact store instead of written inline.
+    pub thinking: Option<runic_provider::ThinkingConfig>,
     pub auto_spill_over: Option<usize>,
 }
 
@@ -269,6 +259,7 @@ impl Default for AgentConfig {
             tool_timeout: Duration::from_secs(DEFAULT_TOOL_TIMEOUT_SECS),
             graceful_max_turns: false,
             output_schema: None,
+            thinking: None,
             auto_spill_over: None,
         }
     }

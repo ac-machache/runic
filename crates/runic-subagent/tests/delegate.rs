@@ -108,6 +108,29 @@ async fn subagent_hook_fires_on_the_child() {
 }
 
 #[tokio::test]
+async fn subagent_with_own_llm_uses_its_provider() {
+    let roster =
+        vec![
+            Subagent::new("specialist", "own brain")
+                .prompt("hi")
+                .llm(runic_agent::Llm::new(
+                    Arc::new(OneShot("from own llm".into())),
+                    "own-model",
+                )),
+        ];
+    let parent: Arc<dyn Provider> = Arc::new(OneShot("from parent".into()));
+    let tool = DelegateTool::new(roster, parent, "parent-model");
+    let r = tool
+        .execute(
+            serde_json::json!({ "agent": "specialist", "prompt": "go" }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text(), "from own llm");
+}
+
+#[tokio::test]
 async fn new_runs_children_without_a_builder_impl() {
     let provider: Arc<dyn Provider> = Arc::new(OneShot("child says hi".into()));
     let tool = DelegateTool::new(roster(), provider, "mistral-large-latest");

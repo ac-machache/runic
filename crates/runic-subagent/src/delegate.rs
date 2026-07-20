@@ -89,28 +89,52 @@ pub trait SubagentBuilder: Send + Sync {
 
 pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<'_>) -> Agent {
     let (tenant, session) = builder.identity(req);
-    let provider = builder.provider(req).await;
-    let model = req
-        .subagent
-        .model
-        .clone()
-        .unwrap_or_else(|| builder.default_model(req));
     let pool = builder.tool_pool(req).await;
 
-    let scoped = builder
-        .skill_catalog(req)
-        .filter(|_| !req.subagent.skills.is_empty())
-        .map(|catalog| Arc::new(catalog.scope_glob(&req.subagent.skills)))
-        .filter(|set| !set.is_empty());
+    let mut skill_sets: Vec<Arc<SkillSet>> = Vec::new();
+    if !req.subagent.skills.is_empty()
+        && let Some(catalog) = builder.skill_catalog(req)
+    {
+        let scoped = catalog.scope_glob(&req.subagent.skills);
+        if !scoped.is_empty() {
+            skill_sets.push(Arc::new(scoped));
+        }
+    }
+    skill_sets.extend(req.subagent.own_skills.iter().cloned());
+    let scoped = if skill_sets.is_empty() {
+        None
+    } else {
+        let merged = Arc::new(SkillSet::merge(skill_sets));
+        (!merged.is_empty()).then_some(merged)
+    };
 
     let mut prompt = req.subagent.system_prompt.clone();
     if let Some(set) = &scoped {
         prompt = format!("{prompt}\n\n{}", set.prompt_section());
     }
 
-    let mut b = Agent::builder(provider, tenant, session)
-        .model(model)
-        .system_prompt(prompt);
+    let mut b = match &req.subagent.llm {
+        Some(llm) => {
+            let mut config = llm.config().clone();
+            if let Some(model) = &req.subagent.model {
+                config.model = model.clone();
+            }
+            Agent::builder(llm.provider(), tenant, session)
+                .config(config)
+                .system_prompt(prompt)
+        }
+        None => {
+            let provider = builder.provider(req).await;
+            let model = req
+                .subagent
+                .model
+                .clone()
+                .unwrap_or_else(|| builder.default_model(req));
+            Agent::builder(provider, tenant, session)
+                .model(model)
+                .system_prompt(prompt)
+        }
+    };
     for t in req.subagent.scope_tools(&pool) {
         b = b.tool(t);
     }

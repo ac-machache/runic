@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "runic"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "runic-agent"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "runic-commands"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "runic-hook"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "runic-state",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "runic-macros"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "runic-mcp"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "runic-provider"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "runic-serve"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "runic-skills"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1967,7 +1967,7 @@ dependencies = [
 
 [[package]]
 name = "runic-state"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1982,7 +1982,7 @@ dependencies = [
 
 [[package]]
 name = "runic-subagent"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2003,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "runic-substrate"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2025,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "runic-tool"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "runic-transcriber"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "runic-types"
-version = "0.9.13"
+version = "0.10.0"
 dependencies = [
  "proptest",
  "rmp-serde",

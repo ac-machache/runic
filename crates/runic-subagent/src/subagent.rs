@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use runic_agent::Llm;
 use runic_hook::WriteHook;
+use runic_skills::SkillSet;
 use runic_tool::Tool;
 
 #[derive(Clone)]
@@ -14,6 +16,8 @@ pub struct Subagent {
     pub max_turns: Option<u32>,
     pub system_prompt: String,
     pub hooks: Vec<Arc<dyn WriteHook>>,
+    pub llm: Option<Llm>,
+    pub own_skills: Vec<Arc<SkillSet>>,
 }
 
 impl std::fmt::Debug for Subagent {
@@ -31,6 +35,7 @@ impl std::fmt::Debug for Subagent {
                 "hooks",
                 &self.hooks.iter().map(|h| h.name()).collect::<Vec<_>>(),
             )
+            .field("own_skills", &self.own_skills.len())
             .finish()
     }
 }
@@ -47,6 +52,8 @@ impl Subagent {
             max_turns: None,
             system_prompt: String::new(),
             hooks: Vec::new(),
+            llm: None,
+            own_skills: Vec::new(),
         }
     }
 
@@ -87,6 +94,16 @@ impl Subagent {
 
     pub fn hook(mut self, hook: impl WriteHook + 'static) -> Self {
         self.hooks.push(Arc::new(hook));
+        self
+    }
+
+    pub fn llm(mut self, llm: Llm) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    pub fn skill_set(mut self, skills: Arc<SkillSet>) -> Self {
+        self.own_skills.push(skills);
         self
     }
 

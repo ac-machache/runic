@@ -243,7 +243,9 @@ fn lifecycle_str(lifecycle: HookLifecycle) -> &'static str {
 /// completed run yields both `usage` and `done`.
 pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
     match event {
-        AgentEvent::RunStarted { run_id, agent, at } => vec![WireEvent::RunStart {
+        AgentEvent::RunStarted {
+            run_id, agent, at, ..
+        } => vec![WireEvent::RunStart {
             run_id,
             agent,
             at: Some(at),

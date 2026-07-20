@@ -159,6 +159,7 @@ impl Session {
         self.emit(crate::AgentEvent::RunStarted {
             run_id: run_id.clone(),
             agent: agent_label,
+            audit: None,
             at: Utc::now(),
         });
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");

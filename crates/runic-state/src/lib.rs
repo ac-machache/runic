@@ -18,8 +18,8 @@ pub mod timeline;
 
 pub use child::{ChildPersistence, ChildPersistenceHandle, ChildSink};
 pub use event::{
-    AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus, HookLifecycle,
-    RunEndStatus, RunOutcome, SessionEvent, ToolStatus,
+    AgentEvent, AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus,
+    HookLifecycle, RunEndStatus, RunOutcome, SessionEvent, ToolStatus,
 };
 pub use external::ExternalEvents;
 pub use state::{

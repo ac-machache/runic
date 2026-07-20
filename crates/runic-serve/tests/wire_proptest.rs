@@ -21,6 +21,7 @@ fn agent_event() -> impl Strategy<Value = AgentEvent> {
         "[a-z0-9-]{1,8}".prop_map(move |run_id| AgentEvent::RunStarted {
             run_id,
             agent: None,
+            audit: None,
             at,
         }),
         "[a-z ]{0,20}".prop_map(AgentEvent::TextDelta),

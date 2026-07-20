@@ -36,6 +36,7 @@ crates/runic-agent/target/rust-analyzer/flycheck0/
 docs/design/
 client-python
 pydantic-ai
+webclaw
 critique-v2.md
 design-v2.md
 state-v2.md

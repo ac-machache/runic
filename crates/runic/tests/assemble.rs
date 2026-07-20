@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::ability::{
-    Compaction as CompactionAbility, Delegation, Sessions, Skills, Tools, ask_user, basics,
+    Compaction as CompactionAbility, Delegation, Skills, Tools, ask_user, basics, search_chats,
     weather, web_fetch,
 };
 use runic::composer::Composer;
@@ -142,7 +142,7 @@ async fn registers_enabled_tool_surfaces() {
         .with(Delegation::new([
             Subagent::new("researcher", "researches").prompt("Act carefully.")
         ]))
-        .with(Sessions(sessions_memory()))
+        .with(search_chats(sessions_memory().store()))
         .build("alice", "s1")
         .await
         .unwrap();

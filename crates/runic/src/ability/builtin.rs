@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
 use runic_subagent::{RosterVoice, Subagent};
-use runic_substrate::Sessions as SessionsConfig;
+use runic_substrate::{SearchChatsTool, SessionStore};
 use runic_tool::Tool;
 
 use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, ability};
@@ -79,20 +79,10 @@ impl Ability for Delegation {
     }
 }
 
-pub struct Sessions(pub SessionsConfig);
-
-#[async_trait]
-impl Ability for Sessions {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        if let Some(tool) = self.0.tools() {
-            bundle.tool(tool);
-        }
-        Ok(())
-    }
+pub fn search_chats(store: Arc<dyn SessionStore>) -> AbilityDraft {
+    ability("search-chats")
+        .describe("search this tenant's other conversations")
+        .tool(SearchChatsTool::new(store))
 }
 
 pub fn basics() -> AbilityDraft {

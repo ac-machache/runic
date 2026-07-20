@@ -71,6 +71,42 @@ async fn delegate_sync_returns_child_answer() {
     assert_eq!(r.text(), "done: reviewer");
 }
 
+struct FlagHook(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl runic_hook::WriteHook for FlagHook {
+    fn name(&self) -> &str {
+        "flag"
+    }
+
+    async fn before_agent(&self, _state: &mut runic_state::AgentState) -> runic_hook::HookOutcome {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        runic_hook::HookOutcome::Noop
+    }
+}
+
+#[tokio::test]
+async fn subagent_hook_fires_on_the_child() {
+    let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let roster = vec![
+        Subagent::new("reviewer", "reviews")
+            .prompt("Review.")
+            .hook(FlagHook(fired.clone())),
+    ];
+    let provider: Arc<dyn Provider> = Arc::new(OneShot("ok".into()));
+    let tool = DelegateTool::new(roster, provider, "m");
+    tool.execute(
+        serde_json::json!({ "agent": "reviewer", "prompt": "go" }),
+        &ctx(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the subagent's hook must run in the child loop"
+    );
+}
+
 #[tokio::test]
 async fn new_runs_children_without_a_builder_impl() {
     let provider: Arc<dyn Provider> = Arc::new(OneShot("child says hi".into()));

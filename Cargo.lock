@@ -1987,6 +1987,7 @@ dependencies = [
  "chrono",
  "futures",
  "runic-agent",
+ "runic-hook",
  "runic-provider",
  "runic-skills",
  "runic-state",

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+use runic_hook::WriteHook;
 use runic_tool::Tool;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Subagent {
     pub name: String,
     pub description: String,
@@ -12,6 +13,26 @@ pub struct Subagent {
     pub skills: Vec<String>,
     pub max_turns: Option<u32>,
     pub system_prompt: String,
+    pub hooks: Vec<Arc<dyn WriteHook>>,
+}
+
+impl std::fmt::Debug for Subagent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Subagent")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("skills", &self.skills)
+            .field("max_turns", &self.max_turns)
+            .field("system_prompt", &self.system_prompt)
+            .field(
+                "hooks",
+                &self.hooks.iter().map(|h| h.name()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl Subagent {
@@ -25,6 +46,7 @@ impl Subagent {
             skills: Vec::new(),
             max_turns: None,
             system_prompt: String::new(),
+            hooks: Vec::new(),
         }
     }
 
@@ -60,6 +82,11 @@ impl Subagent {
 
     pub fn max_turns(mut self, turns: u32) -> Self {
         self.max_turns = Some(turns);
+        self
+    }
+
+    pub fn hook(mut self, hook: impl WriteHook + 'static) -> Self {
+        self.hooks.push(Arc::new(hook));
         self
     }
 

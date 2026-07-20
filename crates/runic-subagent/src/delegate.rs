@@ -122,6 +122,9 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
     if let Some(max_turns) = req.subagent.max_turns {
         b = b.max_turns(max_turns);
     }
+    for hook in &req.subagent.hooks {
+        b = b.write_hook(hook.clone());
+    }
     builder.decorate(b, req).build()
 }
 

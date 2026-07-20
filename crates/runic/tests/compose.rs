@@ -2,10 +2,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::{
     Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, Hooks, Skills, Tools,
 };
-use runic::composer::{ComposeError, Composer};
+use runic::composer::{Agent, ComposeError};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -104,8 +105,7 @@ async fn crm_catalog() -> Arc<SkillSet> {
 #[tokio::test]
 async fn composes_the_prompt_from_instructions_and_abilities() {
     let provider = ScriptedProvider::new(vec![text("done")]);
-    let agent = Composer::new(provider, "test-model")
-        .instructions("core instructions")
+    let agent = Agent::new(Llm::new(provider, "test-model").instructions("core instructions"))
         .with(Skills(crm_catalog().await))
         .build("alice", "s1")
         .await
@@ -137,8 +137,7 @@ impl WriteHook for Marker {
 async fn a_hooks_ability_registers_custom_write_hooks() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let fired = Arc::new(Mutex::new(false));
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("go")
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
         .with(Hooks(vec![Arc::new(Marker(fired.clone()))]))
         .build("alice", "s1")
         .await
@@ -153,8 +152,7 @@ async fn a_hooks_ability_registers_custom_write_hooks() {
 async fn a_tools_ability_registers_runnable_tools() {
     let provider = ScriptedProvider::new(vec![call("ping"), text("done")]);
     let pings = Arc::new(Mutex::new(0));
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("go")
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
         .with(Tools(vec![Arc::new(Ping(pings.clone()))]))
         .build("alice", "s1")
         .await
@@ -200,7 +198,7 @@ impl Ability for CountingAbility {
 #[tokio::test]
 async fn failing_ability_reports_its_name_and_source() {
     let provider = ScriptedProvider::new(vec![]);
-    let error = match Composer::new(provider, "test-model")
+    let error = match Agent::new(Llm::new(provider, "test-model"))
         .with(FailingAbility)
         .build("alice", "s1")
         .await
@@ -222,7 +220,7 @@ async fn failing_ability_reports_its_name_and_source() {
 async fn abilities_after_a_failure_are_not_executed() {
     let provider = ScriptedProvider::new(vec![]);
     let calls = Arc::new(Mutex::new(0));
-    let result = Composer::new(provider, "test-model")
+    let result = Agent::new(Llm::new(provider, "test-model"))
         .with(FailingAbility)
         .with(CountingAbility(calls.clone()))
         .build("alice", "s1")
@@ -278,7 +276,7 @@ async fn deferred_ability_requires_an_explicit_id_before_contribution() {
         description: Some("missing an id".into()),
         activation: ActivationPolicy::Deferred,
     };
-    let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+    let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
         .with(described("missing-id", descriptor, calls.clone()))
         .build("alice", "s1")
         .await;
@@ -308,7 +306,7 @@ async fn ability_ids_enforce_the_full_syntax_contract() {
 
     for id in invalid {
         let descriptor = AbilityDescriptor::deferred(id.clone(), "invalid test ability");
-        let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+        let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
             .with(described("invalid-id", descriptor, Arc::new(Mutex::new(0))))
             .build("alice", "s1")
             .await;
@@ -331,7 +329,7 @@ async fn ability_ids_enforce_the_full_syntax_contract() {
 async fn ability_ids_accept_allowed_punctuation_and_the_64_byte_boundary() {
     for id in ["a-b_c.d9".to_string(), "a".repeat(64)] {
         let descriptor = AbilityDescriptor::deferred(id, "valid test ability");
-        let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+        let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
             .with(described("valid-id", descriptor, Arc::new(Mutex::new(0))))
             .build("alice", "s1")
             .await;
@@ -349,7 +347,7 @@ async fn duplicate_explicit_ids_fail_before_any_ability_contributes() {
         activation: ActivationPolicy::Eager,
     };
     let deferred = AbilityDescriptor::deferred("shared-id", "duplicate test ability");
-    let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+    let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
         .with(described("first", eager, calls.clone()))
         .with(described("second", deferred, calls.clone()))
         .build("alice", "s1")

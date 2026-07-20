@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::{Ability, AbilityBundle, BuildCtx};
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
@@ -179,7 +180,7 @@ async fn each_ability_owned_subagent_only_sees_its_own_tools() {
         text("done"),
     ]);
 
-    let mut agent = Composer::new(main_provider.clone(), "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
         .with(runic::ability::Tools(vec![Arc::new(NamedTool(
             "main-tool",
         ))]))

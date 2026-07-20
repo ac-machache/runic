@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use proptest::prelude::*;
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::Composer;
-use runic_agent::Agent;
+use runic::composer::{Agent, Composer, Runtime};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::SessionEvent;
@@ -66,7 +66,7 @@ fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionRespon
     }
 }
 
-fn tool_result_pairs(agent: &Agent) -> Vec<(String, String, bool)> {
+fn tool_result_pairs(agent: &runic_agent::Agent) -> Vec<(String, String, bool)> {
     agent
         .state()
         .events()
@@ -187,7 +187,11 @@ fn build_gating_script(specs: &[AbilitySpec]) -> Vec<CompletionResponse> {
 
 async fn run_gating_case(specs: Vec<AbilitySpec>) -> Result<(), TestCaseError> {
     let provider = QueueProvider::new(build_gating_script(&specs));
-    let mut composer = Composer::new(provider, "test-model").instructions("root");
+    let mut def = Agent::new(
+        Llm::new(provider, "test-model")
+            .instructions("root")
+            .max_turns(200),
+    );
     for spec in &specs {
         let mut draft = ability(spec.id.clone()).prompt(format!("prompt-{}", spec.id));
         for index in 0..spec.tool_count {
@@ -199,14 +203,14 @@ async fn run_gating_case(specs: Vec<AbilitySpec>) -> Result<(), TestCaseError> {
         if spec.deferred {
             draft = draft.describe(format!("desc-{}", spec.id)).deferred();
         }
-        composer = composer.with(draft);
+        def = def.with(draft);
     }
     let activated_ids: Vec<String> = specs
         .iter()
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    composer = composer.activated(activated_ids).max_turns(200);
+    let composer = Composer::new(def, Runtime::new()).activated(activated_ids);
 
     let mut agent = composer.build("tenant", "session").await.unwrap();
     let system_prompt = agent.state().system_prompt.clone();
@@ -410,12 +414,13 @@ fn build_live_gate_script(specs: &[GatedSpec]) -> Vec<CompletionResponse> {
 
 async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> {
     let provider = QueueProvider::new(build_live_gate_script(&specs));
-    let mut composer = Composer::new(provider, "test-model")
-        .instructions("root")
-        .subagent_builder(Arc::new(ChildBuilder))
-        .max_turns(200);
+    let mut def = Agent::new(
+        Llm::new(provider, "test-model")
+            .instructions("root")
+            .max_turns(200),
+    );
     for spec in &specs {
-        composer = composer.with(
+        def = def.with(
             ability(spec.id.clone())
                 .describe(format!("desc-{}", spec.id))
                 .deferred()
@@ -428,7 +433,8 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    composer = composer.activated(activated_ids);
+    let composer = Composer::new(def, Runtime::new().subagent_builder(Arc::new(ChildBuilder)))
+        .activated(activated_ids);
 
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("go").await.unwrap();

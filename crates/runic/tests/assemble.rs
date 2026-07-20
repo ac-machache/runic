@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::ability::{
-    Compaction as CompactionAbility, Delegation, Skills, Tools, ask_user, basics, search_chats,
-    weather, web_fetch,
+    Delegation, Skills, Tools, ask_user, basics, search_chats, weather, web_fetch,
 };
-use runic::composer::Composer;
+use runic::composer::{Agent, Composer, Runtime};
+use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_subagent::Subagent;
@@ -55,8 +55,8 @@ fn text_response(text: &str) -> CompletionResponse {
     }
 }
 
-fn base(provider: Arc<dyn Provider>) -> Composer {
-    Composer::new(provider, "model-a").instructions("core instructions")
+fn base(provider: Arc<dyn Provider>) -> Agent {
+    Agent::new(Llm::new(provider, "model-a").instructions("core instructions"))
 }
 
 async fn write_skill(root: &std::path::Path, dir: &str, name: &str, description: &str) {
@@ -203,15 +203,17 @@ async fn omits_optional_prompt_sections_and_tools_when_empty() {
 #[tokio::test]
 async fn compaction_folds_history_before_the_model_call() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = base(provider.clone())
-        .with(CompactionAbility(
-            runic::Compaction::new()
+    let mut agent = Composer::new(
+        base(provider.clone()),
+        Runtime::new().hook(
+            Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
+        ),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
     let old = [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -261,16 +263,18 @@ async fn compaction_folds_history_before_the_model_call() {
 #[tokio::test]
 async fn summary_guidance_override_reaches_the_summarizer() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = base(provider.clone())
-        .with(CompactionAbility(
-            runic::Compaction::new()
+    let mut agent = Composer::new(
+        base(provider.clone()),
+        Runtime::new().hook(
+            Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2)
                 .summary_guidance("custom summary instructions"),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
+        ),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
     for msg in [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -297,15 +301,17 @@ async fn summary_guidance_override_reaches_the_summarizer() {
 #[tokio::test]
 async fn compaction_sweeps_notified_keys_of_departed_tasks() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = base(provider.clone())
-        .with(CompactionAbility(
-            runic::Compaction::new()
+    let mut agent = Composer::new(
+        base(provider.clone()),
+        Runtime::new().hook(
+            Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2),
-        ))
-        .build("alice", "s1")
-        .await
-        .unwrap();
+        ),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     let state = agent.state_mut();
     state.fold_event(runic_state::SessionEvent::TaskSpawned {
@@ -376,13 +382,16 @@ impl Tool for EchoTool {
 #[tokio::test]
 async fn registers_custom_tools_and_output_schema() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = base(provider.clone())
-        .with(Tools(vec![Arc::new(EchoTool)]))
-        .output_schema(serde_json::json!({ "type": "object" }))
-        .max_turns(2)
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let mut agent = Agent::new(
+        Llm::new(provider.clone(), "model-a")
+            .instructions("core instructions")
+            .max_turns(2),
+    )
+    .with(Tools(vec![Arc::new(EchoTool)]))
+    .output_schema(serde_json::json!({ "type": "object" }))
+    .build("alice", "s1")
+    .await
+    .unwrap();
     agent.run("hello").await.unwrap();
 
     let names: Vec<String> = provider

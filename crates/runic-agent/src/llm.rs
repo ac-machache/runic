@@ -48,13 +48,27 @@ impl Llm {
             provider,
             config: AgentConfig {
                 model: model.into(),
-                max_turns: 8,
-                graceful_max_turns: true,
                 ..AgentConfig::default()
             },
             instructions: String::new(),
             tools: Vec::new(),
         }
+    }
+
+    pub fn provider(&self) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    pub fn system_prompt(&self) -> &str {
+        &self.instructions
+    }
+
+    pub fn tool_list(&self) -> &[Arc<dyn Tool>] {
+        &self.tools
     }
 
     pub fn instructions(mut self, text: impl Into<String>) -> Self {

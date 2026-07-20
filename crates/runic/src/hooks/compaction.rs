@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use runic_agent::Llm;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, Provider};
 use runic_state::{AgentState, SessionEvent};
@@ -18,28 +19,22 @@ const CHARS_PER_TOKEN: usize = 4;
 
 #[derive(Clone)]
 pub struct Compaction {
-    pub max_context_tokens: usize,
-    pub keep_recent: usize,
-    pub provider: Option<Arc<dyn Provider>>,
-    pub model: Option<String>,
-    pub summary_guidance: Option<String>,
-}
-
-impl Default for Compaction {
-    fn default() -> Self {
-        Self {
-            max_context_tokens: 132_000,
-            keep_recent: 10,
-            provider: None,
-            model: None,
-            summary_guidance: None,
-        }
-    }
+    max_context_tokens: usize,
+    keep_recent: usize,
+    provider: Arc<dyn Provider>,
+    model: String,
+    guidance: String,
 }
 
 impl Compaction {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(summarizer: Llm) -> Self {
+        Self {
+            max_context_tokens: 132_000,
+            keep_recent: 10,
+            provider: summarizer.provider(),
+            model: summarizer.config().model.clone(),
+            guidance: DEFAULT_SUMMARY_GUIDANCE.to_string(),
+        }
     }
     pub fn max_context_tokens(mut self, tokens: usize) -> Self {
         self.max_context_tokens = tokens;
@@ -49,46 +44,14 @@ impl Compaction {
         self.keep_recent = messages;
         self
     }
-    pub fn summarizer(mut self, provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
-        self.provider = Some(provider);
-        self.model = Some(model.into());
-        self
-    }
     pub fn summary_guidance(mut self, guidance: impl Into<String>) -> Self {
-        self.summary_guidance = Some(guidance.into());
+        self.guidance = guidance.into();
         self
-    }
-}
-
-pub(crate) struct CompactionHook {
-    max_context_tokens: usize,
-    keep_recent: usize,
-    provider: Arc<dyn Provider>,
-    model: String,
-    guidance: String,
-}
-
-impl CompactionHook {
-    pub(crate) fn new(
-        cfg: &Compaction,
-        agent_provider: Arc<dyn Provider>,
-        agent_model: &str,
-    ) -> Self {
-        Self {
-            max_context_tokens: cfg.max_context_tokens,
-            keep_recent: cfg.keep_recent,
-            provider: cfg.provider.clone().unwrap_or(agent_provider),
-            model: cfg.model.clone().unwrap_or_else(|| agent_model.to_string()),
-            guidance: cfg
-                .summary_guidance
-                .clone()
-                .unwrap_or_else(|| DEFAULT_SUMMARY_GUIDANCE.to_string()),
-        }
     }
 }
 
 #[async_trait]
-impl WriteHook for CompactionHook {
+impl WriteHook for Compaction {
     fn name(&self) -> &str {
         "compaction"
     }

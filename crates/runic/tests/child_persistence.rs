@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::subagent;
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic_agent::RunContext;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::{
@@ -159,7 +160,7 @@ fn persistence(fail_begin: bool, fail_flush: bool) -> Arc<FakeInner> {
 async fn run_delegation(fake: &Arc<FakeInner>) -> runic_agent::Agent {
     let child = ScriptedProvider::new(vec![text("child done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("sub-a"), text("done")]);
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("sub-a", "a expert")
                 .prompt("you are a")

@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::{ability, subagent};
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic_agent::RunContext;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -153,7 +154,7 @@ async fn draft_owned_tools_are_isolated_and_models_resolve() {
         text("done"),
     ]);
 
-    let mut agent = Composer::new(main_provider.clone(), "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
         .with(runic::ability::Tools(vec![Arc::new(NamedTool(
             "main-tool",
         ))]))
@@ -235,7 +236,7 @@ async fn a_consumer_hook_on_the_draft_reaches_the_childs_tool_calls() {
     ]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
 
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("crm-expert", "crm digger")
                 .prompt("dig")
@@ -278,7 +279,7 @@ async fn child_abilities_see_the_child_model_not_the_parents() {
     let child = ScriptedProvider::new(vec![]);
     let provider = ScriptedProvider::new(vec![]);
 
-    Composer::new(provider, "main-model")
+    Agent::new(Llm::new(provider, "main-model"))
         .with(
             subagent("expert", "digs")
                 .prompt("dig")
@@ -310,7 +311,7 @@ async fn a_consumer_hook_can_block_the_childs_tool_calls() {
     ]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
 
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("crm-expert", "crm digger")
                 .prompt("dig")
@@ -341,7 +342,7 @@ async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
     let child = ScriptedProvider::new(vec![child_reply]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("sub-a"), text("done")]);
 
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("sub-a", "a expert")
                 .prompt("you are a")
@@ -406,7 +407,7 @@ async fn parallel_delegation_emits_an_edge_per_child() {
         text("done"),
     ]);
 
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("sub-a", "a expert")
                 .prompt("you are a")
@@ -481,7 +482,7 @@ async fn parallel_delegation_emits_an_edge_per_child() {
 async fn nested_subagents_inside_a_draft_are_rejected() {
     let def = Subagent::new("inner", "inner").prompt("inner");
     let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
+    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
         .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(def)))
         .build("alice", "s1")
         .await
@@ -494,7 +495,7 @@ async fn nested_subagents_inside_a_draft_are_rejected() {
 #[tokio::test]
 async fn deferred_abilities_inside_a_draft_are_rejected() {
     let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
+    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
         .with(subagent("outer", "outer").with(ability("gated").describe("gated stuff").deferred()))
         .build("alice", "s1")
         .await
@@ -509,7 +510,7 @@ async fn ability_prompts_reach_the_child_system_prompt() {
     let child = ScriptedProvider::new(vec![text("done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("writer"), text("done")]);
 
-    let mut agent = Composer::new(main_provider, "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
         .with(
             subagent("writer", "writes")
                 .prompt("you are the writer")
@@ -533,7 +534,7 @@ async fn grouped_ability_can_own_a_draft() {
     let child = ScriptedProvider::new(vec![text("done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("analyst"), text("done")]);
 
-    let mut agent = Composer::new(main_provider.clone(), "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
         .with(
             ability("commerce").describe("commerce pack").subagent(
                 subagent("analyst", "analyzes")
@@ -562,7 +563,7 @@ async fn grouped_ability_can_own_a_draft() {
 #[tokio::test]
 async fn grouped_deferred_draft_is_rejected() {
     let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Composer::new(provider, "main-model")
+    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
         .with(
             ability("commerce").describe("commerce pack").subagent(
                 subagent("analyst", "analyzes")

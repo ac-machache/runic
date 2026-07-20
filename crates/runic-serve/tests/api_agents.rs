@@ -8,8 +8,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::Composer;
+use runic::composer::{Composer, Runtime};
 use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_agent::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -164,26 +165,27 @@ async fn billing_skills() -> Arc<runic::skills::SkillSet> {
 }
 
 async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
-    Composer::new(provider, "test-model")
-        .instructions("root")
-        .with(
-            ability("core")
-                .describe("always-on core tools")
-                .tool(AddTool),
-        )
-        .with(
-            ability("billing")
-                .describe("invoices and refunds")
-                .deferred()
-                .tool(RefundTool)
-                .skills(billing_skills().await)
-                .subagent_def(
-                    Subagent::new("billing-worker", "handles billing disputes")
-                        .max_turns(3)
-                        .prompt("you are a billing worker"),
-                ),
-        )
-        .subagent_builder(Arc::new(ChildBuilder))
+    Composer::new(
+        runic::composer::Agent::new(Llm::new(provider, "test-model").instructions("root"))
+            .with(
+                ability("core")
+                    .describe("always-on core tools")
+                    .tool(AddTool),
+            )
+            .with(
+                ability("billing")
+                    .describe("invoices and refunds")
+                    .deferred()
+                    .tool(RefundTool)
+                    .skills(billing_skills().await)
+                    .subagent_def(
+                        Subagent::new("billing-worker", "handles billing disputes")
+                            .max_turns(3)
+                            .prompt("you are a billing worker"),
+                    ),
+            ),
+        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+    )
 }
 
 fn map_overview(name: &str, views: Vec<runic::composer::AbilityView>) -> AgentOverview {

@@ -4,8 +4,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use proptest::prelude::*;
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::Composer;
+use runic::composer::{Agent, Composer, Runtime};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
@@ -88,7 +89,7 @@ fn ability_specs() -> impl Strategy<Value = Vec<AbilitySpec>> {
 }
 
 fn build_composer(specs: &[AbilitySpec]) -> Composer {
-    let mut composer = Composer::new(QueueProvider::new(), "test-model").instructions("root");
+    let mut agent = Agent::new(Llm::new(QueueProvider::new(), "test-model").instructions("root"));
     for spec in specs {
         let mut draft = ability(spec.id.clone()).prompt(format!("prompt-{}", spec.id));
         for index in 0..spec.tool_count {
@@ -99,14 +100,14 @@ fn build_composer(specs: &[AbilitySpec]) -> Composer {
         if spec.deferred {
             draft = draft.describe(format!("desc-{}", spec.id)).deferred();
         }
-        composer = composer.with(draft);
+        agent = agent.with(draft);
     }
     let activated_ids: Vec<String> = specs
         .iter()
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    composer.activated(activated_ids)
+    Composer::new(agent, Runtime::new()).activated(activated_ids)
 }
 
 async fn run_case(specs: Vec<AbilitySpec>) -> Result<(), TestCaseError> {

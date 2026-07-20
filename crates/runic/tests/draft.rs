@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::{Compose, ComposeError, Composer};
+use runic::composer::{Agent, ComposeError};
 use runic::deferred::ability_activated_key;
-use runic_agent::Agent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
@@ -107,7 +107,7 @@ impl WriteHook for MarkerHook {
     }
 }
 
-fn state_flag(agent: &Agent, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
     agent
         .state()
         .data()
@@ -124,8 +124,7 @@ async fn an_eager_draft_registers_prompt_tools_and_hooks() {
         call("c1", "refund", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("core")
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
         .with(
             ability("core-pack")
                 .prompt("house rules")
@@ -155,7 +154,7 @@ async fn a_deferred_draft_loads_by_id() {
         call("c2", "refund", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .with(
             ability("billing")
                 .describe("invoices and refunds")
@@ -182,7 +181,7 @@ async fn a_deferred_draft_loads_by_id() {
 
 #[tokio::test]
 async fn two_drafts_with_the_same_id_are_rejected() {
-    let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+    let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
         .with(ability("dup"))
         .with(ability("dup"))
         .build("alice", "s1")
@@ -197,7 +196,7 @@ async fn two_drafts_with_the_same_id_are_rejected() {
 
 #[test]
 fn a_model_spec_without_a_provider_prefix_is_rejected() {
-    match Agent::compose("mistral-medium-latest") {
+    match runic::llm("mistral-medium-latest") {
         Err(ComposeError::InvalidModelSpec { spec }) => {
             assert_eq!(spec, "mistral-medium-latest");
         }
@@ -208,7 +207,7 @@ fn a_model_spec_without_a_provider_prefix_is_rejected() {
 
 #[test]
 fn an_unknown_provider_is_rejected_with_a_helpful_error() {
-    match Agent::compose("hal9000:redundant-unit") {
+    match runic::llm("hal9000:redundant-unit") {
         Err(ComposeError::UnknownProvider { name }) => assert_eq!(name, "hal9000"),
         Err(other) => panic!("expected unknown provider error, got {other}"),
         Ok(_) => panic!("unknown provider must fail"),

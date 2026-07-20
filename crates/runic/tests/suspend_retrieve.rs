@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::Composer;
+use runic::composer::{Agent, Composer, Runtime};
 use runic_agent::RunContext;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
@@ -128,13 +129,14 @@ async fn a_suspended_spill_is_retrievable_through_the_auto_wired_reader_after_re
         ("c2", "ask", serde_json::json!({})),
     ])]));
     let store = Arc::new(MemoryArtifactStore::new());
-    let mut agent = Composer::new(provider.clone(), "m")
-        .instructions("core")
-        .with(ability("work").tool(BigTool).tool(AskTool))
-        .artifacts(store)
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider.clone(), "m").instructions("core"))
+            .with(ability("work").tool(BigTool).tool(AskTool)),
+        Runtime::new().artifacts(store),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     let out = agent
         .run_with("go", RunContext::new().with_run_id("r1"))

@@ -1,8 +1,7 @@
-use runic_agent::{Agent, AgentBuilder};
+use runic_agent::{Agent as Session, AgentBuilder as SessionBuilder};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
-use runic_substrate::ArtifactStore;
 use runic_tool::{Tool, ToolCatalog};
 use std::{
     collections::{HashMap, HashSet},
@@ -10,7 +9,7 @@ use std::{
 };
 
 use super::view::{AbilityView, SkillInfo, SubagentInfo};
-use super::{ComposeError, Composition};
+use super::{Agent, ComposeError, Composition, Runtime};
 use crate::ability::{Ability, AbilityBundle, ActivationPolicy, BuildCtx, Layer};
 use crate::artifact_resolver::ArtifactResolver;
 use crate::child::FoundrySubagentBuilder;
@@ -18,7 +17,6 @@ use crate::deferred::{
     AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
     LoadedAbilities, delegate_subjects, skill_subjects,
 };
-use crate::models;
 
 fn validate_ability_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -119,63 +117,24 @@ impl SubagentBuilder for DispatchingSubagentBuilder {
         self.for_req(req).identity(req)
     }
 
-    fn decorate(&self, b: AgentBuilder, req: &SubagentReq<'_>) -> AgentBuilder {
+    fn decorate(&self, b: SessionBuilder, req: &SubagentReq<'_>) -> SessionBuilder {
         self.for_req(req).decorate(b, req)
     }
 }
 
-pub trait Compose {
-    fn compose(spec: &str) -> Result<Composer, ComposeError>;
-}
-
-impl Compose for Agent {
-    fn compose(spec: &str) -> Result<Composer, ComposeError> {
-        Composer::from_spec(spec)
-    }
-}
-
 pub struct Composer {
-    provider: Arc<dyn Provider>,
-    model: String,
-    instructions: String,
-    abilities: Vec<Arc<dyn Ability>>,
+    agent: Agent,
+    runtime: Runtime,
     activated: HashSet<String>,
-    artifact_store: Option<Arc<dyn ArtifactStore>>,
-    subagent_builder: Option<Arc<dyn SubagentBuilder>>,
-    output_schema: Option<serde_json::Value>,
-    max_turns: Option<u32>,
-    auto_spill_over: Option<usize>,
 }
 
 impl Composer {
-    pub fn new(provider: Arc<dyn Provider>, model: impl Into<String>) -> Self {
+    pub fn new(agent: Agent, runtime: Runtime) -> Self {
         Self {
-            provider,
-            model: model.into(),
-            instructions: String::new(),
-            abilities: Vec::new(),
+            agent,
+            runtime,
             activated: HashSet::new(),
-            artifact_store: None,
-            subagent_builder: None,
-            output_schema: None,
-            max_turns: None,
-            auto_spill_over: None,
         }
-    }
-
-    pub fn from_spec(spec: &str) -> Result<Self, ComposeError> {
-        let (provider, model) = models::infer(spec)?;
-        Ok(Self::new(provider, model))
-    }
-
-    pub fn instructions(mut self, text: impl Into<String>) -> Self {
-        self.instructions = text.into();
-        self
-    }
-
-    pub fn with(mut self, ability: impl Ability + 'static) -> Self {
-        self.abilities.push(Arc::new(ability));
-        self
     }
 
     pub fn activated<Ids, Id>(mut self, ids: Ids) -> Self
@@ -187,50 +146,25 @@ impl Composer {
         self
     }
 
-    pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
-        self.artifact_store = Some(store);
-        self
-    }
-
-    pub fn subagent_builder(mut self, builder: Arc<dyn SubagentBuilder>) -> Self {
-        self.subagent_builder = Some(builder);
-        self
-    }
-
-    pub fn output<T: schemars::JsonSchema>(self) -> Self {
-        let schema = crate::output::schema_of::<T>();
-        self.output_schema(schema)
-    }
-
-    pub fn output_schema(mut self, schema: serde_json::Value) -> Self {
-        self.output_schema = Some(schema);
-        self
-    }
-
-    pub fn max_turns(mut self, turns: u32) -> Self {
-        self.max_turns = Some(turns);
-        self
-    }
-
-    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
-        self.auto_spill_over = Some(bytes);
-        self
-    }
-
-    pub async fn build(&self, tenant: &str, session: &str) -> Result<Agent, ComposeError> {
-        validate_ability_descriptors(&self.abilities)?;
+    pub async fn build(&self, tenant: &str, session: &str) -> Result<Session, ComposeError> {
+        validate_ability_descriptors(&self.agent.abilities)?;
         let reserve_loader_name = self
+            .agent
             .abilities
             .iter()
             .any(|ability| ability.descriptor().activation == ActivationPolicy::Deferred);
+        let provider = self.agent.llm.provider();
+        let model = self.agent.llm.config().model.clone();
         let ctx = BuildCtx {
             tenant,
             session,
-            provider: &self.provider,
-            model: &self.model,
+            provider: &provider,
+            model: &model,
         };
         let mut composition = Composition::default();
-        composition.prompt.instructions(&self.instructions);
+        composition
+            .prompt
+            .instructions(self.agent.llm.system_prompt());
         let mut registry = AbilityRegistry {
             entries: Vec::new(),
         };
@@ -242,7 +176,7 @@ impl Composer {
         let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
         let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
         let mut subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>> = HashMap::new();
-        for ability in &self.abilities {
+        for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
             let mut bundle = AbilityBundle::default();
@@ -371,10 +305,10 @@ impl Composer {
                 .cloned()
                 .chain(deferred_defs)
                 .collect();
-            let default_builder = self.subagent_builder.clone().unwrap_or_else(|| {
+            let default_builder = self.runtime.subagent_builder.clone().unwrap_or_else(|| {
                 Arc::new(FoundrySubagentBuilder {
-                    provider: self.provider.clone(),
-                    model: self.model.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
                     skills: None,
                 })
             });
@@ -413,23 +347,29 @@ impl Composer {
         }
 
         let mut tools = composition.tools;
-        if let Some(store) = &self.artifact_store
+        if let Some(store) = &self.runtime.artifact_store
             && !tools.iter().any(|t| t.name() == "read_thread_artifact")
         {
             tools.push(Arc::new(runic_substrate::ReadThreadArtifactTool::new(
                 store.clone(),
             )));
         }
-        let mut agent_builder = Agent::builder(self.provider.clone(), tenant, session)
-            .model(&self.model)
+        let mut agent_builder = Session::builder(provider.clone(), tenant, session)
+            .config(self.agent.llm.config().clone())
             .system_prompt(composition.prompt.render());
+        for tool in self.agent.llm.tool_list() {
+            agent_builder = agent_builder.tool(tool.clone());
+        }
         for tool in tools {
             agent_builder = agent_builder.tool(tool);
         }
         for hook in composition.write_hooks {
             agent_builder = agent_builder.write_hook(hook);
         }
-        if let Some(store) = &self.artifact_store {
+        for hook in &self.runtime.hooks {
+            agent_builder = agent_builder.write_hook(hook.clone());
+        }
+        if let Some(store) = &self.runtime.artifact_store {
             agent_builder = agent_builder
                 .media_resolver(Arc::new(ArtifactResolver::new(
                     store.clone(),
@@ -438,17 +378,14 @@ impl Composer {
                 )))
                 .artifact_spill(Arc::new(crate::SpillToArtifacts::new(store.clone())));
         }
-        if let Some(bytes) = self.auto_spill_over {
+        if let Some(bytes) = self.runtime.auto_spill_over {
             agent_builder = agent_builder.auto_spill_over(bytes);
         }
         if let Some(catalog) = into_catalog(composition.tool_catalogs) {
             agent_builder = agent_builder.tool_catalog(catalog);
         }
-        if let Some(schema) = &self.output_schema {
+        if let Some(schema) = &self.agent.output_schema {
             agent_builder = agent_builder.output_schema(schema.clone());
-        }
-        if let Some(turns) = self.max_turns {
-            agent_builder = agent_builder.max_turns(turns);
         }
         Ok(agent_builder.build())
     }
@@ -458,15 +395,17 @@ impl Composer {
         tenant: &str,
         session: &str,
     ) -> Result<Vec<AbilityView>, ComposeError> {
-        validate_ability_descriptors(&self.abilities)?;
+        validate_ability_descriptors(&self.agent.abilities)?;
+        let provider = self.agent.llm.provider();
+        let model = self.agent.llm.config().model.clone();
         let ctx = BuildCtx {
             tenant,
             session,
-            provider: &self.provider,
-            model: &self.model,
+            provider: &provider,
+            model: &model,
         };
         let mut views = Vec::new();
-        for ability in &self.abilities {
+        for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
             let mut bundle = AbilityBundle::default();

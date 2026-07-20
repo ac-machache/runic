@@ -14,7 +14,7 @@ pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
 pub use child::FoundrySubagentBuilder;
-pub use composer::{Compose, ComposeError, Composer};
+pub use composer::{Agent, ComposeError, Composer, Runtime};
 pub use context::Context;
 pub use hooks::Compaction;
 pub use runic_agent::{Llm, LlmOutput};

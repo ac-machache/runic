@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, Tools};
-use runic::composer::{ComposeError, Composer};
+use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
-use runic_agent::Agent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -225,7 +225,7 @@ impl SubagentBuilder for ChildBuilder {
     }
 }
 
-fn state_flag(agent: &Agent, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
     agent
         .state()
         .data()
@@ -234,7 +234,7 @@ fn state_flag(agent: &Agent, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn tool_result_texts(agent: &Agent) -> Vec<String> {
+fn tool_result_texts(agent: &runic_agent::Agent) -> Vec<String> {
     agent
         .state()
         .events()
@@ -258,8 +258,7 @@ fn tool_result_texts(agent: &Agent) -> Vec<String> {
 #[tokio::test]
 async fn a_deferred_ability_is_hidden_but_announced_in_the_catalog() {
     let provider = ScriptedProvider::new(vec![text("done")]);
-    let agent = Composer::new(provider, "test-model")
-        .instructions("core")
+    let agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
         .with(DeferredAbility::new("billing", "invoices and refunds").prompt("billing rules"))
         .build("alice", "s1")
         .await
@@ -279,8 +278,7 @@ async fn loading_an_ability_unlocks_its_tools_and_persists_activation() {
         call("c2", "refund", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("core")
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
         .with(
             DeferredAbility::new("billing", "invoices and refunds")
                 .prompt("billing rules")
@@ -314,7 +312,7 @@ async fn loading_an_unknown_id_reports_the_available_ones() {
         call("c1", "load_ability", serde_json::json!({ "id": "ghost" })),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .with(DeferredAbility::new("billing", "invoices"))
         .build("alice", "s1")
         .await
@@ -339,7 +337,7 @@ async fn a_second_load_of_the_same_ability_bounces() {
         call("c2", "load_ability", serde_json::json!({ "id": "billing" })),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .with(
             DeferredAbility::new("billing", "invoices").tool(Arc::new(CountingTool {
                 name: "refund",
@@ -363,7 +361,7 @@ async fn a_second_load_of_the_same_ability_bounces() {
 #[tokio::test]
 async fn a_user_tool_named_load_ability_is_rejected_when_deferred_abilities_exist() {
     let calls = Arc::new(Mutex::new(0));
-    let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+    let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
         .with(Tools(vec![Arc::new(CountingTool {
             name: "load_ability",
             calls,
@@ -385,7 +383,7 @@ async fn a_user_tool_named_load_ability_is_rejected_when_deferred_abilities_exis
 async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
     let eager_calls = Arc::new(Mutex::new(0));
     let deferred_calls = Arc::new(Mutex::new(0));
-    let result = Composer::new(ScriptedProvider::new(vec![]), "test-model")
+    let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
         .with(Tools(vec![Arc::new(CountingTool {
             name: "refund",
             calls: eager_calls,
@@ -418,7 +416,7 @@ async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
 async fn deferred_hooks_compose_fine_and_stay_inert_before_load() {
     let fired = Arc::new(Mutex::new(false));
     let provider = ScriptedProvider::new(vec![text("done")]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .with(DeferredAbility::new("billing", "invoices").hook(Arc::new(MarkerHook(fired.clone()))))
         .build("alice", "s1")
         .await
@@ -440,9 +438,8 @@ async fn a_rebuild_with_the_activated_id_merges_the_full_bundle() {
         call("c1", "refund", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("core")
-        .with(
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model").instructions("core")).with(
             DeferredAbility::new("billing", "invoices and refunds")
                 .prompt("billing rules")
                 .tool(Arc::new(CountingTool {
@@ -450,11 +447,13 @@ async fn a_rebuild_with_the_activated_id_merges_the_full_bundle() {
                     calls: counted.clone(),
                 }))
                 .hook(Arc::new(MarkerHook(fired.clone()))),
-        )
-        .activated(["billing"])
-        .build("alice", "s1")
-        .await
-        .unwrap();
+        ),
+        Runtime::new(),
+    )
+    .activated(["billing"])
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     let system = agent.state().system_prompt.clone();
     assert!(system.contains("billing rules"));
@@ -469,13 +468,16 @@ async fn a_rebuild_with_the_activated_id_merges_the_full_bundle() {
 #[tokio::test]
 async fn the_catalog_lists_only_unloaded_abilities() {
     let provider = ScriptedProvider::new(vec![text("done")]);
-    let agent = Composer::new(provider, "test-model")
-        .with(DeferredAbility::new("billing", "invoices"))
-        .with(DeferredAbility::new("shipping", "labels and tracking"))
-        .activated(["billing"])
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model"))
+            .with(DeferredAbility::new("billing", "invoices"))
+            .with(DeferredAbility::new("shipping", "labels and tracking")),
+        Runtime::new(),
+    )
+    .activated(["billing"])
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     let system = &agent.state().system_prompt;
     assert!(system.contains("- shipping: labels and tracking"));
@@ -509,7 +511,7 @@ async fn deferred_skills_are_gated_until_load_then_viewable_in_the_same_run() {
         ),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .with(runic::ability::Skills(docs))
         .with(DeferredAbility::new("crm-pack", "crm workflows").skill(crm))
         .build("alice", "s1")
@@ -561,12 +563,14 @@ async fn deferred_subagents_are_gated_until_load_then_delegatable_in_the_same_ru
         ),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .with(DeferredAbility::new("ops", "operations crew").subagent(worker_def()))
-        .subagent_builder(Arc::new(ChildBuilder))
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model"))
+            .with(DeferredAbility::new("ops", "operations crew").subagent(worker_def())),
+        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     assert!(!agent.state().system_prompt.contains("worker"));
 
@@ -602,17 +606,18 @@ async fn a_rebuild_with_the_activated_id_ungates_skills_and_subagents() {
         ),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .with(
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model")).with(
             DeferredAbility::new("crm-pack", "crm workflows")
                 .skill(crm)
                 .subagent(worker_def()),
-        )
-        .subagent_builder(Arc::new(ChildBuilder))
-        .activated(["crm-pack"])
-        .build("alice", "s1")
-        .await
-        .unwrap();
+        ),
+        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+    )
+    .activated(["crm-pack"])
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     let system = agent.state().system_prompt.clone();
     assert!(system.contains("crm:pipeline"));
@@ -636,13 +641,16 @@ async fn a_loaded_ability_bounces_after_a_rebuild_with_its_id() {
         call("c1", "load_ability", serde_json::json!({ "id": "billing" })),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .with(DeferredAbility::new("billing", "invoices"))
-        .with(DeferredAbility::new("shipping", "labels"))
-        .activated(["billing"])
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model"))
+            .with(DeferredAbility::new("billing", "invoices"))
+            .with(DeferredAbility::new("shipping", "labels")),
+        Runtime::new(),
+    )
+    .activated(["billing"])
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     agent.run("go").await.unwrap();
 

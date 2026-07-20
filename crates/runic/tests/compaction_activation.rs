@@ -3,11 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use proptest::prelude::*;
-use runic::Compaction as CompactionConfig;
-use runic::ability::{Compaction as CompactionAbility, ability};
-use runic::composer::Composer;
+use runic::ability::ability;
+use runic::composer::{Agent, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
-use runic_agent::Agent;
+use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
@@ -91,7 +90,7 @@ impl Tool for TrackedTool {
     }
 }
 
-fn state_flag(agent: &Agent, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
     agent
         .state()
         .data()
@@ -100,7 +99,7 @@ fn state_flag(agent: &Agent, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn tool_result_pairs(agent: &Agent) -> Vec<(String, String, bool)> {
+fn tool_result_pairs(agent: &runic_agent::Agent) -> Vec<(String, String, bool)> {
     agent
         .state()
         .events()
@@ -126,7 +125,7 @@ fn tool_result_pairs(agent: &Agent) -> Vec<(String, String, bool)> {
         .collect()
 }
 
-fn push_filler(agent: &mut Agent, count: usize) {
+fn push_filler(agent: &mut runic_agent::Agent, count: usize) {
     for _ in 0..count {
         agent.state_mut().push_event(SessionEvent::Message {
             run_id: "filler".into(),
@@ -162,16 +161,13 @@ async fn run_survival_case(ability_count: usize) -> Result<(), TestCaseError> {
     responses.push(text("post-compaction tools done"));
 
     let provider = QueueProvider::new(responses);
-    let mut composer = Composer::new(provider, "test-model")
-        .instructions("root")
-        .with(CompactionAbility(
-            CompactionConfig::new()
-                .max_context_tokens(2000)
-                .keep_recent(3),
-        ))
-        .max_turns(200);
+    let mut def = Agent::new(
+        Llm::new(provider.clone(), "test-model")
+            .instructions("root")
+            .max_turns(200),
+    );
     for (id, tool_name) in ids.iter().zip(tool_names.iter()) {
-        composer = composer.with(
+        def = def.with(
             ability(id.clone())
                 .describe(format!("desc-{id}"))
                 .deferred()
@@ -183,6 +179,14 @@ async fn run_survival_case(ability_count: usize) -> Result<(), TestCaseError> {
         );
     }
 
+    let composer = Composer::new(
+        def,
+        Runtime::new().hook(
+            Compaction::new(Llm::new(provider, "test-model"))
+                .max_context_tokens(2000)
+                .keep_recent(3),
+        ),
+    );
     let mut agent = composer.build("tenant", "session").await.unwrap();
 
     agent.run("load everything").await.unwrap();
@@ -266,15 +270,12 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
         text("after compaction"),
     ];
     let provider = QueueProvider::new(responses);
-    let mut composer = Composer::new(provider, "test-model")
-        .instructions("root")
-        .with(CompactionAbility(
-            CompactionConfig::new()
-                .max_context_tokens(2000)
-                .keep_recent(3),
-        ))
-        .max_turns(200);
-    composer = composer.with(
+    let mut def = Agent::new(
+        Llm::new(provider.clone(), "test-model")
+            .instructions("root")
+            .max_turns(200),
+    );
+    def = def.with(
         ability("billing")
             .describe("invoices and refunds")
             .deferred()
@@ -285,6 +286,14 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
             }),
     );
 
+    let composer = Composer::new(
+        def,
+        Runtime::new().hook(
+            Compaction::new(Llm::new(provider, "test-model"))
+                .max_context_tokens(2000)
+                .keep_recent(3),
+        ),
+    );
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("load billing").await.unwrap();
     assert!(state_flag(&agent, &ability_activated_key("billing")));
@@ -305,9 +314,8 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
         call("c1", "refund", serde_json::json!({})),
         text("done"),
     ]);
-    let mut rebuilt = Composer::new(rebuild_provider, "test-model")
-        .instructions("root")
-        .with(
+    let mut rebuilt = Composer::new(
+        Agent::new(Llm::new(rebuild_provider, "test-model").instructions("root")).with(
             ability("billing")
                 .describe("invoices and refunds")
                 .deferred()
@@ -316,11 +324,13 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
                     name: "refund".to_string(),
                     marker: "ran:billing".to_string(),
                 }),
-        )
-        .activated(ids)
-        .build("tenant", "session")
-        .await
-        .unwrap();
+        ),
+        Runtime::new(),
+    )
+    .activated(ids)
+    .build("tenant", "session")
+    .await
+    .unwrap();
 
     let rebuilt_prompt = rebuilt.state().system_prompt.clone();
     assert!(

@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::ability;
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic::tool;
 use runic::tool::{Tool, ToolContext, ToolResult};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -167,8 +168,7 @@ async fn a_macro_tool_runs_end_to_end_through_the_composer() {
         call("add_numbers", serde_json::json!({ "a": 2, "b": 3 })),
         text("done"),
     ]);
-    let mut agent = Composer::new(provider, "test-model")
-        .instructions("core")
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
         .with(ability("math").tool(AddNumbers))
         .build("alice", "s1")
         .await

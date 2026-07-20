@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::ability::subagent;
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic::mcp::{self, McpClient, McpConnection, McpError, Transport};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -121,7 +122,7 @@ fn delegate_to(agent: &str) -> CompletionResponse {
 #[tokio::test]
 async fn deferred_mount_gives_the_parent_search_not_tools() {
     let provider = ScriptedProvider::new(vec![text("done")]);
-    let mut agent = Composer::new(provider.clone(), "main-model")
+    let mut agent = Agent::new(Llm::new(provider.clone(), "main-model"))
         .with(mcp::deferred(fake_connection().await))
         .build("alice", "s1")
         .await
@@ -146,7 +147,7 @@ async fn direct_mount_gives_a_subagent_the_real_tools() {
     let child = ScriptedProvider::new(vec![text("child done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
 
-    let mut agent = Composer::new(main_provider.clone(), "main-model")
+    let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
         .with(
             subagent("crm-expert", "digs crm")
                 .prompt("dig")

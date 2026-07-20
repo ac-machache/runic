@@ -8,7 +8,6 @@ use runic_substrate::{SearchChatsTool, SessionStore};
 use runic_tool::Tool;
 
 use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, ability};
-use crate::hooks::{Compaction as CompactionConfig, CompactionHook};
 use crate::tools::{
     AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
     WeatherTool, WebFetchTool, WebSearchTool,
@@ -118,40 +117,6 @@ pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> Abilit
         .tool(ComposioTool::new(api_key, entity_id))
 }
 
-pub struct Tools(pub Vec<Arc<dyn Tool>>);
-
-#[async_trait]
-impl Ability for Tools {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        for tool in &self.0 {
-            bundle.tool(tool.clone());
-        }
-        Ok(())
-    }
-}
-
-pub struct Compaction(pub CompactionConfig);
-
-#[async_trait]
-impl Ability for Compaction {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        bundle.write_hook(Arc::new(CompactionHook::new(
-            &self.0,
-            ctx.provider.clone(),
-            ctx.model,
-        )));
-        Ok(())
-    }
-}
-
 pub struct Hooks(pub Vec<Arc<dyn WriteHook>>);
 
 #[async_trait]
@@ -163,6 +128,22 @@ impl Ability for Hooks {
     ) -> anyhow::Result<()> {
         for hook in &self.0 {
             bundle.write_hook(hook.clone());
+        }
+        Ok(())
+    }
+}
+
+pub struct Tools(pub Vec<Arc<dyn Tool>>);
+
+#[async_trait]
+impl Ability for Tools {
+    async fn contribute(
+        &self,
+        bundle: &mut AbilityBundle,
+        _ctx: &BuildCtx<'_>,
+    ) -> anyhow::Result<()> {
+        for tool in &self.0 {
+            bundle.tool(tool.clone());
         }
         Ok(())
     }

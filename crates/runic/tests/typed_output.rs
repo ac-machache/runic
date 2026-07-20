@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use runic::Llm;
 use runic::StructuredOutput;
-use runic::composer::Composer;
+use runic::composer::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -67,8 +68,7 @@ async fn a_typed_output_round_trips_through_final_answer() {
         "final_answer",
         serde_json::json!({ "answer": "yes", "confidence": 0.9 }),
     )]);
-    let mut agent = Composer::new(provider.clone(), "test-model")
-        .instructions("judge")
+    let mut agent = Agent::new(Llm::new(provider.clone(), "test-model").instructions("judge"))
         .output::<Verdict>()
         .build("alice", "s1")
         .await
@@ -109,7 +109,7 @@ async fn output_as_reports_a_missing_structured_result() {
         tool_calls: vec![],
         usage: TokenUsage::default(),
     }]);
-    let mut agent = Composer::new(provider, "test-model")
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
         .output::<Verdict>()
         .build("alice", "s1")
         .await

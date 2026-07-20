@@ -1,9 +1,19 @@
 use std::sync::Arc;
 
-use runic_agent::{Agent, AgentConfig, AgentEvent, RunContext};
 use runic_provider::{Provider, ThinkingConfig};
 use runic_tool::Tool;
 use runic_types::TokenUsage;
+
+use crate::{Agent, AgentConfig, AgentEvent, RunContext, RunOutcome};
+
+pub fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
+    let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default();
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("$schema");
+        object.remove("title");
+    }
+    schema
+}
 
 #[derive(Clone)]
 pub struct Llm {
@@ -47,11 +57,6 @@ impl Llm {
         }
     }
 
-    pub fn from_spec(spec: &str) -> Result<Self, crate::ComposeError> {
-        let (provider, model) = crate::models::infer(spec)?;
-        Ok(Self::new(provider, model))
-    }
-
     pub fn instructions(mut self, text: impl Into<String>) -> Self {
         self.instructions = text.into();
         self
@@ -91,7 +96,7 @@ impl Llm {
     }
 
     pub fn structured<T: schemars::JsonSchema>(mut self) -> Self {
-        self.config.output_schema = Some(crate::output::schema_of::<T>());
+        self.config.output_schema = Some(schema_of::<T>());
         self
     }
 
@@ -123,7 +128,7 @@ impl Llm {
         Ok(Self::output(&agent, outcome))
     }
 
-    fn output(agent: &Agent, outcome: runic_state::RunOutcome) -> LlmOutput {
+    fn output(agent: &Agent, outcome: RunOutcome) -> LlmOutput {
         LlmOutput {
             text: agent.state().last_assistant_text().unwrap_or_default(),
             usage: outcome.usage,

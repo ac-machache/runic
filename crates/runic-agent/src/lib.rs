@@ -26,6 +26,7 @@ use runic_tool::{
 use tokio::sync::mpsc;
 
 mod external;
+mod llm;
 pub(crate) mod run;
 mod spill;
 mod turn;
@@ -34,6 +35,7 @@ pub mod loop_guard;
 pub mod retry;
 
 pub use external::{ReminderQueue, TasksSnapshot};
+pub use llm::{Llm, LlmOutput, schema_of};
 pub use runic_state::RunOutcome;
 pub use spill::{SPILL_PREVIEW_CHARS, SpilledArtifact, ToolOutputSpill};
 

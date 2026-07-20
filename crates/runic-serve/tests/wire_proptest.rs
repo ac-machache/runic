@@ -8,35 +8,63 @@ use proptest::prelude::*;
 
 use runic_agent::AgentEvent;
 use runic_serve::wire::{from_agent_event, from_session_event};
-use runic_state::{RunOutcome, SessionEvent};
-use runic_types::Message;
+use runic_state::{RunEndStatus, RunOutcome, SessionEvent, ToolStatus};
+use runic_types::{Message, TokenUsage};
 
 fn ts() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()
 }
 
 fn agent_event() -> impl Strategy<Value = AgentEvent> {
+    let at = ts();
     prop_oneof![
-        "[a-z0-9-]{1,8}".prop_map(|run_id| AgentEvent::RunStarted { run_id }),
+        "[a-z0-9-]{1,8}".prop_map(move |run_id| AgentEvent::RunStarted {
+            run_id,
+            agent: None,
+            at,
+        }),
         "[a-z ]{0,20}".prop_map(AgentEvent::TextDelta),
         "[a-z ]{0,20}".prop_map(AgentEvent::ThinkingDelta),
-        ("[a-z]{1,6}", "[a-z_]{1,10}").prop_map(|(id, name)| AgentEvent::ToolStarted {
-            id,
-            name,
+        ("[a-z]{1,6}", "[a-z_]{1,10}").prop_map(move |(call_id, tool)| AgentEvent::ToolStarted {
+            run_id: "r".into(),
+            turn: 0,
+            call_id,
+            tool,
             input: serde_json::json!({"q": 1}),
+            at,
         }),
         ("[a-z]{1,6}", "[a-z_]{1,10}", any::<bool>(), "[a-z ]{0,20}").prop_map(
-            |(id, name, is_error, result)| AgentEvent::ToolFinished {
-                id,
-                name,
-                is_error,
+            move |(call_id, tool, is_error, result)| AgentEvent::ToolFinished {
+                run_id: "r".into(),
+                turn: 0,
+                call_id,
+                tool,
+                status: if is_error {
+                    ToolStatus::ToolError
+                } else {
+                    ToolStatus::Ok
+                },
                 result: serde_json::Value::String(result),
                 provenance: Vec::new(),
+                duration_ms: 0,
+                at,
             }
         ),
-        (0u32..10, "[a-z_]{1,8}")
-            .prop_map(|(turn, stop_reason)| AgentEvent::TurnCompleted { turn, stop_reason }),
-        Just(AgentEvent::RunCompleted(RunOutcome::default())),
+        (0u32..10, "[a-z_]{1,8}").prop_map(move |(turn, stop_reason)| AgentEvent::TurnEnd {
+            run_id: "r".into(),
+            turn,
+            model: "m".into(),
+            usage: TokenUsage::default(),
+            model_ms: 0,
+            stop_reason,
+            at,
+        }),
+        Just(AgentEvent::RunEnd {
+            run_id: "r".into(),
+            status: RunEndStatus::Completed,
+            outcome: RunOutcome::default(),
+            at,
+        }),
     ]
 }
 
@@ -123,7 +151,12 @@ proptest! {
 /// A finished run fans into exactly `[usage, done]` (the UI relies on both).
 #[test]
 fn run_completed_yields_usage_then_done() {
-    let wires = from_agent_event(AgentEvent::RunCompleted(RunOutcome::default()));
+    let wires = from_agent_event(AgentEvent::RunEnd {
+        run_id: "r".into(),
+        status: RunEndStatus::Completed,
+        outcome: RunOutcome::default(),
+        at: ts(),
+    });
     let kinds: Vec<&str> = wires.iter().map(|w| w.event_kind()).collect();
     assert_eq!(kinds, vec!["usage", "done"]);
 }

@@ -574,16 +574,23 @@ async fn streaming_emits_lifecycle_and_token_events() {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             AgentEvent::RunStarted { .. } => started = true,
-            AgentEvent::ToolStarted { name, .. } => tool_started |= name == "echo",
-            AgentEvent::ToolFinished { name, is_error, .. } => {
-                tool_finished |= name == "echo" && !is_error
+            AgentEvent::ToolStarted { tool, .. } => tool_started |= tool == "echo",
+            AgentEvent::ToolFinished { tool, status, .. } => {
+                tool_finished |= tool == "echo" && matches!(status, runic_state::ToolStatus::Ok)
             }
             AgentEvent::TextDelta(t) => texts.push(t),
-            AgentEvent::TurnCompleted { .. } => turns += 1,
-            AgentEvent::RunCompleted(_) => completed = true,
+            AgentEvent::TurnEnd { .. } => turns += 1,
+            AgentEvent::RunEnd { .. } => completed = true,
             AgentEvent::ThinkingDelta(_) => {}
             AgentEvent::ToolDeferred { .. } => {}
             AgentEvent::HookFired { .. } => {}
+            AgentEvent::Message { .. }
+            | AgentEvent::DelegationStarted { .. }
+            | AgentEvent::DelegationFinished { .. }
+            | AgentEvent::StateSnapshot { .. }
+            | AgentEvent::StateUpdated { .. }
+            | AgentEvent::TaskSpawned { .. }
+            | AgentEvent::TaskFinished { .. } => {}
         }
     }
 

@@ -63,47 +63,132 @@ pub struct FallbackProvider {
     pub model: String,
 }
 
-/// Live events emitted during a run when a streaming sink is attached
-/// (`RunContext::with_events`). Coarser, persistence-grade events still flow
-/// through `AgentState`'s `SessionEvent` broadcast; this stream adds the
-/// token-level + tool-lifecycle granularity a UI needs.
+/// The single, maximally-rich event stream the agent loop emits — the *only*
+/// thing the agent produces. Every fact the loop generates flows here in full:
+/// token deltas, tool lifecycle *with* payloads, committed messages, turn/run
+/// accounting, hook fires, delegations, and state mutations.
+///
+/// The agent holds no opinion about what's worth keeping — it never mentions a
+/// store. Outer layers project this stream into whatever they persist (the
+/// runtime owns an `AgentEvent -> Option<SessionEvent>` projection; a UI just
+/// forwards it). `TextDelta`/`ThinkingDelta` are the only pure-ephemeral
+/// variants — the live narration of a `Message` being built.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    RunStarted {
-        run_id: String,
-    },
     TextDelta(String),
     ThinkingDelta(String),
+    RunStarted {
+        run_id: String,
+        agent: Option<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    Message {
+        run_id: String,
+        msg: runic_types::Message,
+        at: chrono::DateTime<chrono::Utc>,
+    },
     ToolStarted {
-        id: String,
-        name: String,
+        run_id: String,
+        turn: u32,
+        call_id: String,
+        tool: String,
         input: serde_json::Value,
+        at: chrono::DateTime<chrono::Utc>,
     },
     ToolFinished {
-        id: String,
-        name: String,
-        is_error: bool,
+        run_id: String,
+        turn: u32,
+        call_id: String,
+        tool: String,
+        status: runic_state::ToolStatus,
         result: serde_json::Value,
         provenance: Vec<runic_types::ProvenanceSource>,
+        duration_ms: u64,
+        at: chrono::DateTime<chrono::Utc>,
     },
-    TurnCompleted {
+    TurnEnd {
+        run_id: String,
         turn: u32,
+        model: String,
+        usage: runic_types::TokenUsage,
+        model_ms: u64,
         stop_reason: String,
+        at: chrono::DateTime<chrono::Utc>,
     },
     ToolDeferred {
         run_id: String,
         call_id: String,
         channel: String,
         payload: serde_json::Value,
+        at: chrono::DateTime<chrono::Utc>,
     },
-    RunCompleted(RunOutcome),
-    /// Only fires for a non-`Continue` outcome.
     HookFired {
-        hook_name: String,
-        hook_kind: &'static str,
+        run_id: String,
+        hook: String,
+        hook_kind: String,
         lifecycle: HookLifecycle,
-        outcome: &'static str,
+        outcome: String,
         note: Option<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    DelegationStarted {
+        run_id: String,
+        turn: u32,
+        call_id: String,
+        agent: String,
+        mode: runic_state::DelegationMode,
+        child_session: Option<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    DelegationFinished {
+        run_id: String,
+        turn: u32,
+        call_id: String,
+        agent: String,
+        status: runic_state::DelegationStatus,
+        usage: runic_types::TokenUsage,
+        model: Option<String>,
+        duration_ms: u64,
+        child_session: Option<String>,
+        child_persistence: Option<runic_state::ChildPersistenceStatus>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    StateSnapshot {
+        run_id: String,
+        messages: Vec<runic_types::Message>,
+        system_prompt: String,
+        reason: String,
+        stats: Option<Box<runic_state::ThreadStats>>,
+        open_tasks: Option<Vec<runic_state::TaskRecord>>,
+        data: Option<serde_json::Map<String, serde_json::Value>>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    StateUpdated {
+        run_id: String,
+        key: String,
+        value: serde_json::Value,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    TaskSpawned {
+        run_id: String,
+        task_id: String,
+        agent: String,
+        prompt: String,
+        child_session: Option<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    TaskFinished {
+        run_id: String,
+        task_id: String,
+        status: runic_state::TaskStatus,
+        result: Option<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    },
+    RunEnd {
+        run_id: String,
+        status: runic_state::RunEndStatus,
+        outcome: RunOutcome,
+        at: chrono::DateTime<chrono::Utc>,
     },
 }
 

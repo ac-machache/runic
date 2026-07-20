@@ -243,43 +243,60 @@ fn lifecycle_str(lifecycle: HookLifecycle) -> &'static str {
 /// completed run yields both `usage` and `done`.
 pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
     match event {
-        AgentEvent::RunStarted { run_id } => vec![WireEvent::RunStart {
+        AgentEvent::RunStarted { run_id, agent, at } => vec![WireEvent::RunStart {
             run_id,
-            agent: None,
-            at: None,
+            agent,
+            at: Some(at),
         }],
         AgentEvent::TextDelta(text) => vec![WireEvent::AssistantTextDelta { text }],
         AgentEvent::ThinkingDelta(text) => vec![WireEvent::AssistantThinkingDelta { text }],
-        AgentEvent::ToolStarted { id, name, input } => {
-            vec![WireEvent::ToolStart { id, name, input }]
+        AgentEvent::ToolStarted {
+            call_id,
+            tool,
+            input,
+            ..
+        } => {
+            vec![WireEvent::ToolStart {
+                id: call_id,
+                name: tool,
+                input,
+            }]
         }
         AgentEvent::ToolFinished {
-            id,
-            name,
-            is_error,
+            call_id,
+            tool,
+            status,
             result,
             provenance,
+            ..
         } => {
             let text = match result {
                 serde_json::Value::String(text) => text,
                 value => value.to_string(),
             };
             vec![WireEvent::ToolFinish {
-                id,
-                name,
-                is_error,
+                id: call_id,
+                name: tool,
+                is_error: !matches!(status, runic_state::ToolStatus::Ok),
                 preview: truncate(&text, 4000),
                 provenance,
             }]
         }
-        AgentEvent::TurnCompleted { turn, stop_reason } => {
+        AgentEvent::TurnEnd {
+            turn,
+            model,
+            usage,
+            model_ms,
+            stop_reason,
+            ..
+        } => {
             vec![WireEvent::TurnComplete {
                 turn,
                 stop_reason: Some(stop_reason),
-                model: None,
-                input_tokens: None,
-                output_tokens: None,
-                model_ms: None,
+                model: Some(model),
+                input_tokens: Some(usage.input_tokens),
+                output_tokens: Some(usage.output_tokens),
+                model_ms: Some(model_ms),
             }]
         }
         AgentEvent::ToolDeferred {
@@ -287,6 +304,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             call_id,
             channel,
             payload,
+            ..
         } => vec![
             WireEvent::ToolDeferred {
                 run_id,
@@ -299,7 +317,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
                 stop_reason: Some("suspended".to_string()),
             },
         ],
-        AgentEvent::RunCompleted(outcome) => vec![
+        AgentEvent::RunEnd { outcome, .. } => vec![
             WireEvent::Usage {
                 input_tokens: outcome.usage.input_tokens,
                 output_tokens: outcome.usage.output_tokens,
@@ -310,18 +328,28 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             },
         ],
         AgentEvent::HookFired {
-            hook_name,
+            hook,
             hook_kind,
             lifecycle,
             outcome,
             note,
+            ..
         } => vec![WireEvent::HookFired {
-            hook_name,
-            hook_kind: hook_kind.to_string(),
+            hook_name: hook,
+            hook_kind,
             lifecycle: lifecycle_str(lifecycle).to_string(),
-            outcome: outcome.to_string(),
+            outcome,
             note,
         }],
+        // Committed-message + state-mutation events are wired to the stream in
+        // the loop→emit cut (Commit B); until then they can't reach here.
+        AgentEvent::Message { .. }
+        | AgentEvent::DelegationStarted { .. }
+        | AgentEvent::DelegationFinished { .. }
+        | AgentEvent::StateSnapshot { .. }
+        | AgentEvent::StateUpdated { .. }
+        | AgentEvent::TaskSpawned { .. }
+        | AgentEvent::TaskFinished { .. } => vec![],
     }
 }
 
@@ -516,14 +544,18 @@ mod tests {
     #[test]
     fn tool_finish_previews_structured_results_and_carries_provenance() {
         let wires = from_agent_event(AgentEvent::ToolFinished {
-            id: "c1".into(),
-            name: "search".into(),
-            is_error: false,
+            run_id: "r".into(),
+            turn: 0,
+            call_id: "c1".into(),
+            tool: "search".into(),
+            status: runic_state::ToolStatus::Ok,
             result: serde_json::json!({ "hits": 3 }),
             provenance: vec![runic_types::ProvenanceSource::new(
                 "s1",
                 "https://example.com",
             )],
+            duration_ms: 0,
+            at: chrono::Utc::now(),
         });
         let WireEvent::ToolFinish {
             preview,
@@ -540,11 +572,15 @@ mod tests {
         assert_eq!(json["provenance"][0]["source"], "https://example.com");
 
         let bare = from_agent_event(AgentEvent::ToolFinished {
-            id: "c2".into(),
-            name: "calc".into(),
-            is_error: false,
+            run_id: "r".into(),
+            turn: 0,
+            call_id: "c2".into(),
+            tool: "calc".into(),
+            status: runic_state::ToolStatus::Ok,
             result: serde_json::json!("2"),
             provenance: Vec::new(),
+            duration_ms: 0,
+            at: chrono::Utc::now(),
         });
         let json = serde_json::to_value(&bare[0]).unwrap();
         assert_eq!(json["preview"], "2");
@@ -563,7 +599,12 @@ mod tests {
             },
             structured: None,
         };
-        let wires = from_agent_event(AgentEvent::RunCompleted(outcome));
+        let wires = from_agent_event(AgentEvent::RunEnd {
+            run_id: "r".into(),
+            status: runic_state::RunEndStatus::Completed,
+            outcome,
+            at: chrono::Utc::now(),
+        });
         assert!(matches!(
             wires[0],
             WireEvent::Usage {
@@ -630,11 +671,13 @@ mod tests {
     #[test]
     fn hook_fired_maps_one_to_one_live() {
         let wires = from_agent_event(AgentEvent::HookFired {
-            hook_name: "guard".into(),
-            hook_kind: "write",
+            run_id: "r".into(),
+            hook: "guard".into(),
+            hook_kind: "write".into(),
             lifecycle: HookLifecycle::BeforeTool,
-            outcome: "cancel",
+            outcome: "cancel".into(),
             note: Some("blocked".into()),
+            at: chrono::Utc::now(),
         });
         assert_eq!(wires.len(), 1);
         let WireEvent::HookFired {

@@ -143,7 +143,7 @@ impl Session {
             let now = Utc::now();
             self.state.push_event(SessionEvent::RunStart {
                 run_id: run_id.clone(),
-                agent: agent_label,
+                agent: agent_label.clone(),
                 audit: Some(runic_state::AuditStamp {
                     model: Some(self.config.model.clone()),
                     actor: actor.map(|value| value.chars().take(128).collect()),
@@ -158,6 +158,8 @@ impl Session {
         }
         self.emit(crate::AgentEvent::RunStarted {
             run_id: run_id.clone(),
+            agent: agent_label,
+            at: Utc::now(),
         });
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
 
@@ -188,6 +190,7 @@ impl Session {
                     call_id: deferral.call_id.clone(),
                     channel: deferral.channel.clone(),
                     payload: deferral.payload.clone(),
+                    at: Utc::now(),
                 });
                 self.state.push_event(SessionEvent::ToolDeferred {
                     run_id: run_id.clone(),
@@ -225,12 +228,17 @@ impl Session {
                     runic_state::RunEndStatus::Completed
                 };
                 self.state.push_event(SessionEvent::RunEnd {
+                    run_id: run_id.clone(),
+                    status: status.clone(),
+                    outcome: outcome.clone(),
+                    at: Utc::now(),
+                });
+                self.emit(crate::AgentEvent::RunEnd {
                     run_id,
                     status,
                     outcome: outcome.clone(),
                     at: Utc::now(),
                 });
-                self.emit(crate::AgentEvent::RunCompleted(outcome.clone()));
                 Ok(outcome)
             }
             Err(e) => {

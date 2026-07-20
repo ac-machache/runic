@@ -163,9 +163,12 @@ impl Session {
         for plan in &plans {
             if let CallPlan::Dispatch { call, .. } = plan {
                 self.emit(crate::AgentEvent::ToolStarted {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
+                    run_id: run_id.to_string(),
+                    turn,
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
                     input: call.input.clone(),
+                    at: chrono::Utc::now(),
                 });
                 self.state.push_event(SessionEvent::ToolStarted {
                     run_id: run_id.to_string(),
@@ -296,14 +299,18 @@ impl Session {
 
             if let CallPlan::Dispatch { .. } = plan {
                 self.emit(crate::AgentEvent::ToolFinished {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    is_error: result.is_error(),
+                    run_id: run_id.to_string(),
+                    turn,
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                    status,
                     result: match &payload {
                         ToolResultPayload::Inline(value) => value.clone(),
                         artifact => serde_json::Value::String(artifact.text()),
                     },
                     provenance: provenance.clone(),
+                    duration_ms,
+                    at: chrono::Utc::now(),
                 });
             }
 

@@ -57,9 +57,14 @@ impl Session {
             model_ms: turn.model_ms,
             at: chrono::Utc::now(),
         });
-        self.emit(crate::AgentEvent::TurnCompleted {
+        self.emit(crate::AgentEvent::TurnEnd {
+            run_id: run_id.to_string(),
             turn: turn_number,
+            model: turn.model.clone(),
+            usage: turn.usage,
+            model_ms: turn.model_ms,
             stop_reason: crate::run::stop_reason_str(turn.stop_reason).to_string(),
+            at: chrono::Utc::now(),
         });
 
         self.fire_write(run_id, Point::AfterModel).await?; // hooks see the reply

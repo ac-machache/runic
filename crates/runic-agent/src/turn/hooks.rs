@@ -84,11 +84,13 @@ impl Session {
             at: Utc::now(),
         });
         self.emit(AgentEvent::HookFired {
-            hook_name: hook_name.to_string(),
-            hook_kind: "write",
+            run_id: run_id.to_string(),
+            hook: hook_name.to_string(),
+            hook_kind: "write".to_string(),
             lifecycle,
-            outcome: kind,
+            outcome: kind.to_string(),
             note,
+            at: Utc::now(),
         });
     }
 
@@ -113,11 +115,13 @@ impl Session {
             at: Utc::now(),
         });
         self.emit(AgentEvent::HookFired {
-            hook_name: hook_name.to_string(),
-            hook_kind: "read",
+            run_id: run_id.to_string(),
+            hook: hook_name.to_string(),
+            hook_kind: "read".to_string(),
             lifecycle,
-            outcome: kind,
+            outcome: kind.to_string(),
             note: None,
+            at: Utc::now(),
         });
     }
 

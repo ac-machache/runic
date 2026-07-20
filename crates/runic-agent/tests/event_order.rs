@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use harness::*;
-use runic_agent::{Agent, CancelToken, RunContext};
+use runic_agent::{CancelToken, RunContext, Session};
 use runic_hook::{HookLifecycle, HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::ProviderError;
 use runic_state::{AgentState, SessionEvent};
@@ -25,7 +25,7 @@ async fn every_hook_execution_leaves_a_hookfired_entry() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook =
         RecordWriteHook::new("sub", log).act("before_tool", Act::Substitute("hooked".into()));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "REAL")))
         .write_hook(Arc::new(hook))
@@ -76,7 +76,7 @@ async fn default_bodies_fire_without_leaving_audit_entries() {
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "REAL")))
         .write_hook(Arc::new(UnscopedOneMethod))
@@ -125,7 +125,7 @@ async fn scoped_hook_fires_only_at_its_declared_points() {
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "REAL")))
         .write_hook(Arc::new(BeforeToolOnly))
@@ -177,7 +177,7 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
         tool_use_response("t1", "rec", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ran")))
         .read_hook(Arc::new(AfterToolWatcher))
@@ -233,7 +233,7 @@ async fn every_hook_failure_point_still_yields_exactly_one_terminal_event() {
         ]));
         let log = Arc::new(Mutex::new(Vec::new()));
         let hook = RecordWriteHook::new("bomb", log).act(point, Act::Stop);
-        let mut agent = Agent::builder(provider, "u1", "s1")
+        let mut agent = Session::builder(provider, "u1", "s1")
             .model("test")
             .write_hook(Arc::new(hook))
             .build();
@@ -257,7 +257,7 @@ async fn a_failing_after_model_hook_cannot_erase_the_turns_accounting() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("paid for")]));
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("bomb", log).act("after_model", Act::Stop);
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .write_hook(Arc::new(hook))
         .build();
@@ -281,7 +281,7 @@ async fn a_failing_after_model_hook_cannot_erase_the_turns_accounting() {
 #[tokio::test]
 async fn provider_failure_yields_exactly_one_failed_terminal_event() {
     let provider = Arc::new(ScriptedProvider::new(vec![]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     assert!(agent.run("go").await.is_err());
@@ -294,7 +294,7 @@ async fn provider_failure_yields_exactly_one_failed_terminal_event() {
 #[tokio::test]
 async fn the_audit_stamp_carries_actor_and_model_but_never_the_config_map() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     let ctx = RunContext::new()
@@ -322,7 +322,7 @@ async fn the_audit_stamp_carries_actor_and_model_but_never_the_config_map() {
 #[tokio::test]
 async fn precancel_path_emits_only_runstart_message_runend() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never")]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     let cancel = CancelToken::new();
@@ -347,7 +347,7 @@ async fn cancel_after_tool_stops_before_the_next_assistant_message() {
         text_response("should-not-run"),
     ]));
     let cancel = CancelToken::new();
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(CancelTool {
             token: cancel.clone(),
@@ -380,7 +380,7 @@ async fn first_call_failure_emits_runstart_message_runend() {
     let provider = Arc::new(ScriptedProvider::with_results(vec![Err(
         ProviderError::AuthenticationFailed("nope".into()),
     )]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     agent.run("go").await.unwrap_err();
@@ -401,7 +401,7 @@ async fn failure_after_a_tool_round_trip_keeps_the_partial_log() {
             message: "boom".into(),
         }),
     ]));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ran")))
         .build();

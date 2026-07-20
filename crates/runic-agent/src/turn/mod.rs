@@ -1,6 +1,6 @@
 //! One model turn — the thin orchestrator (ZeroClaw's step-decomposition).
 //!
-//! [`Agent::run_one_turn`] reads top-to-bottom as a flat list of named steps;
+//! [`Session::run_one_turn`] reads top-to-bottom as a flat list of named steps;
 //! each step is a focused function in its own sibling module.
 
 mod dispatch;
@@ -12,12 +12,12 @@ mod response;
 
 pub(crate) use hooks::Point;
 
-use crate::{Agent, AgentError, TurnRecord};
+use crate::{AgentError, Session, TurnRecord};
 
-impl Agent {
+impl Session {
     /// Drive a single model turn: hooks → request → model → record → hooks.
     /// Tool dispatch (when the turn requests tools) is driven by the outer
-    /// loop via [`Agent::dispatch_tools`].
+    /// loop via [`Session::dispatch_tools`].
     pub(crate) async fn run_one_turn(
         &mut self,
         run_id: &str,

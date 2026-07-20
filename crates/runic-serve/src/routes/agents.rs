@@ -87,7 +87,7 @@ pub struct AgentOverview {
     pub abilities: Vec<AbilityOverview>,
 }
 
-fn fallback_overview(name: &str, agent: &runic_agent::Agent) -> AgentOverview {
+fn fallback_overview(name: &str, agent: &runic_agent::Session) -> AgentOverview {
     let tools = agent
         .tool_specs()
         .into_iter()

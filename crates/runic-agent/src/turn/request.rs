@@ -6,7 +6,7 @@ use runic_provider::CompletionRequest;
 use runic_tool::ToolSpec;
 use runic_types::ToolDefinition;
 
-use crate::Agent;
+use crate::Session;
 
 /// Map a tool's LLM-facing spec to a provider tool definition.
 fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
@@ -17,7 +17,7 @@ fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
     }
 }
 
-impl Agent {
+impl Session {
     pub(crate) fn prepare_request(&mut self) -> CompletionRequest {
         let mut messages = self.state.messages_for_provider().to_vec();
 

@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
-use runic::agent::Agent;
+use runic::agent::Session;
 use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
@@ -89,14 +89,14 @@ struct DelegatingFactory;
 
 #[async_trait]
 impl AgentFactory for DelegatingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
         let provider = Arc::new(ScriptedProvider {
             responses: Mutex::new(
                 vec![delegate_background_response(), text_response("spawned")].into(),
             ),
         });
         let roster = vec![Subagent::new("scout", "research").prompt("dig")];
-        Ok(Agent::builder(provider, tenant, session_id)
+        Ok(Session::builder(provider, tenant, session_id)
             .system_prompt("sys")
             .tool(Arc::new(DelegateTool::with_builder(
                 roster,

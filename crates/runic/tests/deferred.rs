@@ -225,7 +225,7 @@ impl SubagentBuilder for ChildBuilder {
     }
 }
 
-fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Session, key: &str) -> bool {
     agent
         .state()
         .data()
@@ -234,7 +234,7 @@ fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn tool_result_texts(agent: &runic_agent::Agent) -> Vec<String> {
+fn tool_result_texts(agent: &runic_agent::Session) -> Vec<String> {
     agent
         .state()
         .events()

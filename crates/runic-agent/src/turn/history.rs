@@ -7,9 +7,9 @@ use chrono::Utc;
 use runic_state::SessionEvent;
 use runic_types::Message;
 
-use crate::Agent;
+use crate::Session;
 
-impl Agent {
+impl Session {
     /// Record the assistant's reply for this run.
     pub(crate) fn push_assistant(&mut self, msg: Message, run_id: &str) {
         self.state.push_event(SessionEvent::Message {

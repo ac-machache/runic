@@ -66,7 +66,7 @@ fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionRespon
     }
 }
 
-fn tool_result_pairs(agent: &runic_agent::Agent) -> Vec<(String, String, bool)> {
+fn tool_result_pairs(agent: &runic_agent::Session) -> Vec<(String, String, bool)> {
     agent
         .state()
         .events()

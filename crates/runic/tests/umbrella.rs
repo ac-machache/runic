@@ -2,7 +2,7 @@
 //! no consumer should need to add `runic-agent`, `runic-tool`, etc. directly
 //! just to write code against them.
 
-use runic::agent::{Agent, AgentBuilder};
+use runic::agent::{Session, SessionBuilder};
 use runic::hook::{ReadHook, WriteHook};
 use runic::mcp::McpClient;
 use runic::provider::Provider;
@@ -15,8 +15,8 @@ use runic::tools::default_tools;
 use runic::types::Message;
 
 fn assert_types_reachable() {
-    fn _agent(_: Agent) {}
-    fn _agent_builder(_: AgentBuilder) {}
+    fn _agent(_: Session) {}
+    fn _agent_builder(_: SessionBuilder) {}
     fn _read_hook(_: &dyn ReadHook) {}
     fn _write_hook(_: &dyn WriteHook) {}
     fn _mcp_client(_: McpClient) {}

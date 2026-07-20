@@ -157,7 +157,7 @@ fn persistence(fail_begin: bool, fail_flush: bool) -> Arc<FakeInner> {
     })
 }
 
-async fn run_delegation(fake: &Arc<FakeInner>) -> runic_agent::Agent {
+async fn run_delegation(fake: &Arc<FakeInner>) -> runic_agent::Session {
     let child = ScriptedProvider::new(vec![text("child done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("sub-a"), text("done")]);
     let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
@@ -180,7 +180,7 @@ async fn run_delegation(fake: &Arc<FakeInner>) -> runic_agent::Agent {
 }
 
 fn edges(
-    agent: &runic_agent::Agent,
+    agent: &runic_agent::Session,
 ) -> (
     Option<String>,
     Option<String>,

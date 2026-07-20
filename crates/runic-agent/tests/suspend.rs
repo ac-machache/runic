@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic_agent::{Agent, RunContext};
+use runic_agent::{RunContext, Session};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult};
@@ -128,7 +128,7 @@ fn kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
 #[tokio::test]
 async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
     let provider = ScriptedProvider::new(vec![ask_call(), text("done")]);
-    let mut agent = Agent::builder(provider, "alice", "s1")
+    let mut agent = Session::builder(provider, "alice", "s1")
         .model("m")
         .tool(Arc::new(AskTool))
         .build();
@@ -196,7 +196,7 @@ async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
 #[tokio::test]
 async fn suspended_run_records_the_exact_deferral_payload() {
     let provider = ScriptedProvider::new(vec![ask_call()]);
-    let mut agent = Agent::builder(provider, "alice", "s1")
+    let mut agent = Session::builder(provider, "alice", "s1")
         .model("m")
         .tool(Arc::new(AskTool))
         .build();
@@ -231,7 +231,7 @@ async fn suspended_run_records_the_exact_deferral_payload() {
 #[tokio::test]
 async fn resume_does_not_append_a_second_run_start_or_user_message() {
     let provider = ScriptedProvider::new(vec![ask_call(), text("done")]);
-    let mut agent = Agent::builder(provider, "alice", "s1")
+    let mut agent = Session::builder(provider, "alice", "s1")
         .model("m")
         .tool(Arc::new(AskTool))
         .build();
@@ -279,7 +279,7 @@ async fn resume_does_not_append_a_second_run_start_or_user_message() {
 #[tokio::test]
 async fn resume_sends_the_injected_tool_result_to_the_model() {
     let provider = RecordingProvider::new(vec![ask_call(), text("done")]);
-    let mut agent = Agent::builder(provider.clone(), "alice", "s1")
+    let mut agent = Session::builder(provider.clone(), "alice", "s1")
         .model("m")
         .tool(Arc::new(AskTool))
         .build();
@@ -317,7 +317,7 @@ async fn resume_sends_the_injected_tool_result_to_the_model() {
 #[tokio::test]
 async fn a_fresh_run_after_suspension_does_not_re_emit_the_old_deferral() {
     let provider = ScriptedProvider::new(vec![ask_call(), text("fresh done")]);
-    let mut agent = Agent::builder(provider, "alice", "s1")
+    let mut agent = Session::builder(provider, "alice", "s1")
         .model("m")
         .tool(Arc::new(AskTool))
         .build();

@@ -7,13 +7,13 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{Agent, CancelToken, RunContext};
+use runic_agent::{CancelToken, RunContext, Session};
 use runic_state::SessionEvent;
 
 #[tokio::test]
 async fn cancel_before_the_first_turn_makes_no_model_call() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never reached")]));
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .model("test")
         .build();
 
@@ -40,7 +40,7 @@ async fn cancel_during_a_tool_ends_before_the_next_model_call() {
         text_response("should-not-run"),
     ]));
     let cancel = CancelToken::new();
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(Arc::new(CancelTool {
             token: cancel.clone(),
@@ -81,7 +81,7 @@ async fn cancel_while_a_model_call_is_in_flight_finishes_that_turn_then_stops() 
     let cancel = CancelToken::new();
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .build();
@@ -106,7 +106,7 @@ async fn cancel_while_a_model_call_is_in_flight_finishes_that_turn_then_stops() 
 #[tokio::test]
 async fn cancelled_run_is_recorded_as_a_clean_terminal_run_end() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("x")]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     let cancel = CancelToken::new();

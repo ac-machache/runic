@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
 
-use runic_agent::Agent;
+use runic_agent::Session;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, RunLimits, ServeConfig, WorkerConfig, router, single_agent};
 use runic_substrate::{
@@ -46,9 +46,9 @@ struct ScriptedFactory;
 
 #[async_trait]
 impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
         Ok(
-            Agent::builder(Arc::new(ScriptedProvider), tenant, session_id)
+            Session::builder(Arc::new(ScriptedProvider), tenant, session_id)
                 .system_prompt("test")
                 .build(),
         )
@@ -68,9 +68,9 @@ struct FailingFactory;
 
 #[async_trait]
 impl AgentFactory for FailingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
         Ok(
-            Agent::builder(Arc::new(FailingProvider), tenant, session_id)
+            Session::builder(Arc::new(FailingProvider), tenant, session_id)
                 .system_prompt("test")
                 .build(),
         )
@@ -192,8 +192,8 @@ struct GatedFactory {
 
 #[async_trait]
 impl AgentFactory for GatedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
-        Ok(Agent::builder(
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
+        Ok(Session::builder(
             Arc::new(GatedProvider {
                 entered: self.entered.clone(),
                 gate: self.gate.clone(),
@@ -211,11 +211,13 @@ struct AskingFactory;
 
 #[async_trait]
 impl AgentFactory for AskingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
-        Ok(Agent::builder(Arc::new(AskingProvider), tenant, session_id)
-            .system_prompt("test")
-            .tool(Arc::new(ParkTool))
-            .build())
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
+        Ok(
+            Session::builder(Arc::new(AskingProvider), tenant, session_id)
+                .system_prompt("test")
+                .tool(Arc::new(ParkTool))
+                .build(),
+        )
     }
 }
 
@@ -259,9 +261,9 @@ struct DeferringFactory;
 
 #[async_trait]
 impl AgentFactory for DeferringFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
         Ok(
-            Agent::builder(Arc::new(DeferringProvider), tenant, session_id)
+            Session::builder(Arc::new(DeferringProvider), tenant, session_id)
                 .system_prompt("test")
                 .tool(Arc::new(DeferTool))
                 .build(),
@@ -578,7 +580,7 @@ struct BrokenFactory;
 
 #[async_trait]
 impl AgentFactory for BrokenFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Session> {
         Err(anyhow::anyhow!("mcp backend unreachable"))
     }
 }
@@ -1934,8 +1936,8 @@ struct SteerableFactory {
 
 #[async_trait]
 impl AgentFactory for SteerableFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
-        Ok(Agent::builder(self.provider.clone(), tenant, session_id)
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
+        Ok(Session::builder(self.provider.clone(), tenant, session_id)
             .system_prompt("test")
             .tool(Arc::new(NoopTool))
             .build())

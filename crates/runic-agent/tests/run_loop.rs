@@ -6,7 +6,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{Agent, AgentError};
+use runic_agent::{AgentError, Session};
 use runic_provider::ProviderError;
 use runic_state::SessionEvent;
 use runic_types::MessageContent;
@@ -14,7 +14,7 @@ use runic_types::MessageContent;
 #[tokio::test]
 async fn text_only_run_emits_bookended_events_for_one_run_id() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("hello there")]));
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .system_prompt("be brief")
         .build();
@@ -55,7 +55,7 @@ async fn each_run_gets_a_fresh_run_id() {
         text_response("one"),
         text_response("two"),
     ]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
 
     let mut e1 = capture_session_events(&mut agent);
     agent.run("first").await.unwrap();
@@ -80,7 +80,7 @@ async fn second_run_sees_the_first_runs_persisted_messages() {
         text_response("my name is Ada"),
         text_response("you are Ada"),
     ]));
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .model("test")
         .build();
 
@@ -114,7 +114,7 @@ async fn provider_error_closes_the_run_and_leaves_nothing_in_flight() {
     let provider = Arc::new(ScriptedProvider::with_results(vec![Err(
         ProviderError::AuthenticationFailed("bad key".into()),
     )]));
-    let mut agent = Agent::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     let err = agent.run("hi").await.unwrap_err();
@@ -163,7 +163,7 @@ async fn provider_error_after_a_tool_round_trip_still_closes_cleanly() {
     ]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Agent::builder(provider, "u1", "s1")
+    let mut agent = Session::builder(provider, "u1", "s1")
         .model("test")
         .tool(rec)
         .build();

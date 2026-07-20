@@ -7,7 +7,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic_agent::Agent;
+use runic_agent::Session;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_state::SessionEvent;
@@ -22,7 +22,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Session> {
         panic!("agent path must not run here");
     }
 }
@@ -40,9 +40,9 @@ struct FailingAgentFactory;
 
 #[async_trait]
 impl AgentFactory for FailingAgentFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
         Ok(
-            Agent::builder(Arc::new(FailingProvider), tenant, session_id)
+            Session::builder(Arc::new(FailingProvider), tenant, session_id)
                 .system_prompt("test")
                 .build(),
         )

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use proptest::prelude::*;
-use runic_agent::Agent;
+use runic_agent::Session;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};

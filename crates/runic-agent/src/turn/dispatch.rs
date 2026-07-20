@@ -25,7 +25,7 @@ use runic_state::ToolStatus;
 use crate::loop_guard::Verdict;
 use crate::spill;
 use crate::turn::hooks::outcome_kind;
-use crate::{Agent, AgentError, PendingDeferral};
+use crate::{AgentError, PendingDeferral, Session};
 
 /// What the loop decided to do with one requested tool call.
 enum CallPlan {
@@ -68,7 +68,7 @@ impl CallPlan {
     }
 }
 
-impl Agent {
+impl Session {
     /// Drive every tool call the model requested this turn, appending one
     /// combined tool-result message at the end.
     pub(crate) async fn dispatch_tools(

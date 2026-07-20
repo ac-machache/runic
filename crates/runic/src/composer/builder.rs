@@ -1,4 +1,4 @@
-use runic_agent::{Agent as Session, AgentBuilder as SessionBuilder};
+use runic_agent::{Session, SessionBuilder};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};

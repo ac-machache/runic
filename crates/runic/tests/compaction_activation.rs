@@ -90,7 +90,7 @@ impl Tool for TrackedTool {
     }
 }
 
-fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Session, key: &str) -> bool {
     agent
         .state()
         .data()
@@ -99,7 +99,7 @@ fn state_flag(agent: &runic_agent::Agent, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn tool_result_pairs(agent: &runic_agent::Agent) -> Vec<(String, String, bool)> {
+fn tool_result_pairs(agent: &runic_agent::Session) -> Vec<(String, String, bool)> {
     agent
         .state()
         .events()
@@ -125,7 +125,7 @@ fn tool_result_pairs(agent: &runic_agent::Agent) -> Vec<(String, String, bool)> 
         .collect()
 }
 
-fn push_filler(agent: &mut runic_agent::Agent, count: usize) {
+fn push_filler(agent: &mut runic_agent::Session, count: usize) {
     for _ in 0..count {
         agent.state_mut().push_event(SessionEvent::Message {
             run_id: "filler".into(),

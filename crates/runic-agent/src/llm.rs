@@ -4,7 +4,7 @@ use runic_provider::{Provider, ThinkingConfig};
 use runic_tool::Tool;
 use runic_types::TokenUsage;
 
-use crate::{Agent, AgentConfig, AgentEvent, RunContext, RunOutcome};
+use crate::{AgentConfig, AgentEvent, RunContext, RunOutcome, Session};
 
 pub fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut schema = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default();
@@ -142,7 +142,7 @@ impl Llm {
         Ok(Self::output(&agent, outcome))
     }
 
-    fn output(agent: &Agent, outcome: RunOutcome) -> LlmOutput {
+    fn output(agent: &Session, outcome: RunOutcome) -> LlmOutput {
         LlmOutput {
             text: agent.state().last_assistant_text().unwrap_or_default(),
             usage: outcome.usage,
@@ -151,8 +151,8 @@ impl Llm {
         }
     }
 
-    fn build_agent(&self) -> Agent {
-        let mut builder = Agent::builder(self.provider.clone(), "llm", "llm")
+    fn build_agent(&self) -> Session {
+        let mut builder = Session::builder(self.provider.clone(), "llm", "llm")
             .system_prompt(self.instructions.clone())
             .config(self.config.clone());
         for tool in &self.tools {

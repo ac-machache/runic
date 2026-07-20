@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use runic::hooks::TaskReminder;
-use runic_agent::{Agent, TasksSnapshot};
+use runic_agent::{Session, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::SessionEvent;
 use runic_state::{TaskStatus, ThreadStats};
@@ -116,7 +116,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
         text_response("done"),
     ]);
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .write_hook(Arc::new(TaskReminder::new()))
@@ -171,7 +171,7 @@ async fn background_delegation_emits_a_navigable_edge() {
         text_response("done"),
     ]);
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-    let mut agent = Agent::builder(provider.clone(), "u1", "s1")
+    let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .build();
@@ -234,7 +234,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
             text_response("later"),
         ]);
         let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-        let mut agent = Agent::builder(provider, "u1", "s1")
+        let mut agent = Session::builder(provider, "u1", "s1")
             .system_prompt("sys")
             .tool(Arc::new(delegate))
             .build();

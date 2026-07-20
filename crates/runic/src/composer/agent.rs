@@ -39,7 +39,7 @@ impl Agent {
         &self,
         tenant: &str,
         session: &str,
-    ) -> Result<runic_agent::Agent, super::ComposeError> {
+    ) -> Result<runic_agent::Session, super::ComposeError> {
         super::Composer::new(self.clone(), super::Runtime::new())
             .build(tenant, session)
             .await

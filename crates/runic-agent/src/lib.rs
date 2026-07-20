@@ -312,7 +312,7 @@ pub(crate) struct TurnRecord {
 }
 
 /// The agent: a provider + a tool registry + hooks, driving an [`AgentState`].
-pub struct Agent {
+pub struct Session {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) fallbacks: Vec<FallbackProvider>,
     pub(crate) media_resolver: Option<Arc<dyn MediaResolver>>,
@@ -341,7 +341,7 @@ pub struct Agent {
     pub(crate) pending_external_rx: mpsc::UnboundedReceiver<runic_state::SessionEvent>,
 }
 
-impl Agent {
+impl Session {
     pub fn model(&self) -> &str {
         &self.config.model
     }
@@ -399,8 +399,8 @@ impl Agent {
         provider: Arc<dyn Provider>,
         user_id: impl Into<String>,
         session_id: impl Into<String>,
-    ) -> AgentBuilder {
-        AgentBuilder::new(provider, user_id, session_id)
+    ) -> SessionBuilder {
+        SessionBuilder::new(provider, user_id, session_id)
     }
 
     /// Borrow the underlying state.
@@ -414,8 +414,8 @@ impl Agent {
     }
 }
 
-/// Builder for [`Agent`].
-pub struct AgentBuilder {
+/// Builder for [`Session`].
+pub struct SessionBuilder {
     provider: Arc<dyn Provider>,
     user_id: String,
     session_id: String,
@@ -430,7 +430,7 @@ pub struct AgentBuilder {
     config: AgentConfig,
 }
 
-impl AgentBuilder {
+impl SessionBuilder {
     fn new(
         provider: Arc<dyn Provider>,
         user_id: impl Into<String>,
@@ -546,7 +546,7 @@ impl AgentBuilder {
     }
 
     /// Finish building. Hooks are sorted by `priority()` (lower runs first).
-    pub fn build(mut self) -> Agent {
+    pub fn build(mut self) -> Session {
         let (pending_tx, pending_rx) = mpsc::unbounded_channel();
         let state = AgentState::new(self.user_id, self.session_id, self.system_prompt);
         let tools = self
@@ -556,7 +556,7 @@ impl AgentBuilder {
             .collect();
         self.read_hooks.sort_by_key(|h| h.priority());
         self.write_hooks.sort_by_key(|h| h.priority());
-        Agent {
+        Session {
             provider: self.provider,
             fallbacks: self.fallbacks,
             media_resolver: self.media_resolver,

@@ -10,13 +10,13 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use runic_agent::{Agent, RunContext};
+use runic_agent::{RunContext, Session};
 
 use crate::routes::agents::AgentOverview;
 
 #[async_trait]
 pub trait AgentFactory: Send + Sync {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent>;
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session>;
 
     fn describe(&self) -> Option<&str> {
         None

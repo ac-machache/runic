@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 
-use runic_agent::AgentBuilder;
+use runic_agent::SessionBuilder;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::{ChildPersistence, ChildPersistenceHandle, ChildSink, PersistSink, SessionEvent};
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
@@ -82,7 +82,7 @@ impl SubagentBuilder for NestedBuilder {
         "test".to_string()
     }
 
-    fn decorate(&self, b: AgentBuilder, req: &SubagentReq<'_>) -> AgentBuilder {
+    fn decorate(&self, b: SessionBuilder, req: &SubagentReq<'_>) -> SessionBuilder {
         match self.me.upgrade() {
             Some(me) => b.tool(Arc::new(
                 DelegateTool::with_builder(self.roster.clone(), me).with_depth(req.dctx.depth),

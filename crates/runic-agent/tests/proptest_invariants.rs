@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use harness::*;
 use proptest::prelude::*;
-use runic_agent::{Agent, CancelToken, RunContext};
+use runic_agent::{CancelToken, RunContext, Session};
 use runic_state::SessionEvent;
 
 const FULL: &str = "FULL_SECRET_BYTES";
@@ -46,7 +46,7 @@ proptest! {
     fn loop_structural_invariants(tool_turns in 0usize..8) {
         rt().block_on(async move {
             let provider = Arc::new(ScriptedProvider::new(script(tool_turns)));
-            let mut agent = Agent::builder(provider.clone(), "u", "s")
+            let mut agent = Session::builder(provider.clone(), "u", "s")
                 .model("test")
                 .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
                 .build();
@@ -98,7 +98,7 @@ proptest! {
         rt().block_on(async move {
             let responses: Vec<_> = (0..run_count).map(|i| text_response(&format!("a{i}"))).collect();
             let provider = Arc::new(ScriptedProvider::new(responses));
-            let mut agent = Agent::builder(provider, "u", "s").model("test").build();
+            let mut agent = Session::builder(provider, "u", "s").model("test").build();
 
             for i in 0..run_count {
                 agent.run(format!("msg {i}")).await.unwrap();
@@ -143,7 +143,7 @@ proptest! {
             responses.push(text_response("final"));
 
             let provider = Arc::new(ScriptedProvider::new(responses));
-            let mut agent = Agent::builder(provider.clone(), "u", "s")
+            let mut agent = Session::builder(provider.clone(), "u", "s")
                 .model("test")
                 .tool(Arc::new(RecordingTool::new("rec", "ran")))
                 .tool(Arc::new(ErrTool))
@@ -190,7 +190,7 @@ proptest! {
             responses.push(text_response("final"));
 
             let provider = Arc::new(ScriptedProvider::new(responses));
-            let mut agent = Agent::builder(provider.clone(), "u", "s")
+            let mut agent = Session::builder(provider.clone(), "u", "s")
                 .model("test")
                 .tool(Arc::new(RecordingTool::new("rec", "ran")))
                 .tool(Arc::new(CancelTool { token: token.clone() }))

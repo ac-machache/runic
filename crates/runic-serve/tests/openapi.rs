@@ -7,7 +7,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use runic_agent::Agent;
+use runic_agent::Session;
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore};
 
@@ -15,7 +15,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Session> {
         panic!("openapi tests never drive the agent");
     }
 }

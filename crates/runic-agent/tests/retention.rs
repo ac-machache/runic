@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use harness::*;
-use runic_agent::{Agent, SpilledArtifact, ToolOutputSpill};
+use runic_agent::{Session, SpilledArtifact, ToolOutputSpill};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, ProvenanceSource, ToolResultPayload};
 
@@ -116,7 +116,7 @@ impl Tool for SourcedTool {
     }
 }
 
-fn persisted_payloads(agent: &Agent) -> Vec<ToolResultPayload> {
+fn persisted_payloads(agent: &Session) -> Vec<ToolResultPayload> {
     agent
         .state()
         .messages_for_provider()
@@ -141,7 +141,7 @@ async fn artifact_retention_spills_bytes_and_persists_the_reference() {
     ]));
     let spill = Arc::new(FakeSpill::new());
     let output = serde_json::json!({ "rows": ["a", "b", "c"] });
-    let mut agent = Agent::builder(provider.clone(), "tenant-1", "session-1")
+    let mut agent = Session::builder(provider.clone(), "tenant-1", "session-1")
         .model("test")
         .tool(Arc::new(SpillingTool {
             output: output.clone(),
@@ -192,7 +192,7 @@ async fn spill_failure_degrades_to_an_inline_note_never_the_full_bytes() {
         text_response("done"),
     ]));
     let big = "SECRET_PAYLOAD ".repeat(100);
-    let mut agent = Agent::builder(provider.clone(), "t", "s")
+    let mut agent = Session::builder(provider.clone(), "t", "s")
         .model("test")
         .tool(Arc::new(SpillingTool {
             output: serde_json::json!(big),
@@ -225,7 +225,7 @@ async fn artifact_retention_without_a_store_degrades_the_same_way() {
         tool_use_response("c1", "spiller", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "t", "s")
+    let mut agent = Session::builder(provider, "t", "s")
         .model("test")
         .tool(Arc::new(SpillingTool {
             output: serde_json::json!("payload"),
@@ -251,7 +251,7 @@ async fn auto_spill_over_spills_only_full_retention_outputs_above_the_threshold(
         text_response("done"),
     ]));
     let spill = Arc::new(FakeSpill::new());
-    let mut agent = Agent::builder(provider, "t", "s")
+    let mut agent = Session::builder(provider, "t", "s")
         .model("test")
         .tool(Arc::new(RecordingTool::new("small", "tiny")))
         .tool(Arc::new(RecordingTool::new("big", &"waffle ".repeat(100))))
@@ -279,7 +279,7 @@ async fn provenance_is_sanitized_bounded_and_persisted_on_the_block() {
         tool_use_response("c1", "sourced", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider.clone(), "t", "s")
+    let mut agent = Session::builder(provider.clone(), "t", "s")
         .model("test")
         .tool(Arc::new(SourcedTool))
         .build();
@@ -385,7 +385,7 @@ async fn duplicate_call_ids_pair_each_block_with_its_own_full_output() {
         ]),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider.clone(), "t", "s")
+    let mut agent = Session::builder(provider.clone(), "t", "s")
         .model("test")
         .tool(Arc::new(SequenceSummaryTool {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -409,7 +409,7 @@ async fn a_suspending_batch_spills_summarized_outputs_instead_of_losing_them() {
         ("c2", "deferrer", serde_json::json!({})),
     ])]));
     let spill = Arc::new(FakeSpill::new());
-    let mut agent = Agent::builder(provider, "t", "s")
+    let mut agent = Session::builder(provider, "t", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(
             "THE_FULL_BYTES",
@@ -449,7 +449,7 @@ async fn a_suspending_batch_without_a_store_keeps_the_summary() {
         ("c1", "summary_tool", serde_json::json!({})),
         ("c2", "deferrer", serde_json::json!({})),
     ])]));
-    let mut agent = Agent::builder(provider, "t", "s")
+    let mut agent = Session::builder(provider, "t", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(
             "THE_FULL_BYTES",
@@ -504,7 +504,7 @@ async fn summaries_and_failures_respect_the_inline_budget() {
     }
 
     let huge_summary = "S".repeat(5000);
-    let mut agent = Agent::builder(provider, "t", "s")
+    let mut agent = Session::builder(provider, "t", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new("full", &huge_summary)))
         .tool(Arc::new(BigFailer))

@@ -8,10 +8,10 @@ use runic_state::{HookLifecycle, SessionEvent};
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
 
-use crate::{Agent, AgentError, AgentEvent};
+use crate::{AgentError, AgentEvent, Session};
 
 /// The non-tool lifecycle points. Tool points (`before_tool`/`after_tool`)
-/// fire inside [`Agent::dispatch_tools`] because they carry the call/result.
+/// fire inside [`Session::dispatch_tools`] because they carry the call/result.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Point {
     BeforeAgent,
@@ -58,7 +58,7 @@ fn signal_kind(signal: &HookSignal) -> &'static str {
     }
 }
 
-impl Agent {
+impl Session {
     pub(super) fn record_write_hook(
         &mut self,
         run_id: &str,

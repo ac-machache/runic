@@ -7,7 +7,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{Agent, AgentEvent, RunContext};
+use runic_agent::{AgentEvent, RunContext, Session};
 use runic_state::SessionEvent;
 use runic_types::{ContentBlock, MessageContent};
 
@@ -20,7 +20,7 @@ async fn full_output_reaches_model_only_summary_persists() {
         tool_use_response("c1", "summary_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider.clone(), "u", "s")
+    let mut agent = Session::builder(provider.clone(), "u", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
         .build();
@@ -56,7 +56,7 @@ async fn full_output_is_visible_to_exactly_one_model_request_then_gone() {
         tool_use_response("c2", "rec", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider.clone(), "u", "s")
+    let mut agent = Session::builder(provider.clone(), "u", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
         .tool(Arc::new(RecordingTool::new("rec", "ran")))
@@ -94,7 +94,7 @@ async fn persisted_session_events_never_carry_the_full_bytes() {
         tool_use_response("c1", "summary_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "u", "s")
+    let mut agent = Session::builder(provider, "u", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
         .build();
@@ -125,7 +125,7 @@ async fn live_tool_finished_event_carries_the_summary_not_the_full_output() {
         tool_use_response("c1", "summary_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Agent::builder(provider, "u", "s")
+    let mut agent = Session::builder(provider, "u", "s")
         .model("test")
         .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
         .build();

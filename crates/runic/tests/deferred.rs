@@ -409,7 +409,7 @@ async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
 }
 
 #[tokio::test]
-async fn deferred_hooks_compose_fine_and_stay_inert_before_load() {
+async fn deferred_ability_hooks_are_always_active_regardless_of_load() {
     let fired = Arc::new(Mutex::new(false));
     let provider = ScriptedProvider::new(vec![text("done")]);
     let mut agent = Agent::new(Llm::new(provider, "test-model"))
@@ -421,9 +421,79 @@ async fn deferred_hooks_compose_fine_and_stay_inert_before_load() {
     agent.run("go").await.unwrap();
 
     assert!(
-        !*fired.lock().unwrap(),
-        "deferred hook must not fire before load"
+        *fired.lock().unwrap(),
+        "a deferred ability's hook enforces regardless of whether the model has loaded it — \
+         deferred only hides tools/prompt, it never disables enforcement"
     );
+}
+
+struct EchoInputTool;
+
+#[async_trait]
+impl Tool for EchoInputTool {
+    fn name(&self) -> &str {
+        "refund"
+    }
+    fn description(&self) -> &str {
+        "echoes its input back"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok(args.to_string()))
+    }
+}
+
+struct InjectUserIdHook;
+
+#[async_trait]
+impl WriteHook for InjectUserIdHook {
+    fn name(&self) -> &str {
+        "inject-user-id"
+    }
+    fn points(&self) -> &'static [HookLifecycle] {
+        &[HookLifecycle::BeforeTool]
+    }
+    async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        if call.name == "refund"
+            && let serde_json::Value::Object(map) = &mut call.input
+        {
+            map.insert("user_id".into(), serde_json::json!("u-1"));
+        }
+        HookOutcome::Continue
+    }
+}
+
+#[tokio::test]
+async fn a_before_tool_hook_still_guards_the_deferred_ability_s_own_tool_once_loaded() {
+    let provider = ScriptedProvider::new(vec![
+        call("c1", "load_ability", serde_json::json!({ "id": "billing" })),
+        call("c2", "refund", serde_json::json!({})),
+        text("done"),
+    ]);
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
+        .with(
+            DeferredAbility::new("billing", "invoices and refunds")
+                .tool(Arc::new(EchoInputTool))
+                .hook(Arc::new(InjectUserIdHook)),
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("refund order 7").await.unwrap();
+
+    let results = tool_result_texts(&agent);
+    let refund_result = results
+        .iter()
+        .find(|content| content.contains("user_id"))
+        .expect("the before_tool hook injected user_id into the refund call");
+    assert!(refund_result.contains("\"user_id\":\"u-1\""));
 }
 
 #[tokio::test]

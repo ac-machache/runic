@@ -191,6 +191,9 @@ impl Composer {
                     ability: ability_name.clone(),
                     source,
                 })?;
+            composition
+                .write_hooks
+                .extend(std::mem::take(&mut bundle.write_hooks));
             let deferred_id = match descriptor.activation {
                 ActivationPolicy::Deferred => descriptor
                     .id

@@ -524,17 +524,24 @@ async fn dispatch_one(
 ) -> Dispatched {
     let span = tracing::info_span!(
         "tool",
-        name = %call.name,
-        call_id = %call.id,
+        gen_ai.tool.name = %call.name,
+        gen_ai.tool.call.id = %call.id,
         parallel,
         is_error = tracing::field::Empty,
         outcome = tracing::field::Empty,
+        gen_ai.operation.name = "execute_tool",
+        otel.name = format!("execute_tool {}", call.name),
+        otel.kind = "internal",
+        otel.status_code = tracing::field::Empty,
     );
     let started = std::time::Instant::now();
     let (result, status) = dispatch_one_inner(tool, call, ctx, timeout, &span)
         .instrument(span.clone())
         .await;
     span.record("is_error", result.is_error());
+    if result.is_error() {
+        span.record("otel.status_code", "ERROR");
+    }
     Dispatched {
         result,
         status,

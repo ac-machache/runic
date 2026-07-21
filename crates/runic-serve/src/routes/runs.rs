@@ -935,15 +935,18 @@ pub async fn run_timeline(
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
-pub(crate) async fn flush_persist(persist: &crate::registry::PersistHandle) {
-    if tokio::time::timeout(FLUSH_TIMEOUT, persist.flush())
-        .await
-        .is_err()
-    {
-        tracing::error!(
-            backlog = persist.backlog(),
-            "run finished but events are still unflushed after {FLUSH_TIMEOUT:?}"
-        );
+pub(crate) async fn flush_persist(persist: &runic_substrate::PersistHandle) {
+    match tokio::time::timeout(FLUSH_TIMEOUT, persist.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, "run finished but persistence gave up");
+        }
+        Err(_) => {
+            tracing::error!(
+                backlog = persist.backlog(),
+                "run finished but events are still unflushed after {FLUSH_TIMEOUT:?}"
+            );
+        }
     }
 }
 

@@ -8,7 +8,30 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::{SessionEvent, SessionStore, project};
 
-const MAX_APPEND_RETRIES: u32 = 5;
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_retries: Option<u32>,
+    pub base: Duration,
+    pub cap: Duration,
+}
+
+impl RetryPolicy {
+    pub fn bounded() -> Self {
+        Self {
+            max_retries: Some(5),
+            base: Duration::from_millis(50),
+            cap: Duration::from_secs(5),
+        }
+    }
+
+    pub fn forever() -> Self {
+        Self {
+            max_retries: None,
+            base: Duration::from_millis(100),
+            cap: Duration::from_secs(5),
+        }
+    }
+}
 
 pub struct PersistHandle {
     enqueued: Arc<AtomicU64>,
@@ -39,17 +62,76 @@ impl PersistHandle {
     }
 }
 
+/// The write end of a persist channel: hand it already-projected
+/// [`SessionEvent`]s. `Session` reaches it through a [`PersistEmitter`];
+/// serve feeds it straight from its event tee.
+#[derive(Debug, Clone)]
+pub struct PersistDrain {
+    tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
+    enqueued: Arc<AtomicU64>,
+}
+
+impl PersistDrain {
+    pub fn send(&self, event: Arc<SessionEvent>) {
+        self.enqueued.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(event);
+    }
+}
+
+/// The read end plus commit bookkeeping, consumed once by [`spawn_persist`].
+/// Split from [`PersistDrain`] so a caller can register the drain before it
+/// has the store to spawn against (serve builds the live run, then hydrates).
+pub struct PersistPipe {
+    rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
+    committed: Arc<AtomicU64>,
+    error: Arc<Mutex<Option<String>>>,
+    notify: Arc<Notify>,
+}
+
+pub fn persist_channel() -> (PersistDrain, PersistPipe, Arc<PersistHandle>) {
+    let (tx, rx) = mpsc::unbounded_channel::<Arc<SessionEvent>>();
+    let enqueued = Arc::new(AtomicU64::new(0));
+    let committed = Arc::new(AtomicU64::new(0));
+    let error = Arc::new(Mutex::new(None));
+    let notify = Arc::new(Notify::new());
+    let drain = PersistDrain {
+        tx,
+        enqueued: enqueued.clone(),
+    };
+    let pipe = PersistPipe {
+        rx,
+        committed: committed.clone(),
+        error: error.clone(),
+        notify: notify.clone(),
+    };
+    let handle = Arc::new(PersistHandle {
+        enqueued,
+        committed,
+        error,
+        notify,
+    });
+    (drain, pipe, handle)
+}
+
+pub fn spawn_persist(
+    pipe: PersistPipe,
+    store: Arc<dyn SessionStore>,
+    tenant: String,
+    session_id: String,
+    policy: RetryPolicy,
+) {
+    tokio::spawn(drain_loop(pipe, store, tenant, session_id, policy));
+}
+
 #[derive(Debug)]
 struct PersistEmitter {
-    tx: mpsc::UnboundedSender<SessionEvent>,
-    enqueued: Arc<AtomicU64>,
+    drain: PersistDrain,
 }
 
 impl Emitter for PersistEmitter {
     fn emit(&self, event: AgentEvent) {
         if let Some(se) = project(&event) {
-            self.enqueued.fetch_add(1, Ordering::SeqCst);
-            let _ = self.tx.send(se);
+            self.drain.send(Arc::new(se));
         }
     }
 }
@@ -58,73 +140,53 @@ pub fn attach(
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
-) -> (Arc<dyn Emitter>, PersistHandle) {
-    let (tx, rx) = mpsc::unbounded_channel::<SessionEvent>();
-    let enqueued = Arc::new(AtomicU64::new(0));
-    let committed = Arc::new(AtomicU64::new(0));
-    let error = Arc::new(Mutex::new(None));
-    let notify = Arc::new(Notify::new());
-    spawn_drain(
-        rx,
-        store,
-        tenant,
-        session_id,
-        committed.clone(),
-        error.clone(),
-        notify.clone(),
-    );
-    let emitter: Arc<dyn Emitter> = Arc::new(PersistEmitter {
-        tx,
-        enqueued: enqueued.clone(),
-    });
-    (
-        emitter,
-        PersistHandle {
-            enqueued,
-            committed,
-            error,
-            notify,
-        },
-    )
+) -> (Arc<dyn Emitter>, Arc<PersistHandle>) {
+    let (drain, pipe, handle) = persist_channel();
+    spawn_persist(pipe, store, tenant, session_id, RetryPolicy::bounded());
+    let emitter: Arc<dyn Emitter> = Arc::new(PersistEmitter { drain });
+    (emitter, handle)
 }
 
-fn spawn_drain(
-    mut rx: mpsc::UnboundedReceiver<SessionEvent>,
+async fn drain_loop(
+    mut pipe: PersistPipe,
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
-    committed: Arc<AtomicU64>,
-    error: Arc<Mutex<Option<String>>>,
-    notify: Arc<Notify>,
+    policy: RetryPolicy,
 ) {
-    tokio::spawn(async move {
-        while let Some(first) = rx.recv().await {
-            let mut batch = vec![first];
-            while let Ok(event) = rx.try_recv() {
-                batch.push(event);
-            }
-            let count = batch.len() as u64;
-            let mut attempt = 0u32;
-            loop {
-                match store.append_batch(&tenant, &session_id, &batch).await {
-                    Ok(()) => {
-                        committed.fetch_add(count, Ordering::SeqCst);
-                        notify.notify_waiters();
-                        break;
+    while let Some(first) = pipe.rx.recv().await {
+        let mut batch = vec![first];
+        while let Ok(event) = pipe.rx.try_recv() {
+            batch.push(event);
+        }
+        let count = batch.len() as u64;
+        let owned: Vec<SessionEvent> = batch.iter().map(|event| (**event).clone()).collect();
+        let mut attempt = 0u32;
+        loop {
+            match store.append_batch(&tenant, &session_id, &owned).await {
+                Ok(()) => {
+                    pipe.committed.fetch_add(count, Ordering::SeqCst);
+                    pipe.notify.notify_waiters();
+                    break;
+                }
+                Err(err) => {
+                    attempt += 1;
+                    if policy.max_retries.is_some_and(|max| attempt >= max) {
+                        tracing::error!(%tenant, %session_id, attempt, error = %err, "persist gave up");
+                        *pipe.error.lock().unwrap() = Some(err.to_string());
+                        pipe.notify.notify_waiters();
+                        return;
                     }
-                    Err(err) => {
-                        attempt += 1;
-                        if attempt >= MAX_APPEND_RETRIES {
-                            *error.lock().unwrap() = Some(err.to_string());
-                            notify.notify_waiters();
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
-                    }
+                    tracing::warn!(%tenant, %session_id, attempt, error = %err, "persist batch failed — retrying");
+                    let delay = policy
+                        .base
+                        .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+                        .min(policy.cap);
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
-    });
+    }
 }
 
 pub struct StoreSubSession {
@@ -168,7 +230,7 @@ struct StoreSubRun {
     tenant: String,
     session_id: String,
     emitter: Arc<dyn Emitter>,
-    handle: PersistHandle,
+    handle: Arc<PersistHandle>,
 }
 
 #[async_trait]

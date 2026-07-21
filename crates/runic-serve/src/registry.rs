@@ -7,12 +7,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use runic_agent::{AgentEvent, CancelToken, Runner};
-use runic_substrate::{SessionEvent, SessionStore};
-use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
+use runic_substrate::{
+    PersistDrain, PersistHandle, RetryPolicy, SessionEvent, SessionStore, persist_channel,
+    spawn_persist,
+};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tracing::Instrument;
 
 use crate::error::ServeError;
@@ -21,33 +23,6 @@ use crate::factory::BoxedAgentFactory;
 pub const DEFAULT_PERSIST_BACKLOG_MAX: u64 = 10_000;
 pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 const THREAD_LEASE_POLL: Duration = Duration::from_millis(250);
-const RETRY_BASE: Duration = Duration::from_millis(100);
-const RETRY_CAP: Duration = Duration::from_secs(5);
-const RETRY_ESCALATE_AFTER: u32 = 5;
-
-#[derive(Debug, Clone)]
-pub struct PersistSink {
-    tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
-    enqueued: Arc<AtomicU64>,
-}
-
-impl PersistSink {
-    pub fn new(tx: mpsc::UnboundedSender<Arc<SessionEvent>>) -> Self {
-        Self {
-            tx,
-            enqueued: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    pub fn send(&self, ev: Arc<SessionEvent>) {
-        self.enqueued.fetch_add(1, Ordering::SeqCst);
-        let _ = self.tx.send(ev);
-    }
-
-    pub fn enqueued(&self) -> Arc<AtomicU64> {
-        self.enqueued.clone()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct RunLimits {
@@ -124,39 +99,14 @@ impl AgentRegistry {
     }
 }
 
-pub struct PersistHandle {
-    enqueued: Arc<AtomicU64>,
-    committed: Arc<AtomicU64>,
-    notify: Arc<Notify>,
-}
-
-impl PersistHandle {
-    pub fn backlog(&self) -> u64 {
-        self.enqueued
-            .load(Ordering::SeqCst)
-            .saturating_sub(self.committed.load(Ordering::SeqCst))
-    }
-
-    pub async fn flush(&self) {
-        let target = self.enqueued.load(Ordering::SeqCst);
-        loop {
-            let notified = self.notify.notified();
-            if self.committed.load(Ordering::SeqCst) >= target {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
 pub struct BegunRun {
     pub run_id: String,
     pub cancel: CancelToken,
     pub steering_tx: mpsc::UnboundedSender<String>,
     pub steering_rx: mpsc::UnboundedReceiver<String>,
     pub events_tx: broadcast::Sender<Arc<SessionEvent>>,
-    pub persist_sink: PersistSink,
-    pub persist_rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
+    pub persist_sink: PersistDrain,
+    pub persist_pipe: Option<runic_substrate::PersistPipe>,
     pub persist: Arc<PersistHandle>,
 }
 
@@ -235,13 +185,7 @@ impl RunRegistry {
         let cancel = CancelToken::new();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
-        let (persist_tx, persist_rx) = mpsc::unbounded_channel();
-        let persist_sink = PersistSink::new(persist_tx);
-        let persist = Arc::new(PersistHandle {
-            enqueued: persist_sink.enqueued(),
-            committed: Arc::new(AtomicU64::new(0)),
-            notify: Arc::new(Notify::new()),
-        });
+        let (persist_sink, persist_pipe, persist) = persist_channel();
 
         {
             let mut live = self.live.write().await;
@@ -276,7 +220,7 @@ impl RunRegistry {
             steering_rx: steer_rx,
             events_tx,
             persist_sink,
-            persist_rx,
+            persist_pipe: Some(persist_pipe),
             persist,
         })
     }
@@ -428,14 +372,15 @@ async fn hydrate_agent_inner(
         }
     }
 
-    let rx = std::mem::replace(&mut begun.persist_rx, mpsc::unbounded_channel().1);
-    spawn_persister(
-        rx,
-        store.clone(),
-        tenant.to_string(),
-        thread_id.to_string(),
-        begun.persist.clone(),
-    );
+    if let Some(pipe) = begun.persist_pipe.take() {
+        spawn_persist(
+            pipe,
+            store.clone(),
+            tenant.to_string(),
+            thread_id.to_string(),
+            RetryPolicy::forever(),
+        );
+    }
 
     Ok(agent)
 }
@@ -604,7 +549,7 @@ pub fn spawn_lease_reaper(
 }
 
 pub fn tee_events(
-    persist: Option<PersistSink>,
+    persist: Option<PersistDrain>,
     broadcast: broadcast::Sender<Arc<SessionEvent>>,
     sse: Option<mpsc::UnboundedSender<AgentEvent>>,
 ) -> (Arc<dyn runic_state::Emitter>, tokio::task::JoinHandle<()>) {
@@ -626,61 +571,6 @@ pub fn tee_events(
     (Arc::new(runic_agent::ChannelEmitter(agent_tx)), handle)
 }
 
-fn spawn_persister(
-    mut rx: mpsc::UnboundedReceiver<Arc<SessionEvent>>,
-    store: Arc<dyn SessionStore>,
-    tenant: String,
-    session_id: String,
-    handle: Arc<PersistHandle>,
-) {
-    tokio::spawn(async move {
-        // append_batch is one transaction, so retrying a failed batch can't
-        // double-write.
-        while let Some(first) = rx.recv().await {
-            let mut shared = vec![first];
-            while let Ok(event) = rx.try_recv() {
-                shared.push(event);
-            }
-            let batch: Vec<SessionEvent> = shared.iter().map(|e| (**e).clone()).collect();
-            let batch_size = batch.len();
-            let mut attempt = 0u32;
-            loop {
-                match store.append_batch(&tenant, &session_id, &batch).await {
-                    Ok(()) => {
-                        handle
-                            .committed
-                            .fetch_add(batch_size as u64, Ordering::SeqCst);
-                        handle.notify.notify_waiters();
-                        tracing::debug!(%tenant, %session_id, batch_size, "persister batch append");
-                        break;
-                    }
-                    Err(e) => {
-                        attempt += 1;
-                        let delay = RETRY_BASE
-                            .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
-                            .min(RETRY_CAP);
-                        if attempt >= RETRY_ESCALATE_AFTER {
-                            tracing::error!(
-                                %tenant, %session_id, batch_size, attempt,
-                                backlog = handle.backlog(),
-                                error = %e,
-                                "persist batch still failing — retrying"
-                            );
-                        } else {
-                            tracing::warn!(
-                                %tenant, %session_id, batch_size, attempt,
-                                error = %e,
-                                "persist batch failed — retrying"
-                            );
-                        }
-                        tokio::time::sleep(delay).await;
-                    }
-                }
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,6 +578,7 @@ mod tests {
     use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
     use runic_substrate::MemorySessionStore;
     use runic_types::{ContentBlock, StopReason, TokenUsage};
+    use std::sync::atomic::Ordering;
 
     use crate::factory::AgentFactory;
 
@@ -951,19 +842,19 @@ mod tests {
             failures_left: std::sync::atomic::AtomicU32::new(3),
         });
         let registry = RunRegistry::new();
-        let begun = registry.begin("t", "s", "r-1").await.unwrap();
-        spawn_persister(
-            begun.persist_rx,
+        let mut begun = registry.begin("t", "s", "r-1").await.unwrap();
+        spawn_persist(
+            begun.persist_pipe.take().unwrap(),
             store.clone(),
             "t".into(),
             "s".into(),
-            begun.persist.clone(),
+            RetryPolicy::forever(),
         );
 
         for i in 0..5 {
             begun.persist_sink.send(Arc::new(message_event(i)));
         }
-        begun.persist.flush().await;
+        begun.persist.flush().await.unwrap();
 
         let stored = store.inner.read("t", "s").await.unwrap();
         let texts: Vec<String> = stored
@@ -987,13 +878,13 @@ mod tests {
             persist_backlog_max: 3,
             ..Default::default()
         });
-        let begun = registry.begin("t", "s", "r-1").await.unwrap();
-        spawn_persister(
-            begun.persist_rx,
+        let mut begun = registry.begin("t", "s", "r-1").await.unwrap();
+        spawn_persist(
+            begun.persist_pipe.take().unwrap(),
             store.clone(),
             "t".into(),
             "s".into(),
-            begun.persist.clone(),
+            RetryPolicy::forever(),
         );
         for i in 0..5 {
             begun.persist_sink.send(Arc::new(message_event(i)));
@@ -1007,7 +898,7 @@ mod tests {
         registry.check_persist_capacity("t", "other").await.unwrap();
 
         store.failures_left.store(0, Ordering::SeqCst);
-        begun.persist.flush().await;
+        begun.persist.flush().await.unwrap();
         registry.end("t", "s2", "r-x", begun.persist.clone()).await;
         registry.check_persist_capacity("t", "s").await.unwrap();
     }

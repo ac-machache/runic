@@ -38,7 +38,10 @@ pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use event::{SessionEvent, project};
 pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
-pub use persister::{PersistHandle, StoreSubSession, attach as attach_persister};
+pub use persister::{
+    PersistDrain, PersistHandle, PersistPipe, RetryPolicy, StoreSubSession,
+    attach as attach_persister, persist_channel, spawn_persist,
+};
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{
     ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore,

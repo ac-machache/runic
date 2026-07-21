@@ -1,4 +1,4 @@
-use runic_agent::{Session, SessionBuilder};
+use runic_agent::RunnerBuilder;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
@@ -117,7 +117,7 @@ impl SubagentBuilder for DispatchingSubagentBuilder {
         self.for_req(req).identity(req)
     }
 
-    fn decorate(&self, b: SessionBuilder, req: &SubagentReq<'_>) -> SessionBuilder {
+    fn decorate(&self, b: RunnerBuilder, req: &SubagentReq<'_>) -> RunnerBuilder {
         self.for_req(req).decorate(b, req)
     }
 }
@@ -146,7 +146,11 @@ impl Composer {
         self
     }
 
-    pub async fn build(&self, tenant: &str, session: &str) -> Result<Session, ComposeError> {
+    pub async fn build(
+        &self,
+        tenant: &str,
+        session: &str,
+    ) -> Result<runic_agent::Runner, ComposeError> {
         validate_ability_descriptors(&self.agent.abilities)?;
         let reserve_loader_name = self
             .agent
@@ -354,7 +358,7 @@ impl Composer {
                 store.clone(),
             )));
         }
-        let mut agent_builder = Session::builder(provider.clone(), tenant, session)
+        let mut agent_builder = runic_agent::Runner::builder(provider.clone(), tenant, session)
             .config(self.agent.llm.config().clone())
             .system_prompt(composition.prompt.render());
         for tool in self.agent.llm.tool_list() {

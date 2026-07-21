@@ -1,4 +1,4 @@
-//! Agent discovery — the registry of named agents this server hosts.
+//! Runner discovery — the registry of named agents this server hosts.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -87,7 +87,7 @@ pub struct AgentOverview {
     pub abilities: Vec<AbilityOverview>,
 }
 
-fn fallback_overview(name: &str, agent: &runic_agent::Session) -> AgentOverview {
+fn fallback_overview(name: &str, agent: &runic_agent::Runner) -> AgentOverview {
     let tools = agent
         .tool_specs()
         .into_iter()
@@ -144,7 +144,7 @@ pub async fn agent_overview(
             let agent = factory
                 .build(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
                 .await
-                .map_err(|e| ServeError::Agent(e.to_string()))?;
+                .map_err(|e| ServeError::Runner(e.to_string()))?;
             fallback_overview(&name, &agent)
         }
     };

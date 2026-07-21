@@ -7,7 +7,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_types::{ContentBlock, StopReason, ToolCall};
 
 #[tokio::test]
@@ -32,7 +32,7 @@ async fn tool_use_block_without_parsed_tool_calls_does_not_crash_or_hang() {
     )]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(rec)
         .build();
@@ -67,7 +67,7 @@ async fn parsed_tool_calls_without_a_tool_use_block_still_dispatch() {
     ]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .build();
@@ -92,7 +92,7 @@ async fn empty_content_and_no_calls_ends_cleanly() {
         vec![],
         StopReason::EndTurn,
     )]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(outcome.total_turns, 1);

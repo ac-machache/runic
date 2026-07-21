@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::FoundrySubagentBuilder;
-use runic_agent::{AgentError, Session};
+use runic_agent::{AgentError, Runner};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_subagent::{DelegationCtx, Subagent, SubagentBuilder, SubagentReq, assemble_subagent};
@@ -92,7 +92,7 @@ fn builder(provider: Arc<dyn Provider>) -> FoundrySubagentBuilder {
     }
 }
 
-async fn assemble(b: &dyn SubagentBuilder, subagent: &Subagent) -> Session {
+async fn assemble(b: &dyn SubagentBuilder, subagent: &Subagent) -> Runner {
     assemble_subagent(
         b,
         &SubagentReq {

@@ -7,7 +7,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_types::{ContentBlock, MessageContent};
 
 #[tokio::test]
@@ -24,7 +24,7 @@ async fn multiple_tool_calls_all_execute_and_results_reach_the_model() {
     ]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .build();
@@ -62,7 +62,7 @@ async fn parallelizable_calls_all_complete() {
     ]));
     let par = Arc::new(RecordingTool::new("par", "ran").parallel());
     let calls = par.log();
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(par)
         .build();
@@ -92,7 +92,7 @@ async fn unknown_tool_yields_an_in_band_error_not_a_crash() {
         tool_use_response("t1", "ghost", serde_json::json!({})),
         text_response("recovered"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(
@@ -108,7 +108,7 @@ async fn tool_returning_err_maps_to_an_error_result() {
         tool_use_response("t1", "err_tool", serde_json::json!({})),
         text_response("recovered"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(ErrTool))
         .build();
@@ -124,7 +124,7 @@ async fn tool_returning_error_result_is_persisted_as_error() {
         tool_use_response("t1", "err_result_tool", serde_json::json!({})),
         text_response("recovered"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(ErrResultTool))
         .build();
@@ -139,7 +139,7 @@ async fn panicking_tool_is_caught_and_does_not_abort_the_run() {
         tool_use_response("t1", "panic_tool", serde_json::json!({})),
         text_response("survived"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(PanicTool))
         .build();
@@ -164,7 +164,7 @@ async fn mixed_multi_tool_one_ok_one_err_one_panic() {
         ]),
         text_response("done"),
     ]));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ran")))
         .tool(Arc::new(ErrTool))
@@ -204,7 +204,7 @@ async fn duplicate_tool_call_ids_in_one_turn_do_not_crash() {
     ]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .build();
@@ -236,7 +236,7 @@ async fn parallel_tools_finish_out_of_order_but_results_stay_ordered() {
     ]));
     let gate = Arc::new(OrderedGateTool::new("gate", vec!["c", "b", "a"]));
     let completions = gate.completions();
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(gate)
         .build();
@@ -258,7 +258,7 @@ async fn parallel_tools_finish_out_of_order_but_results_stay_ordered() {
 }
 
 /// Whether any persisted `tool_result` block is an error whose content matches.
-fn error_result_matching(agent: &Session, pred: impl Fn(&str) -> bool) -> bool {
+fn error_result_matching(agent: &Runner, pred: impl Fn(&str) -> bool) -> bool {
     agent
         .state()
         .messages_for_provider()

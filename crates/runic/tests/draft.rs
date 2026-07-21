@@ -107,7 +107,7 @@ impl WriteHook for MarkerHook {
     }
 }
 
-fn state_flag(agent: &runic_agent::Session, key: &str) -> bool {
+fn state_flag(agent: &runic_agent::Runner, key: &str) -> bool {
     agent
         .state()
         .data()

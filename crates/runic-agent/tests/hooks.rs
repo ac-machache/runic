@@ -7,7 +7,7 @@ mod harness;
 use std::sync::{Arc, Mutex};
 
 use harness::*;
-use runic_agent::{AgentError, Session};
+use runic_agent::{AgentError, Runner};
 use runic_types::MessageContent;
 
 #[tokio::test]
@@ -18,7 +18,7 @@ async fn write_hook_lifecycle_points_fire_in_loop_order() {
         text_response("done"),
     ]));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ok")))
         .write_hook(Arc::new(RecordWriteHook::new("h", log.clone())))
@@ -47,7 +47,7 @@ async fn write_hooks_run_in_priority_order() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
     let log = Arc::new(Mutex::new(Vec::new()));
     // `lo` has the lower priority value, so it must run before `hi`.
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .write_hook(Arc::new(
             RecordWriteHook::new("hi", log.clone()).priority(10),
@@ -76,7 +76,7 @@ async fn write_hook_runs_before_read_hook_at_the_tool_seam() {
         text_response("done"),
     ]));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ok")))
         .write_hook(Arc::new(RecordWriteHook::new("w", log.clone())))
@@ -102,7 +102,7 @@ async fn before_model_mutation_is_visible_to_the_provider() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("inj", log)
         .act("before_model", Act::Inject("injected-by-hook".into()));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .write_hook(Arc::new(hook))
         .build();
@@ -129,7 +129,7 @@ async fn before_tool_substitution_skips_real_execution() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook =
         RecordWriteHook::new("sub", log).act("before_tool", Act::Substitute("from-hook".into()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(rec)
         .write_hook(Arc::new(hook))
@@ -154,7 +154,7 @@ async fn write_hook_stop_before_model_halts_with_no_model_call() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never")]));
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("stopper", log).act("before_model", Act::Stop);
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .write_hook(Arc::new(hook))
         .build();
@@ -185,7 +185,7 @@ async fn write_hook_cancel_at_before_tool_substitutes_an_error_and_continues() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("canceller", log)
         .act("before_tool", Act::Cancel("blocked by policy".into()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(rec)
         .write_hook(Arc::new(hook))
@@ -206,7 +206,7 @@ async fn write_hook_cancel_at_before_tool_substitutes_an_error_and_continues() {
 async fn read_hook_stop_at_before_model_halts_the_run() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never")]));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .read_hook(Arc::new(
             RecordReadHook::new("r", log).stop_at("before_model"),
@@ -230,7 +230,7 @@ async fn write_hook_stop_at_after_model_halts_before_a_second_turn() {
     let calls = rec.log();
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("stopper", log).act("after_model", Act::Stop);
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .write_hook(Arc::new(hook))
@@ -252,7 +252,7 @@ async fn write_hook_cancel_at_after_model_halts_the_run() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("only")]));
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("c", log).act("after_model", Act::Cancel("stop now".into()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .write_hook(Arc::new(hook))
         .build();
@@ -271,7 +271,7 @@ async fn write_hook_stop_at_after_tool_halts_after_the_result_is_recorded() {
     let calls = rec.log();
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook = RecordWriteHook::new("stopper", log).act("after_tool", Act::Stop);
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .write_hook(Arc::new(hook))
@@ -302,7 +302,7 @@ async fn write_hook_cancel_at_after_tool_halts_the_run() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let hook =
         RecordWriteHook::new("c", log).act("after_tool", Act::Cancel("stop after tool".into()));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(rec)
         .write_hook(Arc::new(hook))
@@ -326,7 +326,7 @@ async fn read_hook_stop_at_after_tool_halts_the_run() {
         text_response("never"),
     ]));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .tool(Arc::new(RecordingTool::new("rec", "ran")))
         .read_hook(Arc::new(

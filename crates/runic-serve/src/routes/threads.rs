@@ -532,7 +532,7 @@ pub async fn thread_events(
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
-        (status = 200, description = "Agent view of the thread (see `busy`)", body = ThreadStateResponse),
+        (status = 200, description = "Runner view of the thread (see `busy`)", body = ThreadStateResponse),
         (status = 404, description = "Unknown thread", body = ErrorBody)
     )
 )]
@@ -581,7 +581,7 @@ pub async fn thread_state(
     }))
 }
 
-/// `DELETE /threads/:id` — drop the thread's session AND its in-pool Agent so
+/// `DELETE /threads/:id` — drop the thread's session AND its in-pool Runner so
 /// the next run starts fresh.
 #[utoipa::path(
     delete,

@@ -2,9 +2,9 @@ use chrono::Utc;
 
 use runic_types::Message;
 
-use crate::{AgentEvent, Session};
+use crate::{AgentEvent, Runner};
 
-impl Session {
+impl Runner {
     pub(crate) fn push_assistant(&mut self, msg: Message, run_id: &str) {
         self.emit(AgentEvent::Message {
             run_id: run_id.to_string(),

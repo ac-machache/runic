@@ -12,9 +12,9 @@ use runic_types::{ContentBlock, MessageContent};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::{AgentError, AgentEvent, Session, retry};
+use crate::{AgentError, AgentEvent, Runner, retry};
 
-impl Session {
+impl Runner {
     pub(crate) async fn call_model(
         &self,
         request: CompletionRequest,

@@ -7,7 +7,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{AgentError, AgentEvent, RunContext, Session};
+use runic_agent::{AgentError, AgentEvent, RunContext, Runner};
 use runic_provider::{CompletionResponse, ProviderError, StreamEvent};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -42,7 +42,7 @@ async fn text_and_thinking_deltas_are_forwarded_in_order() {
         Ok(response("partial")),
         Err(ProviderError::Parse("complete must not be called".into())),
     ));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     agent
@@ -83,7 +83,7 @@ async fn fallback_worthy_stream_error_recovers_via_non_streaming_complete() {
         Err(ProviderError::Overloaded { retry_after_ms: 0 }),
         Ok(response("from complete")),
     ));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let outcome = agent
@@ -118,7 +118,7 @@ async fn non_fallback_worthy_stream_error_fails_the_run() {
         Err(ProviderError::Parse("garbled stream".into())),
         Ok(response("never used")),
     ));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let err = agent

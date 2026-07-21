@@ -226,9 +226,9 @@ struct EchoFactory;
 
 #[async_trait::async_trait]
 impl runic_serve::AgentFactory for EchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<runic_agent::Session> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<runic_agent::Runner> {
         Ok(
-            runic_agent::Session::builder(std::sync::Arc::new(EchoProvider), tenant, session_id)
+            runic_agent::Runner::builder(std::sync::Arc::new(EchoProvider), tenant, session_id)
                 .system_prompt("test")
                 .build(),
         )

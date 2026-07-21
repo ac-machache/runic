@@ -13,7 +13,7 @@ use crate::wire::WireEvent;
 #[openapi(
     info(
         title = "runic-serve",
-        description = "HTTP + SSE surface over a runic Agent. Threads are sessions; \
+        description = "HTTP + SSE surface over a runic Runner. Threads are sessions; \
             runs are single agent invocations streamed as Server-Sent Events. \
             Every request carries an optional `X-Runic-Tenant` header (defaults to \
             `default`); every error shares the `ErrorBody` shape."

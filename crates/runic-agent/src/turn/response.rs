@@ -6,9 +6,9 @@
 use runic_provider::CompletionResponse;
 use runic_types::Message;
 
-use crate::{Session, TurnRecord};
+use crate::{Runner, TurnRecord};
 
-impl Session {
+impl Runner {
     pub(crate) fn interpret_response(
         response: CompletionResponse,
         model: String,

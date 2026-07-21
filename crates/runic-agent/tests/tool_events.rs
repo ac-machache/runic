@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use harness::*;
-use runic_agent::{AgentEvent, Session};
+use runic_agent::{AgentEvent, Runner};
 use runic_state::ToolStatus;
 use runic_tool::{Tool, ToolContext, ToolResult};
 
@@ -59,7 +59,7 @@ async fn serial_tool_durations_exclude_earlier_batch_mates() {
         ]),
         text_response("done"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(SleepTool {
             name: "slow",
@@ -98,7 +98,7 @@ async fn unknown_tools_get_a_distinct_durable_status() {
         tool_use_response("c1", "ghost", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
     let mut events = capture_session_events(&mut agent);
 
     agent.run("go").await.unwrap();

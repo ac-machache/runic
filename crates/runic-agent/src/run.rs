@@ -1,8 +1,8 @@
 //! The OUTER loop. Owns the turn counter, usage accumulation, the
 //! `RunStart`/`RunEnd` bookends, and stop handling. Per-turn work is delegated
-//! to [`crate::turn::run_one_turn`]; tool dispatch to [`Session::dispatch_tools`].
+//! to [`crate::turn::run_one_turn`]; tool dispatch to [`Runner::dispatch_tools`].
 //!
-//! [`Session::run_message_with`] installs the per-run [`RunContext`] (config map,
+//! [`Runner::run_message_with`] installs the per-run [`RunContext`] (config map,
 //! provider override, cancellation, steering), runs the loop, then restores.
 
 use chrono::Utc;
@@ -14,9 +14,9 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::turn::Point;
-use crate::{AgentError, CancelToken, RunContext, Session};
+use crate::{AgentError, CancelToken, RunContext, Runner};
 
-impl Session {
+impl Runner {
     /// Run one user turn to completion (text in, [`RunOutcome`] out).
     pub async fn run(&mut self, input: impl Into<String>) -> Result<RunOutcome, AgentError> {
         self.run_message_with(Message::user(input.into()), RunContext::default())

@@ -1,4 +1,4 @@
-//! `runic-serve` — HTTP server that exposes a runic Agent over the wire.
+//! `runic-serve` — HTTP server that exposes a runic Runner over the wire.
 //!
 //! Goal: take everything the REPL binary already wires (provider, skills,
 //! sub-agents, shell tools, memory, MCP, persistence, blobs) and let

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use runic_agent::{AgentEvent, CancelToken, Session};
+use runic_agent::{AgentEvent, CancelToken, Runner};
 use runic_substrate::{SessionEvent, SessionStore};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tracing::Instrument;
@@ -381,7 +381,7 @@ pub async fn hydrate_agent(
     tenant: &str,
     thread_id: &str,
     begun: &mut BegunRun,
-) -> anyhow::Result<Session> {
+) -> anyhow::Result<Runner> {
     let span = tracing::info_span!(
         "hydrate",
         tenant = %tenant,
@@ -401,7 +401,7 @@ async fn hydrate_agent_inner(
     thread_id: &str,
     begun: &mut BegunRun,
     span: &tracing::Span,
-) -> anyhow::Result<Session> {
+) -> anyhow::Result<Runner> {
     let mut agent = factory.build(tenant, thread_id).await?;
 
     if factory.stateless() {
@@ -715,8 +715,8 @@ mod tests {
 
     #[async_trait]
     impl AgentFactory for TestFactory {
-        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
-            Ok(Session::builder(Arc::new(TestProvider), tenant, session_id)
+        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
+            Ok(Runner::builder(Arc::new(TestProvider), tenant, session_id)
                 .system_prompt("test")
                 .build())
         }
@@ -726,8 +726,8 @@ mod tests {
 
     #[async_trait]
     impl AgentFactory for StatelessTestFactory {
-        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
-            Ok(Session::builder(Arc::new(TestProvider), tenant, session_id)
+        async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
+            Ok(Runner::builder(Arc::new(TestProvider), tenant, session_id)
                 .system_prompt("test")
                 .build())
         }

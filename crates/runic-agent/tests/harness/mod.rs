@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{AgentEvent, Session};
+use runic_agent::{AgentEvent, Runner};
 use runic_hook::{HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
@@ -723,7 +723,7 @@ impl ReadHook for RecordReadHook {
 
 /// Install an event sink on the agent and return its receiver. Every
 /// [`AgentEvent`] the run emits lands here in order.
-pub fn capture_session_events(agent: &mut Session) -> mpsc::UnboundedReceiver<AgentEvent> {
+pub fn capture_session_events(agent: &mut Runner) -> mpsc::UnboundedReceiver<AgentEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     agent
         .state_mut()

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{AgentEvent, CancelToken, RunContext, Session};
+use runic_agent::{AgentEvent, CancelToken, RunContext, Runner};
 use runic_hook::{HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
@@ -252,7 +252,7 @@ impl ReadHook for StopBeforeTool {
 #[tokio::test]
 async fn text_only_turn_ends_the_run() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("hello there")]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .system_prompt("be brief")
         .build();
@@ -275,7 +275,7 @@ async fn tool_call_round_trips_then_finishes() {
         tool_use_response("t1", "echo", serde_json::json!({ "x": 1 })),
         text_response("all done"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .build();
@@ -306,7 +306,7 @@ async fn hooks_rewrite_and_substitute_tool_results_in_the_loop() {
         text_response("done"),
     ]));
     let log = Arc::new(Mutex::new(Vec::new()));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .write_hook(Arc::new(HookProbe { log: log.clone() }))
@@ -363,7 +363,7 @@ async fn read_hook_stop_halts_before_tool_execution() {
         "echo",
         serde_json::json!({}),
     )]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .read_hook(Arc::new(StopBeforeTool))
@@ -385,7 +385,7 @@ async fn falls_back_to_secondary_provider_on_model_not_found() {
     let fallback = Arc::new(ScriptedProvider::new(vec![text_response(
         "fallback answer",
     )]));
-    let mut agent = Session::builder(primary, "u1", "s1")
+    let mut agent = Runner::builder(primary, "u1", "s1")
         .model("does-not-exist")
         .fallback(fallback, "good-model")
         .build();
@@ -404,7 +404,7 @@ async fn unknown_tool_yields_error_result_not_crash() {
         tool_use_response("t1", "nonexistent", serde_json::json!({})),
         text_response("recovered"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(outcome.total_turns, 2);
@@ -432,7 +432,7 @@ async fn run_context_injects_per_run_config_into_tools() {
         text_response("done"),
         text_response("second run"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(ConfigEcho))
         .build();
@@ -465,7 +465,7 @@ async fn provider_override_applies_then_restores() {
     // Primary always 404s; the per-run override answers; after the run the
     // build-time provider is restored, so a bare run fails again.
     let primary = Arc::new(AlwaysModelNotFound);
-    let mut agent = Session::builder(primary, "u1", "s1")
+    let mut agent = Runner::builder(primary, "u1", "s1")
         .model("primary")
         .build();
 
@@ -485,7 +485,7 @@ async fn provider_override_applies_then_restores() {
 #[tokio::test]
 async fn cancellation_ends_the_run_before_any_turn() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never reached")]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let cancel = CancelToken::new();
     cancel.cancel(); // pre-cancelled
@@ -501,7 +501,7 @@ async fn cancellation_ends_the_run_before_any_turn() {
 #[tokio::test]
 async fn steering_messages_are_injected_into_history() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-    let mut agent = Session::builder(provider, "u1", "s1").model("test").build();
+    let mut agent = Runner::builder(provider, "u1", "s1").model("test").build();
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tx.send("steered nudge".to_string()).unwrap();
@@ -531,7 +531,7 @@ async fn graceful_max_turns_extracts_a_final_answer() {
         tool_use_response("t1", "echo", serde_json::json!({ "x": 1 })),
         text_response("wrapped up"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .max_turns(1)
@@ -554,7 +554,7 @@ async fn streaming_emits_lifecycle_and_token_events() {
         tool_use_response("t1", "echo", serde_json::json!({ "x": 1 })),
         text_response("final answer"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .build();
@@ -677,7 +677,7 @@ async fn deferred_tool_activates_then_becomes_callable() {
         tool_use_response("a2", "late_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Activator))
         .tool_catalog(Arc::new(LateCatalog))
@@ -711,7 +711,7 @@ async fn activations_survive_a_rebuild_from_the_log() {
         tool_use_response("a1", "late_tool", serde_json::json!({})),
         text_response("done"),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool_catalog(Arc::new(LateCatalog))
         .build();
@@ -742,7 +742,7 @@ async fn hard_max_turns_errors_without_graceful() {
         tool_use_response("t1", "echo", serde_json::json!({})),
         tool_use_response("t2", "echo", serde_json::json!({})),
     ]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .tool(Arc::new(Echo))
         .max_turns(1)
@@ -766,7 +766,7 @@ async fn output_schema_captures_final_answer_and_ends() {
         "final_answer",
         serde_json::json!({ "answer": "42" }),
     )]));
-    let mut agent = Session::builder(provider, "u1", "s1")
+    let mut agent = Runner::builder(provider, "u1", "s1")
         .model("test")
         .output_schema(schema)
         .build();
@@ -793,7 +793,7 @@ async fn output_schema_captures_final_answer_and_ends() {
 #[tokio::test]
 async fn prepare_request_carries_system_tools_and_user_message() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .system_prompt("be terse")
         .tool(Arc::new(Echo))
@@ -844,7 +844,7 @@ async fn prepare_request_orders_tools_deterministically_across_rebuilds() {
         ["alpha", "midway", "zeta"],
     ] {
         let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-        let mut builder = Session::builder(provider.clone(), "u1", "s1").model("test");
+        let mut builder = Runner::builder(provider.clone(), "u1", "s1").model("test");
         for name in names {
             builder = builder.tool(Arc::new(Named(name)));
         }
@@ -872,7 +872,7 @@ async fn prepare_request_injects_final_answer_tool_when_schema_set() {
     let schema =
         serde_json::json!({ "type": "object", "properties": { "x": { "type": "number" } } });
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .model("test")
         .output_schema(schema.clone())
         .build();

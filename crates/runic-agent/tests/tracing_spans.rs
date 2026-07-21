@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic_agent::{RunContext, Session};
+use runic_agent::{RunContext, Runner};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -99,7 +99,7 @@ async fn the_span_tree_carries_the_agreed_fields() {
     });
 
     let _guard = tracing::subscriber::set_default(subscriber);
-    let mut agent = Session::builder(provider, "alice", "s1")
+    let mut agent = Runner::builder(provider, "alice", "s1")
         .model("test-model")
         .tool(Arc::new(Echo))
         .build();

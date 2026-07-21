@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use runic_agent::SessionBuilder;
+use runic_agent::RunnerBuilder;
 use runic_hook::WriteHook;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
@@ -209,7 +209,7 @@ impl SubagentBuilder for ComposedSubagentBuilder {
         self.skills.clone()
     }
 
-    fn decorate(&self, mut b: SessionBuilder, _req: &SubagentReq<'_>) -> SessionBuilder {
+    fn decorate(&self, mut b: RunnerBuilder, _req: &SubagentReq<'_>) -> RunnerBuilder {
         for hook in &self.hooks {
             b = b.write_hook(hook.clone());
         }

@@ -48,7 +48,7 @@ pub enum ServeError {
     Store(String),
 
     #[error("agent error: {0}")]
-    Agent(String),
+    Runner(String),
 
     #[error("invalid request: {0}")]
     BadRequest(String),
@@ -83,14 +83,14 @@ impl IntoResponse for ServeError {
             Self::TooBusy { .. } => (StatusCode::TOO_MANY_REQUESTS, "too_busy"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
-            Self::Agent(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
+            Self::Runner(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::Upstream(_) => (StatusCode::BAD_GATEWAY, "upstream"),
             Self::NotConfigured(_) => (StatusCode::NOT_IMPLEMENTED, "not_configured"),
         };
 
         match &self {
-            Self::Store(_) | Self::Agent(_) | Self::Internal(_) => {
+            Self::Store(_) | Self::Runner(_) | Self::Internal(_) => {
                 tracing::error!(kind, error = %self, "request failed")
             }
             Self::Upstream(_)

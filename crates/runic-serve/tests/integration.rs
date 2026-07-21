@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{
@@ -27,7 +27,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Session> {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
         panic!("PanicFactory: tests must not invoke the agent path");
     }
 }
@@ -70,15 +70,15 @@ impl Provider for ScriptedProvider {
     }
 }
 
-/// Factory that builds a real Agent backed by the scripted provider, keyed to
+/// Factory that builds a real Runner backed by the scripted provider, keyed to
 /// the requested session id (so persistence/replay line up).
 struct ScriptedFactory;
 
 #[async_trait]
 impl AgentFactory for ScriptedFactory {
-    async fn build(&self, _tenant: &str, session_id: &str) -> anyhow::Result<Session> {
+    async fn build(&self, _tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
         Ok(
-            Session::builder(Arc::new(ScriptedProvider), "alice", session_id)
+            Runner::builder(Arc::new(ScriptedProvider), "alice", session_id)
                 .system_prompt("test")
                 .build(),
         )
@@ -1111,8 +1111,8 @@ struct ResolvingFactory {
 
 #[async_trait]
 impl AgentFactory for ResolvingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
-        Ok(Session::builder(
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
+        Ok(Runner::builder(
             Arc::new(RecordingProvider {
                 last: self.last.clone(),
             }),

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{CancelToken, RunContext, Session, SessionBuilder, TasksSnapshot};
+use runic_agent::{CancelToken, RunContext, Runner, RunnerBuilder, TasksSnapshot};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_state::{AgentEvent, Emitter};
@@ -80,12 +80,12 @@ pub trait SubagentBuilder: Send + Sync {
         )
     }
 
-    fn decorate(&self, b: SessionBuilder, _req: &SubagentReq<'_>) -> SessionBuilder {
+    fn decorate(&self, b: RunnerBuilder, _req: &SubagentReq<'_>) -> RunnerBuilder {
         b
     }
 }
 
-pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<'_>) -> Session {
+pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<'_>) -> Runner {
     let (tenant, session) = builder.identity(req);
     let pool = builder.tool_pool(req).await;
 
@@ -117,7 +117,7 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
             if let Some(model) = &req.subagent.model {
                 config.model = model.clone();
             }
-            Session::builder(llm.provider(), tenant, session)
+            Runner::builder(llm.provider(), tenant, session)
                 .config(config)
                 .system_prompt(prompt)
         }
@@ -128,7 +128,7 @@ pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<
                 .model
                 .clone()
                 .unwrap_or_else(|| builder.default_model(req));
-            Session::builder(provider, tenant, session)
+            Runner::builder(provider, tenant, session)
                 .model(model)
                 .system_prompt(prompt)
         }

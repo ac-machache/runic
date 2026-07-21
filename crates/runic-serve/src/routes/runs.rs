@@ -200,7 +200,7 @@ pub struct WaitRunResponse {
 
 /// `POST /threads/:id/runs/stream`
 ///
-/// Kicks off a streaming run in a detached task that locks the thread's Agent
+/// Kicks off a streaming run in a detached task that locks the thread's Runner
 /// for the whole turn (so concurrent POSTs on the same thread serialize), and
 /// merges the agent's live `AgentEvent` stream with any HITL `ask_required`
 /// prompts onto one SSE response. If the client disconnects, the response
@@ -586,7 +586,7 @@ pub async fn wait_run(
 
     match task.await {
         Ok(Ok(response)) => Ok(Json(response)),
-        Ok(Err(e)) => Err(ServeError::Agent(e)),
+        Ok(Err(e)) => Err(ServeError::Runner(e)),
         Err(e) => Err(ServeError::Internal(format!("run task panicked: {e}"))),
     }
 }

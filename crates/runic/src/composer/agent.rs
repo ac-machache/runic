@@ -39,9 +39,65 @@ impl Agent {
         &self,
         tenant: &str,
         session: &str,
-    ) -> Result<runic_agent::Session, super::ComposeError> {
+    ) -> Result<runic_agent::Runner, super::ComposeError> {
         super::Composer::new(self.clone(), super::Runtime::new())
             .build(tenant, session)
             .await
+    }
+
+    pub async fn run(&self, message: impl Into<String>) -> anyhow::Result<AgentOutput> {
+        let mut runner = self.build("local", "local").await?;
+        let outcome = runner
+            .run(message.into())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(AgentOutput::from_run(&runner, outcome))
+    }
+
+    pub async fn stream(
+        &self,
+        message: impl Into<String>,
+        events: Arc<dyn runic_state::Emitter>,
+    ) -> anyhow::Result<AgentOutput> {
+        let mut runner = self.build("local", "local").await?;
+        let ctx = runic_agent::RunContext::new().with_events(events);
+        let outcome = runner
+            .run_with(message.into(), ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(AgentOutput::from_run(&runner, outcome))
+    }
+
+    pub fn session(
+        &self,
+        store: Arc<dyn runic_substrate::SessionStore>,
+        tenant: impl Into<String>,
+        session: impl Into<String>,
+    ) -> super::Session {
+        super::Session::new(self.clone(), store, tenant.into(), session.into())
+    }
+}
+
+pub struct AgentOutput {
+    pub text: String,
+    pub outcome: runic_agent::RunOutcome,
+}
+
+impl AgentOutput {
+    pub(crate) fn from_run(runner: &runic_agent::Runner, outcome: runic_agent::RunOutcome) -> Self {
+        Self {
+            text: runner.state().last_assistant_text().unwrap_or_default(),
+            outcome,
+        }
+    }
+
+    pub fn parse<T: serde::de::DeserializeOwned>(&self) -> anyhow::Result<T> {
+        let Some(value) = &self.outcome.structured else {
+            anyhow::bail!(
+                "no structured output (stop_reason: {:?})",
+                self.outcome.stop_reason
+            );
+        };
+        Ok(serde_json::from_value(value.clone())?)
     }
 }

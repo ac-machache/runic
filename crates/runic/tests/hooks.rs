@@ -6,7 +6,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use runic::hooks::ToolCallLimit;
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -95,8 +95,8 @@ impl Tool for PaymentTool {
     }
 }
 
-fn agent_with_limit(provider: Arc<ScriptedProvider>, executions: Arc<AtomicU32>) -> Session {
-    Session::builder(provider, "u1", "s1")
+fn agent_with_limit(provider: Arc<ScriptedProvider>, executions: Arc<AtomicU32>) -> Runner {
+    Runner::builder(provider, "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(PaymentTool { executions }))
         .write_hook(Arc::new(ToolCallLimit::new().per_thread("payment", 2)))

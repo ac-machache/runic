@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
@@ -108,7 +108,7 @@ async fn transient_output_reaches_model_but_summary_is_persisted() {
         tool_use("c1", "leaker"),
         text("done"),
     ]));
-    let mut agent = Session::builder(provider.clone(), "u", "s")
+    let mut agent = Runner::builder(provider.clone(), "u", "s")
         .model("test")
         .tool(Arc::new(Leaker))
         .build();
@@ -155,7 +155,7 @@ async fn transient_output_does_not_leak_into_a_later_run() {
         tool_use("c1", "leaker"), // run 1, turn 1 → dispatch, then max-turns stop
         text("run 2"),            // run 2, turn 1
     ]));
-    let mut agent = Session::builder(provider.clone(), "u", "s")
+    let mut agent = Runner::builder(provider.clone(), "u", "s")
         .model("test")
         .max_turns(1)
         .tool(Arc::new(Leaker))

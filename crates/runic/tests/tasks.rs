@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use runic::hooks::TaskReminder;
-use runic_agent::{Session, TasksSnapshot};
+use runic_agent::{Runner, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentEvent;
 use runic_state::{TaskStatus, ThreadStats};
@@ -106,7 +106,7 @@ fn background_script() -> Vec<CompletionResponse> {
     responses
 }
 
-async fn settle_background(agent: &mut Session) {
+async fn settle_background(agent: &mut Runner) {
     for _ in 0..100 {
         agent.run_message(Message::user("and now?")).await.unwrap();
         let stats = agent.state().stats();
@@ -122,7 +122,7 @@ async fn settle_background(agent: &mut Session) {
 async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
     let provider = ScriptedProvider::new(background_script());
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .write_hook(Arc::new(TaskReminder::new()))
@@ -174,7 +174,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
 async fn background_delegation_emits_a_navigable_edge() {
     let provider = ScriptedProvider::new(background_script());
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-    let mut agent = Session::builder(provider.clone(), "u1", "s1")
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .build();
@@ -236,7 +236,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     let rebuilt_view = {
         let provider = ScriptedProvider::new(background_script());
         let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
-        let mut agent = Session::builder(provider, "u1", "s1")
+        let mut agent = Runner::builder(provider, "u1", "s1")
             .system_prompt("sys")
             .tool(Arc::new(delegate))
             .build();

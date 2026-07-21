@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{
@@ -21,7 +21,7 @@ struct PanicFactory;
 
 #[async_trait]
 impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Session> {
+    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
         panic!("agent path must not run in CRUD props");
     }
 }
@@ -51,9 +51,9 @@ struct ScriptedFactory;
 
 #[async_trait]
 impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Session> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
         Ok(
-            Session::builder(Arc::new(ScriptedProvider), tenant, session_id)
+            Runner::builder(Arc::new(ScriptedProvider), tenant, session_id)
                 .system_prompt("test")
                 .build(),
         )

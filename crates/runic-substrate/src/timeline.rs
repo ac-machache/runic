@@ -4,9 +4,8 @@ use chrono::{DateTime, Utc};
 use runic_types::TokenUsage;
 use serde::Serialize;
 
-use crate::event::{
-    AuditStamp, DelegationMode, DelegationStatus, RunEndStatus, SessionEvent, ToolStatus,
-};
+use crate::event::SessionEvent;
+use runic_state::{AuditStamp, DelegationMode, DelegationStatus, RunEndStatus, ToolStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TraceStatus {

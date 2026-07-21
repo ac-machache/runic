@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+mod harness;
+
 use async_trait::async_trait;
-use runic_agent::{RunContext, Session};
+use harness::{capture_session_events, drain_session};
+use runic_agent::{AgentEvent, RunContext, Session};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_state::SessionEvent;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, StopReason, TokenUsage, ToolCall};
 
@@ -112,14 +114,14 @@ impl Provider for RecordingProvider {
     }
 }
 
-fn kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
+fn kinds(evs: &[AgentEvent]) -> Vec<&'static str> {
     evs.iter()
         .map(|e| match e {
-            SessionEvent::RunStart { .. } => "RunStart",
-            SessionEvent::RunEnd { .. } => "RunEnd",
-            SessionEvent::Message { .. } => "Message",
-            SessionEvent::TurnEnd { .. } => "TurnEnd",
-            SessionEvent::ToolDeferred { .. } => "ToolDeferred",
+            AgentEvent::RunStarted { .. } => "RunStart",
+            AgentEvent::RunEnd { .. } => "RunEnd",
+            AgentEvent::Message { .. } => "Message",
+            AgentEvent::TurnEnd { .. } => "TurnEnd",
+            AgentEvent::ToolDeferred { .. } => "ToolDeferred",
             _ => "other",
         })
         .collect()
@@ -133,31 +135,32 @@ async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
         .tool(Arc::new(AskTool))
         .build();
 
+    let mut cap = capture_session_events(&mut agent);
     let out = agent
         .run_with("go", RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
     assert_eq!(out.stop_reason.as_deref(), Some("suspended"));
 
-    let log = kinds(agent.state().events());
+    let mut events = drain_session(&mut cap);
+    let log = kinds(&events);
     assert!(log.contains(&"ToolDeferred"), "log = {log:?}");
     assert!(
         !log.contains(&"RunEnd"),
         "a suspended run has no RunEnd yet"
     );
-    let tool_results = agent
-        .state()
-        .events()
+    let tool_results = events
         .iter()
         .filter(|e| {
-            matches!(e, SessionEvent::Message { msg, .. }
+            matches!(e, AgentEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|blk| matches!(blk, ContentBlock::ToolResult { .. }))))
         })
         .count();
     assert_eq!(tool_results, 0, "the ask tool_use is left dangling");
 
-    agent.state_mut().push_event(SessionEvent::Message {
+    let mut cap = capture_session_events(&mut agent);
+    agent.state_mut().emit(AgentEvent::Message {
         run_id: "r1".into(),
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: "c1".into(),
@@ -176,12 +179,11 @@ async fn a_deferring_tool_suspends_the_run_and_resume_continues_it() {
     assert_eq!(out2.stop_reason.as_deref(), Some("end_turn"));
     assert_eq!(agent.state().last_assistant_text().as_deref(), Some("done"));
 
-    let terminals: Vec<_> = agent
-        .state()
-        .events()
+    events.extend(drain_session(&mut cap));
+    let terminals: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::RunEnd { status, .. } => Some(status.clone()),
+            AgentEvent::RunEnd { status, .. } => Some(status.clone()),
             _ => None,
         })
         .collect();
@@ -201,18 +203,18 @@ async fn suspended_run_records_the_exact_deferral_payload() {
         .tool(Arc::new(AskTool))
         .build();
 
+    let mut cap = capture_session_events(&mut agent);
     let out = agent
         .run_with("go", RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
     assert_eq!(out.stop_reason.as_deref(), Some("suspended"));
 
-    let deferred = agent
-        .state()
-        .events()
+    let events = drain_session(&mut cap);
+    let deferred = events
         .iter()
         .find_map(|e| match e {
-            SessionEvent::ToolDeferred {
+            AgentEvent::ToolDeferred {
                 run_id,
                 call_id,
                 channel,
@@ -236,11 +238,15 @@ async fn resume_does_not_append_a_second_run_start_or_user_message() {
         .tool(Arc::new(AskTool))
         .build();
 
+    let mut cap = capture_session_events(&mut agent);
     agent
         .run_with("go", RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
-    agent.state_mut().push_event(SessionEvent::Message {
+    let mut events = drain_session(&mut cap);
+
+    let mut cap = capture_session_events(&mut agent);
+    agent.state_mut().emit(AgentEvent::Message {
         run_id: "r1".into(),
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: "c1".into(),
@@ -255,20 +261,24 @@ async fn resume_does_not_append_a_second_run_start_or_user_message() {
         .resume(RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
+    events.extend(drain_session(&mut cap));
 
-    let events = agent.state().events();
+    let run_ids: std::collections::HashSet<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::RunStarted { run_id, .. } => Some(run_id.clone()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, SessionEvent::RunStart { .. }))
-            .count(),
-        1,
+        run_ids,
+        std::collections::HashSet::from(["r1".to_string()]),
         "resume must continue the existing run, not start another one"
     );
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, SessionEvent::Message { msg, .. }
+            .filter(|e| matches!(e, AgentEvent::Message { msg, .. }
                 if matches!(msg.content, MessageContent::Text(ref text) if text == "go")))
             .count(),
         1,
@@ -288,7 +298,7 @@ async fn resume_sends_the_injected_tool_result_to_the_model() {
         .run_with("go", RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
-    agent.state_mut().push_event(SessionEvent::Message {
+    agent.state_mut().emit(AgentEvent::Message {
         run_id: "r1".into(),
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: "c1".into(),
@@ -322,30 +332,29 @@ async fn a_fresh_run_after_suspension_does_not_re_emit_the_old_deferral() {
         .tool(Arc::new(AskTool))
         .build();
 
+    let mut cap = capture_session_events(&mut agent);
     agent
         .run_with("go", RunContext::new().with_run_id("r1"))
         .await
         .unwrap();
-    let before = agent
-        .state()
-        .events()
+    let deferrals_run1 = drain_session(&mut cap)
         .iter()
-        .filter(|e| matches!(e, SessionEvent::ToolDeferred { .. }))
+        .filter(|e| matches!(e, AgentEvent::ToolDeferred { .. }))
         .count();
+    assert_eq!(deferrals_run1, 1, "the first run suspends");
 
+    let mut cap = capture_session_events(&mut agent);
     let out = agent
         .run_with("new request", RunContext::new().with_run_id("r2"))
         .await
         .unwrap();
     assert_eq!(out.stop_reason.as_deref(), Some("end_turn"));
-    let after = agent
-        .state()
-        .events()
+    let deferrals_run2 = drain_session(&mut cap)
         .iter()
-        .filter(|e| matches!(e, SessionEvent::ToolDeferred { .. }))
+        .filter(|e| matches!(e, AgentEvent::ToolDeferred { .. }))
         .count();
     assert_eq!(
-        after, before,
+        deferrals_run2, 0,
         "stale pending deferral leaked into a new run"
     );
 }

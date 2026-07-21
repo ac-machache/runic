@@ -8,7 +8,6 @@ use runic::ability::ability;
 use runic::composer::{Agent, Composer, Runtime};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_state::SessionEvent;
 use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
@@ -69,12 +68,8 @@ fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionRespon
 fn tool_result_pairs(agent: &runic_agent::Session) -> Vec<(String, String, bool)> {
     agent
         .state()
-        .events()
+        .messages_for_provider()
         .iter()
-        .filter_map(|event| match event {
-            SessionEvent::Message { msg, .. } => Some(msg),
-            _ => None,
-        })
         .filter_map(|msg| match &msg.content {
             MessageContent::Blocks(blocks) => Some(blocks),
             _ => None,

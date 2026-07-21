@@ -237,12 +237,8 @@ fn state_flag(agent: &runic_agent::Session, key: &str) -> bool {
 fn tool_result_texts(agent: &runic_agent::Session) -> Vec<String> {
     agent
         .state()
-        .events()
+        .messages_for_provider()
         .iter()
-        .filter_map(|event| match event {
-            runic_state::SessionEvent::Message { msg, .. } => Some(msg),
-            _ => None,
-        })
         .filter_map(|msg| match &msg.content {
             MessageContent::Blocks(blocks) => Some(blocks),
             _ => None,

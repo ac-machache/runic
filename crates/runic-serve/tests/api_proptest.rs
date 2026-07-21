@@ -12,8 +12,9 @@ use tower::ServiceExt;
 use runic_agent::Session;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_state::SessionEvent;
-use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_substrate::{
+    ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
+};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 
 struct PanicFactory;

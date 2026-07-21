@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{RunRecord, RunStatus, SessionStore};
 use runic_types::Message;
 use tokio::sync::{Semaphore, mpsc};
@@ -116,19 +116,19 @@ async fn execute_queued_run(
         }
     };
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    let stateless = factory.stateless();
+    let (agent_tx, tee) = crate::registry::tee_events(
+        (!stateless).then(|| begun.persist_sink.clone()),
+        begun.events_tx.clone(),
+        None,
+    );
     run_ctx = run_ctx
+        .with_events(agent_tx)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&record.agent)
         .with_run_id(&run_id)
         .with_mode("queued");
-    if !factory.stateless() {
-        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
-            store.clone(),
-            &tenant,
-            &thread_id,
-        ));
-    }
 
     let heartbeat = spawn_heartbeat(
         store.clone(),
@@ -171,7 +171,10 @@ async fn execute_queued_run(
                     agent.run_message_with(user_msg, run_ctx).await
                 }
             }
-            Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+            Err(e) => {
+                drop(run_ctx);
+                Err(runic_agent::AgentError::Build(e.to_string()))
+            }
         };
     heartbeat.abort();
     let (status, error) = match &outcome {
@@ -183,6 +186,7 @@ async fn execute_queued_run(
     if let Err(e) = &outcome {
         tracing::error!(%tenant, %thread_id, %run_id, error = %e, "queued run failed");
     }
+    let _ = tee.await;
     flush_persist(&begun.persist).await;
     if let Err(e) = store
         .set_run_status(&run_id, status, error.as_deref())

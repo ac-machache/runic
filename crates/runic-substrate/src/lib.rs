@@ -20,10 +20,12 @@
 mod artifact_tool;
 mod artifacts;
 mod builders;
+mod event;
 mod local;
 mod memory;
 mod replay;
 mod sessions;
+pub mod timeline;
 mod tool;
 
 #[cfg(feature = "postgres")]
@@ -32,6 +34,7 @@ mod postgres;
 pub use artifact_tool::ReadThreadArtifactTool;
 pub use artifacts::{Artifact, ArtifactSource, ArtifactStore};
 pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
+pub use event::{SessionEvent, project};
 pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
 pub use replay::{replay_into_state, replay_messages};
@@ -39,6 +42,7 @@ pub use sessions::{
     ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore,
     StoredEvent,
 };
+pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 pub use tool::SearchChatsTool;
 
 #[cfg(feature = "postgres")]

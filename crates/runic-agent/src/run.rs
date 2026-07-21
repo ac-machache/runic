@@ -7,7 +7,7 @@
 
 use chrono::Utc;
 
-use runic_state::{RunOutcome, SessionEvent, new_run_id};
+use runic_state::{RunOutcome, new_run_id};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage};
 use tokio::sync::mpsc;
 
@@ -67,9 +67,10 @@ impl Session {
             .provider
             .take()
             .map(|p| std::mem::replace(&mut self.provider, p));
-        self.events = ctx.events.take();
+        if let Some(emitter) = ctx.events.take() {
+            self.state.set_emitter(Some(emitter));
+        }
         self.human = ctx.human.take();
-        self.child_persistence = ctx.child_persistence.take();
         let cancel = ctx.cancel.take();
         let mut steering = ctx.steering.take();
         let agent_label = ctx.agent.take();
@@ -112,9 +113,8 @@ impl Session {
             }
         }
 
-        self.events = None; // drop the sink (closes the receiver)
-        self.human = None; // drop the per-run human channel
-        self.child_persistence = None;
+        self.state.set_emitter(None);
+        self.human = None;
         self.clear_transient_tool_outputs();
         if let Some(p) = saved_provider {
             self.provider = p;
@@ -141,27 +141,21 @@ impl Session {
         let fire_before_agent = user_msg.is_some();
         if let Some(user_msg) = user_msg {
             let now = Utc::now();
-            self.state.push_event(SessionEvent::RunStart {
+            self.emit(crate::AgentEvent::RunStarted {
                 run_id: run_id.clone(),
-                agent: agent_label.clone(),
+                agent: agent_label,
                 audit: Some(runic_state::AuditStamp {
                     model: Some(self.config.model.clone()),
                     actor: actor.map(|value| value.chars().take(128).collect()),
                 }),
                 at: now,
             });
-            self.state.push_event(SessionEvent::Message {
+            self.emit(crate::AgentEvent::Message {
                 run_id: run_id.clone(),
                 msg: user_msg,
                 at: now,
             });
         }
-        self.emit(crate::AgentEvent::RunStarted {
-            run_id: run_id.clone(),
-            agent: agent_label,
-            audit: None,
-            at: Utc::now(),
-        });
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
 
         let mut totals = LoopTotals::default();
@@ -187,13 +181,6 @@ impl Session {
                     .take()
                     .expect("a suspended run always carries its deferral");
                 self.emit(crate::AgentEvent::ToolDeferred {
-                    run_id: run_id.clone(),
-                    call_id: deferral.call_id.clone(),
-                    channel: deferral.channel.clone(),
-                    payload: deferral.payload.clone(),
-                    at: Utc::now(),
-                });
-                self.state.push_event(SessionEvent::ToolDeferred {
                     run_id: run_id.clone(),
                     call_id: deferral.call_id,
                     channel: deferral.channel,
@@ -228,12 +215,6 @@ impl Session {
                 } else {
                     runic_state::RunEndStatus::Completed
                 };
-                self.state.push_event(SessionEvent::RunEnd {
-                    run_id: run_id.clone(),
-                    status: status.clone(),
-                    outcome: outcome.clone(),
-                    at: Utc::now(),
-                });
                 self.emit(crate::AgentEvent::RunEnd {
                     run_id,
                     status,
@@ -244,7 +225,7 @@ impl Session {
             }
             Err(e) => {
                 tracing::error!(%run_id, turns = totals.turns, error = %e, "run failed");
-                self.state.push_event(SessionEvent::RunEnd {
+                self.emit(crate::AgentEvent::RunEnd {
                     run_id,
                     status: runic_state::RunEndStatus::Failed(e.to_string()),
                     outcome: RunOutcome {
@@ -281,16 +262,18 @@ impl Session {
                 break Ok("cancelled".to_string());
             }
 
-            // Externally emitted events (background task completions) are
-            // already persisted — fold them into the warm state only.
-            while let Ok(ev) = self.pending_external_rx.try_recv() {
-                self.state.fold_event(ev);
+            while let Ok(ev) = self.fold_rx.try_recv() {
+                self.state.fold(&ev);
             }
 
             // Steering — inject any pending nudges as user messages.
             if let Some(rx) = steering.as_deref_mut() {
+                let mut nudges = Vec::new();
                 while let Ok(text) = rx.try_recv() {
-                    self.state.push_event(SessionEvent::Message {
+                    nudges.push(text);
+                }
+                for text in nudges {
+                    self.emit(crate::AgentEvent::Message {
                         run_id: run_id.to_string(),
                         msg: Message::user(text),
                         at: Utc::now(),
@@ -395,7 +378,7 @@ impl Session {
         run_id: &str,
         turn_number: u32,
     ) -> Result<TokenUsage, AgentError> {
-        self.state.push_event(SessionEvent::Message {
+        self.emit(crate::AgentEvent::Message {
             run_id: run_id.to_string(),
             msg: Message::user(
                 "You've reached the step limit. Give your best final answer now \
@@ -410,12 +393,13 @@ impl Session {
         let model_ms = started.elapsed().as_millis() as u64;
         let (assistant, turn) = Self::interpret_response(response, model, model_ms);
         self.push_assistant(assistant, run_id);
-        self.state.push_event(SessionEvent::TurnEnd {
+        self.emit(crate::AgentEvent::TurnEnd {
             run_id: run_id.to_string(),
             turn: turn_number,
             model: turn.model.clone(),
             usage: turn.usage,
             model_ms: turn.model_ms,
+            stop_reason: String::new(),
             at: Utc::now(),
         });
         Ok(turn.usage)

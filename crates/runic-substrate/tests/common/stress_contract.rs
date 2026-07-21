@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Utc};
 
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{ArtifactSource, ArtifactStore, SessionStore, StoredEvent, replay_messages};
 use runic_types::Message;
 

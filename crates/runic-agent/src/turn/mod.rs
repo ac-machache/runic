@@ -47,16 +47,6 @@ impl Session {
         let (assistant, turn) = Self::interpret_response(response, model, model_ms); // response.rs
         self.push_assistant(assistant, run_id); // history.rs — state now has the reply
 
-        // The turn's durable accounting lands BEFORE the after-model hooks —
-        // a hook failure must not erase a model call that already cost money.
-        self.state.push_event(runic_state::SessionEvent::TurnEnd {
-            run_id: run_id.to_string(),
-            turn: turn_number,
-            model: turn.model.clone(),
-            usage: turn.usage,
-            model_ms: turn.model_ms,
-            at: chrono::Utc::now(),
-        });
         self.emit(crate::AgentEvent::TurnEnd {
             run_id: run_id.to_string(),
             turn: turn_number,

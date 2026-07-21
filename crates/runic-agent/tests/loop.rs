@@ -561,7 +561,10 @@ async fn streaming_emits_lifecycle_and_token_events() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     agent
-        .run_with("go", RunContext::new().with_events(tx))
+        .run_with(
+            "go",
+            RunContext::new().with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))),
+        )
         .await
         .unwrap();
 
@@ -656,15 +659,10 @@ impl Tool for Activator {
         _args: serde_json::Value,
         ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let events = ctx
-            .get::<runic_state::ExternalEvents>()
-            .expect("event rail in context");
-        events.emit(runic_state::SessionEvent::StateUpdated {
-            run_id: ctx.run_id.clone(),
-            key: runic_tool::activated_key("late_tool"),
-            value: serde_json::Value::Bool(true),
-            at: chrono::Utc::now(),
-        });
+        ctx.update(
+            runic_tool::activated_key("late_tool"),
+            serde_json::Value::Bool(true),
+        );
         Ok(ToolResult::ok("activated late_tool"))
     }
 }
@@ -719,7 +717,7 @@ async fn activations_survive_a_rebuild_from_the_log() {
         .build();
     agent
         .state_mut()
-        .fold_event(runic_state::SessionEvent::StateUpdated {
+        .emit(runic_state::AgentEvent::StateUpdated {
             run_id: "r-past".into(),
             key: runic_tool::activated_key("late_tool"),
             value: serde_json::Value::Bool(true),

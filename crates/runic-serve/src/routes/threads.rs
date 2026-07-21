@@ -561,10 +561,10 @@ pub async fn thread_state(
     let mut messages: Vec<runic_types::Message> = Vec::new();
     let mut stats = runic_state::ThreadStats::default();
     for entry in stored {
-        stats.fold(&entry.event);
+        stats.fold(&entry.event.lift());
         match entry.event {
-            runic_state::SessionEvent::Message { msg, .. } => messages.push(msg),
-            runic_state::SessionEvent::StateSnapshot { messages: snap, .. } => messages = snap,
+            runic_substrate::SessionEvent::Message { msg, .. } => messages.push(msg),
+            runic_substrate::SessionEvent::StateSnapshot { messages: snap, .. } => messages = snap,
             _ => {}
         }
     }

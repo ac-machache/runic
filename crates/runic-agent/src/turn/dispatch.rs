@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runic_hook::HookOutcome;
-use runic_state::{HookLifecycle, SessionEvent};
+use runic_state::HookLifecycle;
 use runic_tool::{Retention, Tool, ToolContext, ToolResult};
 use runic_types::{
     ContentBlock, Message, ProvenanceSource, ToolCall, ToolResultPayload, sanitize_provenance,
@@ -170,13 +170,6 @@ impl Session {
                     input: call.input.clone(),
                     at: chrono::Utc::now(),
                 });
-                self.state.push_event(SessionEvent::ToolStarted {
-                    run_id: run_id.to_string(),
-                    turn,
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                    at: chrono::Utc::now(),
-                });
             }
         }
 
@@ -271,16 +264,6 @@ impl Session {
                 other => other,
             };
 
-            self.state.push_event(SessionEvent::ToolFinished {
-                run_id: run_id.to_string(),
-                turn,
-                call_id: call.id.clone(),
-                tool: call.name.clone(),
-                status,
-                duration_ms,
-                at: chrono::Utc::now(),
-            });
-
             // For actually-dispatched calls: feed the outcome to the guard
             // (so identical call+result streaks escalate) and append any nudge.
             if let CallPlan::Dispatch { warning, .. } = plan {
@@ -297,22 +280,20 @@ impl Session {
 
             let (payload, provenance) = self.persist_result(&call.id, &result, suspending).await;
 
-            if let CallPlan::Dispatch { .. } = plan {
-                self.emit(crate::AgentEvent::ToolFinished {
-                    run_id: run_id.to_string(),
-                    turn,
-                    call_id: call.id.clone(),
-                    tool: call.name.clone(),
-                    status,
-                    result: match &payload {
-                        ToolResultPayload::Inline(value) => value.clone(),
-                        artifact => serde_json::Value::String(artifact.text()),
-                    },
-                    provenance: provenance.clone(),
-                    duration_ms,
-                    at: chrono::Utc::now(),
-                });
-            }
+            self.emit(crate::AgentEvent::ToolFinished {
+                run_id: run_id.to_string(),
+                turn,
+                call_id: call.id.clone(),
+                tool: call.name.clone(),
+                status,
+                result: match &payload {
+                    ToolResultPayload::Inline(value) => value.clone(),
+                    artifact => serde_json::Value::String(artifact.text()),
+                },
+                provenance: provenance.clone(),
+                duration_ms,
+                at: chrono::Utc::now(),
+            });
 
             blocks.push(ContentBlock::ToolResult {
                 tool_use_id: call.id.clone(),
@@ -502,25 +483,21 @@ impl Session {
         }
     }
 
-    /// A tool context for this run, carrying identity + the per-run config map.
     fn tool_context(&self, run_id: &str) -> ToolContext {
+        let tool_emitter = std::sync::Arc::new(crate::ToolEmitter {
+            sink: self.state.emitter(),
+            fold: self.fold_tx.clone(),
+        });
         let mut ctx = ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)
             .with_config(self.state.config.clone())
-            .with_human(self.human.clone());
-        ctx.insert(runic_state::ExternalEvents::new(
-            self.state.persist_sink(),
-            self.state.events_sender(),
-            self.pending_external_tx.clone(),
-        ));
+            .with_human(self.human.clone())
+            .with_emitter(Some(tool_emitter));
         ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
             self.state.tasks().clone(),
         )));
         ctx.insert(runic_tool::ActivatedToolNames(std::sync::Arc::new(
             self.activated.names(),
         )));
-        if let Some(handle) = &self.child_persistence {
-            ctx.insert(handle.clone());
-        }
         ctx
     }
 

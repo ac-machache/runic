@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use redis::AsyncCommands;
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use tokio::sync::{Mutex, Notify, broadcast, mpsc};
 
 #[async_trait]

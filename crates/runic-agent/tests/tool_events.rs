@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use harness::*;
-use runic_agent::Session;
-use runic_state::{SessionEvent, ToolStatus};
+use runic_agent::{AgentEvent, Session};
+use runic_state::ToolStatus;
 use runic_tool::{Tool, ToolContext, ToolResult};
 
 struct SleepTool {
@@ -35,10 +35,10 @@ impl Tool for SleepTool {
     }
 }
 
-fn finished(evs: &[SessionEvent]) -> Vec<(String, ToolStatus, u64, u32)> {
+fn finished(evs: &[AgentEvent]) -> Vec<(String, ToolStatus, u64, u32)> {
     evs.iter()
         .filter_map(|e| match e {
-            SessionEvent::ToolFinished {
+            AgentEvent::ToolFinished {
                 tool,
                 status,
                 duration_ms,
@@ -109,7 +109,7 @@ async fn unknown_tools_get_a_distinct_durable_status() {
     assert_eq!(done[0].1, ToolStatus::UnknownTool);
     assert!(
         evs.iter()
-            .any(|e| matches!(e, SessionEvent::ToolStarted { tool, .. } if tool == "ghost")),
+            .any(|e| matches!(e, AgentEvent::ToolStarted { tool, .. } if tool == "ghost")),
         "an attempted dispatch still records its start"
     );
 }

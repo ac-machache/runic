@@ -8,8 +8,8 @@ use runic::ability::{Delegation, Skills, basics};
 use runic::composer::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_state::{AgentState, SessionEvent, ThreadStats};
-use runic_substrate::{MemorySessionStore, SessionStore};
+use runic_state::{AgentState, ThreadStats};
+use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage};
 
 struct NoopProvider;
@@ -181,7 +181,7 @@ async fn cost_of_state_hydration_per_request() {
                 let tail = store.read_tail("t", "s").await.unwrap();
                 let mut state = AgentState::new("t", "s", "sys");
                 for entry in tail {
-                    state.fold_event(entry.event);
+                    state.fold(&entry.event.lift());
                 }
                 std::hint::black_box(state);
             }
@@ -198,7 +198,7 @@ async fn cost_of_state_hydration_per_request() {
                 let all = store.read("t", "s").await.unwrap();
                 let mut state = AgentState::new("t", "s", "sys");
                 for entry in all {
-                    state.fold_event(entry.event);
+                    state.fold(&entry.event.lift());
                 }
                 std::hint::black_box(state);
             }

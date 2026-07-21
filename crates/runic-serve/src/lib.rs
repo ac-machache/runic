@@ -38,7 +38,6 @@
 pub mod app;
 pub mod auth;
 pub mod broker;
-pub mod child;
 pub mod error;
 pub mod executor;
 pub mod factory;

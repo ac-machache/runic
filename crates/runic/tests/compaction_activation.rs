@@ -8,7 +8,7 @@ use runic::composer::{Agent, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
 use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_state::SessionEvent;
+use runic_state::AgentEvent;
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
 use runic_types::{ContentBlock, Message, MessageContent, StopReason, TokenUsage, ToolCall};
 
@@ -102,12 +102,8 @@ fn state_flag(agent: &runic_agent::Session, key: &str) -> bool {
 fn tool_result_pairs(agent: &runic_agent::Session) -> Vec<(String, String, bool)> {
     agent
         .state()
-        .events()
+        .messages_for_provider()
         .iter()
-        .filter_map(|event| match event {
-            SessionEvent::Message { msg, .. } => Some(msg),
-            _ => None,
-        })
         .filter_map(|msg| match &msg.content {
             MessageContent::Blocks(blocks) => Some(blocks),
             _ => None,
@@ -127,7 +123,7 @@ fn tool_result_pairs(agent: &runic_agent::Session) -> Vec<(String, String, bool)
 
 fn push_filler(agent: &mut runic_agent::Session, count: usize) {
     for _ in 0..count {
-        agent.state_mut().push_event(SessionEvent::Message {
+        agent.state_mut().emit(AgentEvent::Message {
             run_id: "filler".into(),
             msg: Message::user("x".repeat(600)),
             at: chrono::Utc::now(),
@@ -206,11 +202,11 @@ async fn run_survival_case(ability_count: usize) -> Result<(), TestCaseError> {
     }
 
     push_filler(&mut agent, 15);
-    let messages_before = agent.state().events().len();
+    let messages_before = agent.state().messages_for_provider().len();
 
     agent.run("trigger compaction").await.unwrap();
 
-    let compacted = agent.state().events().len() < messages_before;
+    let compacted = agent.state().messages_for_provider().len() < messages_before;
     prop_assert!(compacted, "filler did not actually trigger compaction");
 
     for id in &ids {
@@ -299,10 +295,10 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
     assert!(state_flag(&agent, &ability_activated_key("billing")));
 
     push_filler(&mut agent, 15);
-    let before = agent.state().events().len();
+    let before = agent.state().messages_for_provider().len();
     agent.run("trigger compaction").await.unwrap();
     assert!(
-        agent.state().events().len() < before,
+        agent.state().messages_for_provider().len() < before,
         "filler did not trigger compaction"
     );
 

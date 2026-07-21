@@ -12,8 +12,7 @@ use runic::agent::Session;
 use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_state::SessionEvent;
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {

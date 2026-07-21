@@ -669,15 +669,15 @@ async fn run_persists_events_for_thread_history() {
 
     let events = wait_for_stored_events(store.as_ref(), "alice", "persisted-thread", 5).await;
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("remember me"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("pong"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::RunEnd { outcome, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))
     }));
 
@@ -719,7 +719,7 @@ async fn replay_run_respects_last_event_id_and_finishes_closed_run() {
     let stored = wait_for_stored_events(store.as_ref(), "alice", "replay-thread", 5).await;
     let after_seq = stored
         .iter()
-        .find(|stored| matches!(stored.event, runic_state::SessionEvent::RunStart { .. }))
+        .find(|stored| matches!(stored.event, runic_substrate::SessionEvent::RunStart { .. }))
         .expect("run start persisted")
         .seq;
 
@@ -919,14 +919,14 @@ async fn run_with_artifact_ref_persists_only_the_reference() {
     let events = wait_for_stored_events(store.as_ref(), "alice", "reflike", 3).await;
     // The event log keeps the lean pointer …
     let kept_ref = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { id: rid, .. } if rid == &id))))
     });
     assert!(kept_ref, "the artifact_ref pointer should be persisted");
     // … and never the inline bytes.
     let inlined = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
     });
@@ -963,13 +963,13 @@ async fn inline_media_in_run_body_is_stored_as_a_ref() {
 
     let events = wait_for_stored_events(store.as_ref(), "alice", "inline", 3).await;
     let kept_ref = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { .. }))))
     });
     assert!(kept_ref, "inline media should be persisted as a ref");
     let inlined = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
     });
@@ -1015,14 +1015,14 @@ async fn run_body_ref_persists_canonical_mime_not_the_clients_claim() {
 
     let events = wait_for_stored_events(session.as_ref(), "alice", "mimethread", 3).await;
     let canonical = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c,
                     ContentBlock::ArtifactRef { media_type, .. } if media_type == "application/pdf"))))
     });
     assert!(canonical, "persisted ref should carry the stored mime");
     let lied = events.iter().any(|stored| {
-        matches!(&stored.event, runic_state::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
                 if b.iter().any(|c| matches!(c,
                     ContentBlock::ArtifactRef { media_type, .. } if media_type == "image/png"))))

@@ -6,9 +6,8 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{AgentError, Session};
+use runic_agent::{AgentError, AgentEvent, Session};
 use runic_provider::ProviderError;
-use runic_state::SessionEvent;
 use runic_types::MessageContent;
 
 #[tokio::test]
@@ -28,23 +27,23 @@ async fn text_only_run_emits_bookended_events_for_one_run_id() {
 
     let evs = drain_session(&mut events);
     // First event opens the run, last closes it.
-    assert!(matches!(evs.first(), Some(SessionEvent::RunStart { .. })));
-    assert!(matches!(evs.last(), Some(SessionEvent::RunEnd { .. })));
+    assert!(matches!(evs.first(), Some(AgentEvent::RunStarted { .. })));
+    assert!(matches!(evs.last(), Some(AgentEvent::RunEnd { .. })));
 
     // Every event belongs to the one run id minted at the top.
     let run_id = match evs.first().unwrap() {
-        SessionEvent::RunStart { run_id, .. } => run_id.clone(),
+        AgentEvent::RunStarted { run_id, .. } => run_id.clone(),
         _ => unreachable!(),
     };
     assert!(!run_id.is_empty());
     assert!(
-        evs.iter().all(|e| e.run_id() == run_id),
+        evs.iter().filter_map(|e| e.run_id()).all(|id| id == run_id),
         "all events share the run id: {evs:?}"
     );
 
     // The run is terminal: no in-flight run remains.
     assert!(
-        agent.state().current_run().is_none(),
+        agent.state().current_run_id().is_none(),
         "current_run must be cleared once the run ends"
     );
 }
@@ -67,10 +66,8 @@ async fn each_run_gets_a_fresh_run_id() {
 
     assert_ne!(id1, id2, "a new run must mint a new run id");
 
-    // Two runs, both ended, grouped in order.
-    let runs = agent.state().runs();
-    assert_eq!(runs.len(), 2);
-    assert!(runs.iter().all(|r| r.ended_at.is_some()));
+    assert_eq!(agent.state().stats().runs, 2);
+    assert!(agent.state().current_run_id().is_none(), "both runs ended");
 }
 
 #[tokio::test]
@@ -126,7 +123,7 @@ async fn provider_error_closes_the_run_and_leaves_nothing_in_flight() {
         .iter()
         .rev()
         .find_map(|e| match e {
-            SessionEvent::RunEnd { outcome, .. } => Some(outcome),
+            AgentEvent::RunEnd { outcome, .. } => Some(outcome),
             _ => None,
         })
         .expect("a RunEnd is emitted even on failure");
@@ -142,7 +139,7 @@ async fn provider_error_closes_the_run_and_leaves_nothing_in_flight() {
 
     // No hanging run.
     assert!(
-        agent.state().current_run().is_none(),
+        agent.state().current_run_id().is_none(),
         "a failed run must not stay in flight"
     );
 }
@@ -182,15 +179,15 @@ async fn provider_error_after_a_tool_round_trip_still_closes_cleanly() {
 
     assert!(matches!(
         drain_session(&mut events).last(),
-        Some(SessionEvent::RunEnd { .. })
+        Some(AgentEvent::RunEnd { .. })
     ));
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }
 
-fn first_run_id(evs: &[SessionEvent]) -> String {
+fn first_run_id(evs: &[AgentEvent]) -> String {
     evs.iter()
         .find_map(|e| match e {
-            SessionEvent::RunStart { run_id, .. } => Some(run_id.clone()),
+            AgentEvent::RunStarted { run_id, .. } => Some(run_id.clone()),
             _ => None,
         })
         .expect("a RunStart event")

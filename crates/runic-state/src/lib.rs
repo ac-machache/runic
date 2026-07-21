@@ -8,27 +8,21 @@
 //! - **session metadata** — `label` (OpenFang);
 //! - keyed by **`(user_id, session_id)`**.
 
-pub mod child;
 pub mod event;
-pub mod external;
 pub mod state;
 pub mod stats;
 pub mod tasks;
-pub mod timeline;
 
-pub use child::{ChildPersistence, ChildPersistenceHandle, ChildSink};
 pub use event::{
     AgentEvent, AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus,
-    HookLifecycle, RunEndStatus, RunOutcome, SessionEvent, ToolStatus,
+    HookLifecycle, RunEndStatus, RunOutcome, ToolStatus,
 };
-pub use external::ExternalEvents;
 pub use state::{
-    AgentState, EVENT_BROADCAST_CAPACITY, InvalidStateKey, MAX_STATE_KEY_BYTES, PersistSink,
-    RunTimeContext, RunView, new_run_id, validate_state_key,
+    AgentState, Emitter, InvalidStateKey, MAX_STATE_KEY_BYTES, Reader, RunTimeContext, new_run_id,
+    validate_state_key,
 };
 pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, ThreadStats, ToolStat};
 pub use tasks::{TaskRecord, TaskStatus};
-pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 
 #[cfg(test)]
 mod tests {
@@ -37,11 +31,29 @@ mod tests {
     use runic_types::Message;
 
     fn push_msg(s: &mut AgentState, run_id: &str, msg: Message) {
-        s.push_event(SessionEvent::Message {
+        s.emit(AgentEvent::Message {
             run_id: run_id.into(),
             msg,
             at: Utc::now(),
         });
+    }
+
+    fn run_started(run_id: &str) -> AgentEvent {
+        AgentEvent::RunStarted {
+            run_id: run_id.into(),
+            agent: None,
+            audit: None,
+            at: Utc::now(),
+        }
+    }
+
+    fn run_ended(run_id: &str) -> AgentEvent {
+        AgentEvent::RunEnd {
+            run_id: run_id.into(),
+            status: RunEndStatus::Completed,
+            outcome: RunOutcome::default(),
+            at: Utc::now(),
+        }
     }
 
     #[test]
@@ -50,7 +62,8 @@ mod tests {
         assert_eq!(s.user_id, "u1");
         assert_eq!(s.session_id, "sess-1");
         assert_eq!(s.system_prompt, "you are a bot");
-        assert!(s.events().is_empty());
+        assert!(s.messages_for_provider().is_empty());
+        assert_eq!(s.current_run_id(), None);
     }
 
     #[test]
@@ -65,12 +78,11 @@ mod tests {
     }
 
     #[test]
-    fn state_snapshot_is_non_destructive_compaction() {
+    fn state_snapshot_replaces_the_message_view() {
         let mut s = AgentState::new("u1", "sess", "");
         push_msg(&mut s, "r1", Message::user("a"));
         push_msg(&mut s, "r1", Message::user("b"));
-        // Compaction = a snapshot event, not an in-place trim.
-        s.push_event(SessionEvent::StateSnapshot {
+        s.emit(AgentEvent::StateSnapshot {
             run_id: "r1".into(),
             messages: vec![Message::user("compacted")],
             system_prompt: String::new(),
@@ -82,65 +94,30 @@ mod tests {
         });
         push_msg(&mut s, "r1", Message::user("c"));
         let m = s.messages_for_provider();
-        // [a,b] replaced by [compacted], then c appended → [compacted, c]
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].content.text_content(), "compacted");
         assert_eq!(m[1].content.text_content(), "c");
-        // …and pre-snapshot events leave RAM (the store keeps the full log):
-        assert_eq!(s.events().len(), 2);
     }
 
     #[test]
-    fn runs_group_by_id_and_current_run_is_unclosed() {
+    fn current_run_id_follows_the_unclosed_run() {
         let mut s = AgentState::new("u1", "sess", "");
-        s.push_event(SessionEvent::RunStart {
-            run_id: "a".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
-        s.push_event(SessionEvent::RunEnd {
-            run_id: "a".into(),
-            status: RunEndStatus::Completed,
-            outcome: RunOutcome::default(),
-            at: Utc::now(),
-        });
-        s.push_event(SessionEvent::RunStart {
-            run_id: "b".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
-        let runs = s.runs();
-        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b"]);
-        assert_eq!(s.current_run().unwrap().id, "b");
+        s.emit(run_started("a"));
+        s.emit(run_ended("a"));
+        assert_eq!(s.current_run_id(), None);
+        s.emit(run_started("b"));
+        assert_eq!(s.current_run_id(), Some("b"));
     }
 
     #[test]
     fn mid_run_compaction_keeps_the_in_flight_run_visible() {
         let mut s = AgentState::new("u1", "sess", "");
-        s.push_event(SessionEvent::RunStart {
-            run_id: "old".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
+        s.emit(run_started("old"));
         push_msg(&mut s, "old", Message::user("ancient"));
-        s.push_event(SessionEvent::RunEnd {
-            run_id: "old".into(),
-            status: RunEndStatus::Completed,
-            outcome: RunOutcome::default(),
-            at: Utc::now(),
-        });
-        s.push_event(SessionEvent::RunStart {
-            run_id: "live".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
+        s.emit(run_ended("old"));
+        s.emit(run_started("live"));
         push_msg(&mut s, "live", Message::user("now"));
-        s.push_event(SessionEvent::StateSnapshot {
+        s.emit(AgentEvent::StateSnapshot {
             run_id: "live".into(),
             messages: vec![Message::assistant("summary")],
             system_prompt: String::new(),
@@ -151,12 +128,7 @@ mod tests {
             at: Utc::now(),
         });
 
-        assert_eq!(s.current_run().unwrap().id, "live");
-        assert!(
-            !s.events()
-                .iter()
-                .any(|e| matches!(e, SessionEvent::RunEnd { run_id, .. } if run_id == "old"))
-        );
+        assert_eq!(s.current_run_id(), Some("live"));
         assert_eq!(s.stats().runs, 2, "runs count attempts, from RunStart");
     }
 
@@ -169,18 +141,19 @@ mod tests {
     }
 
     #[test]
-    fn push_event_broadcasts_to_subscribers() {
+    fn emit_reaches_the_installed_emitter() {
+        #[derive(Debug, Default)]
+        struct Spy(std::sync::Mutex<Vec<AgentEvent>>);
+        impl Emitter for Spy {
+            fn emit(&self, event: AgentEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let spy = std::sync::Arc::new(Spy::default());
         let mut s = AgentState::new("u1", "sess", "");
-        let (tx, _keep) = tokio::sync::broadcast::channel(16);
-        s.set_events_tx(tx);
-        let mut rx = s.subscribe_events().expect("channel installed");
-        s.push_event(SessionEvent::RunStart {
-            run_id: "r1".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
-        assert!(rx.try_recv().is_ok(), "subscriber should receive the event");
+        s.set_emitter(Some(spy.clone()));
+        s.emit(run_started("r1"));
+        assert_eq!(spy.0.lock().unwrap().len(), 1);
     }
 
     #[test]

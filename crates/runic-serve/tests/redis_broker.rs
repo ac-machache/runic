@@ -4,8 +4,7 @@ use std::time::Duration;
 use chrono::Utc;
 use redis::AsyncCommands;
 use runic_serve::{EventBroker, QueueNudge, RedisBroker};
-use runic_state::SessionEvent;
-use runic_substrate::SessionStore;
+use runic_substrate::{SessionEvent, SessionStore};
 use runic_types::Message;
 
 async fn broker() -> Option<std::sync::Arc<RedisBroker>> {

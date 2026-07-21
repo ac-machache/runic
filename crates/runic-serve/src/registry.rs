@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use runic_agent::{CancelToken, Session};
-use runic_state::{EVENT_BROADCAST_CAPACITY, PersistSink, SessionEvent};
-use runic_substrate::SessionStore;
+use runic_agent::{AgentEvent, CancelToken, Session};
+use runic_substrate::{SessionEvent, SessionStore};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 use tracing::Instrument;
 
@@ -20,10 +19,35 @@ use crate::error::ServeError;
 use crate::factory::BoxedAgentFactory;
 
 pub const DEFAULT_PERSIST_BACKLOG_MAX: u64 = 10_000;
+pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 const THREAD_LEASE_POLL: Duration = Duration::from_millis(250);
 const RETRY_BASE: Duration = Duration::from_millis(100);
 const RETRY_CAP: Duration = Duration::from_secs(5);
 const RETRY_ESCALATE_AFTER: u32 = 5;
+
+#[derive(Debug, Clone)]
+pub struct PersistSink {
+    tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
+    enqueued: Arc<AtomicU64>,
+}
+
+impl PersistSink {
+    pub fn new(tx: mpsc::UnboundedSender<Arc<SessionEvent>>) -> Self {
+        Self {
+            tx,
+            enqueued: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn send(&self, ev: Arc<SessionEvent>) {
+        self.enqueued.fetch_add(1, Ordering::SeqCst);
+        let _ = self.tx.send(ev);
+    }
+
+    pub fn enqueued(&self) -> Arc<AtomicU64> {
+        self.enqueued.clone()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct RunLimits {
@@ -381,7 +405,6 @@ async fn hydrate_agent_inner(
     let mut agent = factory.build(tenant, thread_id).await?;
 
     if factory.stateless() {
-        agent.state_mut().set_events_tx(begun.events_tx.clone());
         return Ok(agent);
     }
 
@@ -397,7 +420,7 @@ async fn hydrate_agent_inner(
         Ok(stored) => {
             span.record("events", stored.len());
             for entry in stored {
-                agent.state_mut().fold_event(entry.event);
+                agent.state_mut().fold(&entry.event.lift());
             }
         }
         Err(e) => {
@@ -405,8 +428,6 @@ async fn hydrate_agent_inner(
         }
     }
 
-    agent.state_mut().set_events_tx(begun.events_tx.clone());
-    agent.state_mut().set_persist_tx(begun.persist_sink.clone());
     let rx = std::mem::replace(&mut begun.persist_rx, mpsc::unbounded_channel().1);
     spawn_persister(
         rx,
@@ -580,6 +601,29 @@ pub fn spawn_lease_reaper(
             tokio::time::sleep(every).await;
         }
     })
+}
+
+pub fn tee_events(
+    persist: Option<PersistSink>,
+    broadcast: broadcast::Sender<Arc<SessionEvent>>,
+    sse: Option<mpsc::UnboundedSender<AgentEvent>>,
+) -> (Arc<dyn runic_state::Emitter>, tokio::task::JoinHandle<()>) {
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let handle = tokio::spawn(async move {
+        while let Some(ae) = agent_rx.recv().await {
+            if let Some(se) = runic_substrate::project(&ae) {
+                let shared = Arc::new(se);
+                if let Some(sink) = &persist {
+                    sink.send(shared.clone());
+                }
+                let _ = broadcast.send(shared);
+            }
+            if let Some(sse) = &sse {
+                let _ = sse.send(ae);
+            }
+        }
+    });
+    (Arc::new(runic_agent::ChannelEmitter(agent_tx)), handle)
 }
 
 fn spawn_persister(
@@ -1039,7 +1083,7 @@ mod tests {
         assert_eq!(agent.state().stats().total_tool_calls, 12);
         assert_eq!(agent.state().stats().turns, 2);
         assert_eq!(agent.state().messages_for_provider().len(), 2);
-        assert!(agent.state().current_run().is_none());
+        assert!(agent.state().current_run_id().is_none());
     }
 
     #[tokio::test]
@@ -1055,7 +1099,7 @@ mod tests {
             .unwrap();
 
         assert!(agent.state().messages_for_provider().is_empty());
-        agent.state_mut().push_event(message_event(9));
+        agent.state_mut().emit(message_event(9).lift());
         drop(agent);
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(store.read("t", "s").await.unwrap().len(), 1);

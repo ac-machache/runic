@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use runic_agent::ReminderQueue;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
-use runic_state::{AgentState, SessionEvent};
+use runic_state::{AgentEvent, AgentState};
 use runic_types::Message;
 
 pub struct ReminderHook {
@@ -35,11 +35,8 @@ impl WriteHook for ReminderHook {
             .map(|r| format!("<system-reminder>\n{r}\n</system-reminder>"))
             .collect::<Vec<_>>()
             .join("\n");
-        let run_id = state
-            .current_run()
-            .map(|r| r.id.clone())
-            .unwrap_or_else(|| "reminder".to_string());
-        state.push_event(SessionEvent::Message {
+        let run_id = state.current_run_id().unwrap_or("reminder").to_string();
+        state.emit(AgentEvent::Message {
             run_id,
             msg: Message::user(text),
             at: Utc::now(),
@@ -81,7 +78,6 @@ mod tests {
         let mut s = state();
         hook.before_model(&mut s).await;
         assert!(s.messages_for_provider().is_empty());
-        assert!(s.events().is_empty());
     }
 
     #[tokio::test]

@@ -1,18 +1,14 @@
 //! `AgentState` — the agent's working state for one conversation.
 
 use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use runic_types::Message;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
 
-use crate::event::SessionEvent;
-
-pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
+use crate::event::AgentEvent;
 
 pub fn new_run_id() -> String {
     format!("r-{}", uuid::Uuid::new_v4().simple())
@@ -47,28 +43,8 @@ pub fn validate_state_key(key: &str) -> Result<(), InvalidStateKey> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub struct PersistSink {
-    tx: mpsc::UnboundedSender<Arc<SessionEvent>>,
-    enqueued: Arc<AtomicU64>,
-}
-
-impl PersistSink {
-    pub fn new(tx: mpsc::UnboundedSender<Arc<SessionEvent>>) -> Self {
-        Self {
-            tx,
-            enqueued: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    pub fn send(&self, ev: Arc<SessionEvent>) {
-        self.enqueued.fetch_add(1, Ordering::SeqCst);
-        let _ = self.tx.send(ev);
-    }
-
-    pub fn enqueued(&self) -> Arc<AtomicU64> {
-        self.enqueued.clone()
-    }
+pub trait Emitter: Send + Sync + std::fmt::Debug {
+    fn emit(&self, event: AgentEvent);
 }
 
 #[derive(Default, Clone)]
@@ -124,7 +100,8 @@ pub struct AgentState {
     #[serde(default)]
     data: serde_json::Map<String, serde_json::Value>,
 
-    events: Vec<SessionEvent>,
+    #[serde(skip, default)]
+    current_run_id: Option<String>,
 
     #[serde(skip, default)]
     pub runtime: RunTimeContext,
@@ -133,10 +110,7 @@ pub struct AgentState {
     pub config: serde_json::Map<String, serde_json::Value>,
 
     #[serde(skip, default)]
-    events_tx: Option<broadcast::Sender<Arc<SessionEvent>>>,
-
-    #[serde(skip, default)]
-    persist_tx: Option<PersistSink>,
+    emitter: Option<Arc<dyn Emitter>>,
 
     #[serde(skip, default)]
     messages: Vec<Message>,
@@ -156,11 +130,10 @@ impl AgentState {
             stats: crate::stats::ThreadStats::default(),
             tasks: HashMap::new(),
             data: serde_json::Map::new(),
-            events: Vec::new(),
+            current_run_id: None,
             runtime: RunTimeContext::default(),
             config: serde_json::Map::new(),
-            events_tx: None,
-            persist_tx: None,
+            emitter: None,
             messages: Vec::new(),
         }
     }
@@ -169,38 +142,32 @@ impl AgentState {
         self.config.get(key)
     }
 
-    pub fn set_events_tx(&mut self, tx: broadcast::Sender<Arc<SessionEvent>>) {
-        self.events_tx = Some(tx);
+    pub fn set_emitter(&mut self, emitter: Option<Arc<dyn Emitter>>) {
+        self.emitter = emitter;
     }
 
-    pub fn set_persist_tx(&mut self, sink: PersistSink) {
-        self.persist_tx = Some(sink);
+    pub fn emitter(&self) -> Option<Arc<dyn Emitter>> {
+        self.emitter.clone()
     }
 
-    pub fn subscribe_events(&self) -> Option<broadcast::Receiver<Arc<SessionEvent>>> {
-        self.events_tx.as_ref().map(|tx| tx.subscribe())
-    }
-
-    pub fn push_event(&mut self, ev: SessionEvent) {
-        if self.events_tx.is_some() || self.persist_tx.is_some() {
-            let shared = Arc::new(ev.clone());
-            if let Some(tx) = &self.events_tx {
-                let _ = tx.send(shared.clone());
-            }
-            if let Some(sink) = &self.persist_tx {
-                sink.send(shared);
-            }
+    pub fn emit(&mut self, ev: AgentEvent) {
+        self.fold(&ev);
+        if let Some(emitter) = &self.emitter {
+            emitter.emit(ev);
         }
-        self.fold_event(ev);
     }
 
-    /// Fold without fanning to the sinks — for events that are already
-    /// persisted (replay, or a tool's out-of-dispatch emission).
-    pub fn fold_event(&mut self, ev: SessionEvent) {
-        self.stats.fold(&ev);
-        match &ev {
-            SessionEvent::Message { msg, .. } => self.messages.push(msg.clone()),
-            SessionEvent::TaskSpawned {
+    pub fn fold(&mut self, ev: &AgentEvent) {
+        self.stats.fold(ev);
+        match ev {
+            AgentEvent::RunStarted { run_id, .. } => {
+                self.current_run_id = Some(run_id.clone());
+            }
+            AgentEvent::RunEnd { .. } => {
+                self.current_run_id = None;
+            }
+            AgentEvent::Message { msg, .. } => self.messages.push(msg.clone()),
+            AgentEvent::TaskSpawned {
                 task_id,
                 agent,
                 prompt,
@@ -220,7 +187,7 @@ impl AgentState {
                     },
                 );
             }
-            SessionEvent::TaskFinished {
+            AgentEvent::TaskFinished {
                 task_id,
                 status,
                 result,
@@ -233,12 +200,11 @@ impl AgentState {
                     record.finished_at = Some(*at);
                 }
             }
-            SessionEvent::StateUpdated { key, value, .. } => {
+            AgentEvent::StateUpdated { key, value, .. } => {
                 self.data.insert(key.clone(), value.clone());
             }
-            SessionEvent::StateSnapshot {
+            AgentEvent::StateSnapshot {
                 messages,
-                run_id,
                 open_tasks,
                 data,
                 ..
@@ -253,21 +219,9 @@ impl AgentState {
                 if let Some(data) = data {
                     self.data = data.clone();
                 }
-                // Pre-snapshot events leave RAM; the store keeps the full log.
-                // The in-flight run's events stay so run bookkeeping works.
-                let cut = self.events.iter().rposition(
-                    |e| matches!(e, SessionEvent::RunStart { run_id: r, .. } if r == run_id),
-                );
-                match cut {
-                    Some(i) => {
-                        self.events.drain(..i);
-                    }
-                    None => self.events.clear(),
-                }
             }
             _ => {}
         }
-        self.events.push(ev);
     }
 
     pub fn update(
@@ -278,10 +232,10 @@ impl AgentState {
         let key = key.into();
         validate_state_key(&key)?;
         let run_id = self
-            .current_run()
-            .map(|r| r.id.clone())
+            .current_run_id
+            .clone()
             .unwrap_or_else(|| "update".to_string());
-        self.push_event(SessionEvent::StateUpdated {
+        self.emit(AgentEvent::StateUpdated {
             run_id,
             key,
             value,
@@ -306,8 +260,8 @@ impl AgentState {
         &self.tasks
     }
 
-    pub fn events(&self) -> &[SessionEvent] {
-        &self.events
+    pub fn current_run_id(&self) -> Option<&str> {
+        self.current_run_id.as_deref()
     }
 
     pub fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord> {
@@ -321,89 +275,10 @@ impl AgentState {
         open
     }
 
-    pub fn persist_sink(&self) -> Option<PersistSink> {
-        self.persist_tx.clone()
-    }
-
-    pub fn events_sender(&self) -> Option<broadcast::Sender<Arc<SessionEvent>>> {
-        self.events_tx.clone()
-    }
-
     pub fn messages_for_provider(&self) -> &[Message] {
         &self.messages
     }
 
-    /// Grouped view of runs, derived from the log. Cheap, on demand.
-    pub fn runs(&self) -> Vec<RunView<'_>> {
-        let mut views: Vec<RunView<'_>> = Vec::new();
-        let mut index: HashMap<&str, usize> = HashMap::new();
-        for ev in &self.events {
-            let id = ev.run_id();
-            let i = *index.entry(id).or_insert_with(|| {
-                views.push(RunView {
-                    id: id.to_string(),
-                    started_at: None,
-                    ended_at: None,
-                    events: Vec::new(),
-                });
-                views.len() - 1
-            });
-            views[i].events.push(ev);
-            match ev {
-                SessionEvent::RunStart { at, .. } => views[i].started_at = Some(*at),
-                SessionEvent::RunEnd { at, .. } => views[i].ended_at = Some(*at),
-                _ => {}
-            }
-        }
-        views
-    }
-
-    /// The most recent run with a `RunStart` but no `RunEnd` — found by scanning
-    /// from the end, without materializing every run.
-    pub fn current_run(&self) -> Option<RunView<'_>> {
-        let mut ended: HashSet<&str> = HashSet::new();
-        let mut current: Option<&str> = None;
-        for ev in self.events.iter().rev() {
-            match ev {
-                SessionEvent::RunEnd { run_id, .. } => {
-                    ended.insert(run_id);
-                }
-                SessionEvent::RunStart { run_id, .. } => {
-                    if !ended.contains(run_id.as_str()) {
-                        current = Some(run_id);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let id = current?;
-        let events: Vec<&SessionEvent> = self.events.iter().filter(|e| e.run_id() == id).collect();
-        let started_at = events.iter().find_map(|e| match e {
-            SessionEvent::RunStart { at, .. } => Some(*at),
-            _ => None,
-        });
-        Some(RunView {
-            id: id.to_string(),
-            started_at,
-            ended_at: None,
-            events,
-        })
-    }
-
-    /// Execution tree over the in-RAM working set; the store's full log gives
-    /// complete history through the same projection.
-    pub fn timeline(&self) -> Vec<crate::timeline::RunTrace> {
-        crate::timeline::project(&self.events)
-    }
-
-    pub fn timeline_for(&self, run_id: &str) -> Option<crate::timeline::RunTrace> {
-        crate::timeline::project(self.events.iter().filter(|e| e.run_id() == run_id))
-            .into_iter()
-            .next()
-    }
-
-    /// Most recent assistant text in the log (e.g. the final answer).
     pub fn last_assistant_text(&self) -> Option<String> {
         for msg in self.messages.iter().rev() {
             if msg.role == runic_types::Role::Assistant {
@@ -417,14 +292,65 @@ impl AgentState {
     }
 }
 
-// ─── Run view (derived) ──────────────────────────────────────────────────────
+pub trait Reader {
+    fn messages(&self) -> &[Message];
+    fn last_assistant_text(&self) -> Option<String>;
+    fn stats(&self) -> &crate::stats::ThreadStats;
+    fn tasks(&self) -> &HashMap<String, crate::tasks::TaskRecord>;
+    fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord>;
+    fn data(&self) -> &serde_json::Map<String, serde_json::Value>;
+    fn get(&self, key: &str) -> Option<&serde_json::Value>;
+    fn current_run_id(&self) -> Option<&str>;
+    fn config(&self, key: &str) -> Option<&serde_json::Value>;
+    fn runtime(&self) -> &RunTimeContext;
+}
 
-/// A read-only slice of the log for one run.
-pub struct RunView<'a> {
-    pub id: String,
-    pub started_at: Option<DateTime<Utc>>,
-    pub ended_at: Option<DateTime<Utc>>,
-    pub events: Vec<&'a SessionEvent>,
+impl Reader for AgentState {
+    fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+    fn last_assistant_text(&self) -> Option<String> {
+        for msg in self.messages.iter().rev() {
+            if msg.role == runic_types::Role::Assistant {
+                let text = msg.content.text_content();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        None
+    }
+    fn stats(&self) -> &crate::stats::ThreadStats {
+        &self.stats
+    }
+    fn tasks(&self) -> &HashMap<String, crate::tasks::TaskRecord> {
+        &self.tasks
+    }
+    fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord> {
+        let mut open: Vec<_> = self
+            .tasks
+            .values()
+            .filter(|task| task.status == crate::tasks::TaskStatus::Running)
+            .cloned()
+            .collect();
+        open.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
+        open
+    }
+    fn data(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.data
+    }
+    fn get(&self, key: &str) -> Option<&serde_json::Value> {
+        self.data.get(key)
+    }
+    fn current_run_id(&self) -> Option<&str> {
+        self.current_run_id.as_deref()
+    }
+    fn config(&self, key: &str) -> Option<&serde_json::Value> {
+        self.config.get(key)
+    }
+    fn runtime(&self) -> &RunTimeContext {
+        &self.runtime
+    }
 }
 
 #[cfg(test)]
@@ -432,41 +358,44 @@ mod tests {
     use super::*;
     use crate::event::HookLifecycle;
 
-    fn message(text: &str, user: bool) -> SessionEvent {
+    fn message(text: &str, user: bool) -> AgentEvent {
         let msg = if user {
             Message::user(text)
         } else {
             Message::assistant(text)
         };
-        SessionEvent::Message {
+        AgentEvent::Message {
             run_id: "r".into(),
             msg,
             at: Utc::now(),
         }
     }
 
-    #[test]
-    fn push_event_folds_messages_and_skips_non_messages() {
-        let mut state = AgentState::new("u", "s", "sys");
-        state.push_event(SessionEvent::RunStart {
-            run_id: "r".into(),
+    fn run_started(run_id: &str) -> AgentEvent {
+        AgentEvent::RunStarted {
+            run_id: run_id.into(),
             agent: None,
             audit: None,
             at: Utc::now(),
-        });
-        state.push_event(message("hello", true));
-        state.push_event(message("hi there", false));
-
-        let msgs = state.messages_for_provider();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(state.events().len(), 3);
+        }
     }
 
     #[test]
-    fn push_event_records_hook_ran_without_touching_messages() {
+    fn emit_folds_messages_and_skips_non_messages() {
         let mut state = AgentState::new("u", "s", "sys");
-        state.push_event(message("hello", true));
-        state.push_event(SessionEvent::HookFired {
+        state.emit(run_started("r"));
+        state.emit(message("hello", true));
+        state.emit(message("hi there", false));
+
+        assert_eq!(state.messages_for_provider().len(), 2);
+        assert_eq!(state.current_run_id(), Some("r"));
+    }
+
+    #[test]
+    fn a_hook_event_leaves_the_message_view_untouched() {
+        let mut state = AgentState::new("u", "s", "sys");
+        state.emit(message("hello", true));
+        state.emit(AgentEvent::HookFired {
             run_id: "r".into(),
             hook: "guard".into(),
             lifecycle: HookLifecycle::BeforeTool,
@@ -477,16 +406,14 @@ mod tests {
         });
 
         assert_eq!(state.messages_for_provider().len(), 1);
-        assert_eq!(state.events().len(), 2);
-        assert!(matches!(state.events()[1], SessionEvent::HookFired { .. }));
     }
 
     #[test]
     fn state_snapshot_replaces_the_message_view() {
         let mut state = AgentState::new("u", "s", "sys");
-        state.push_event(message("old one", true));
-        state.push_event(message("old two", false));
-        state.push_event(SessionEvent::StateSnapshot {
+        state.emit(message("old one", true));
+        state.emit(message("old two", false));
+        state.emit(AgentEvent::StateSnapshot {
             run_id: "r".into(),
             messages: vec![Message::user("compacted")],
             system_prompt: "sys".into(),
@@ -496,44 +423,12 @@ mod tests {
             data: None,
             at: Utc::now(),
         });
-        state.push_event(message("after", false));
+        state.emit(message("after", false));
 
         let msgs = state.messages_for_provider();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content.text_content(), "compacted");
         assert_eq!(msgs[1].content.text_content(), "after");
-    }
-
-    #[test]
-    fn view_matches_a_full_fold_after_replay_style_pushes() {
-        let mut state = AgentState::new("u", "s", "sys");
-        for ev in [
-            SessionEvent::RunStart {
-                run_id: "r".into(),
-                agent: None,
-                audit: None,
-                at: Utc::now(),
-            },
-            message("a", true),
-            message("b", false),
-            message("c", true),
-        ] {
-            state.push_event(ev);
-        }
-        let folded: Vec<_> = state
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                SessionEvent::Message { msg, .. } => Some(msg.content.text_content()),
-                _ => None,
-            })
-            .collect();
-        let view: Vec<_> = state
-            .messages_for_provider()
-            .iter()
-            .map(|m| m.content.text_content())
-            .collect();
-        assert_eq!(view, folded);
     }
 
     #[test]
@@ -557,41 +452,21 @@ mod tests {
 
         assert_eq!(state.get("ok/key"), Some(&serde_json::json!(1)));
         assert_eq!(state.data().len(), 1);
-        assert_eq!(state.events().len(), 1);
     }
 
     #[test]
-    fn runs_group_in_order_and_current_run_is_in_flight() {
+    fn current_run_id_tracks_the_in_flight_run() {
         let mut state = AgentState::new("u", "s", "sys");
-        state.push_event(SessionEvent::RunStart {
-            run_id: "r1".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
-        state.push_event(SessionEvent::RunEnd {
+        state.emit(run_started("r1"));
+        state.emit(AgentEvent::RunEnd {
             run_id: "r1".into(),
             status: crate::event::RunEndStatus::Completed,
             outcome: crate::event::RunOutcome::default(),
             at: Utc::now(),
         });
-        state.push_event(SessionEvent::RunStart {
-            run_id: "r2".into(),
-            agent: None,
-            audit: None,
-            at: Utc::now(),
-        });
+        assert_eq!(state.current_run_id(), None);
 
-        let runs = state.runs();
-        assert_eq!(
-            runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["r1", "r2"]
-        );
-        assert!(runs[0].ended_at.is_some());
-        assert!(runs[1].ended_at.is_none());
-
-        let current = state.current_run().unwrap();
-        assert_eq!(current.id, "r2");
-        assert!(current.ended_at.is_none());
+        state.emit(run_started("r2"));
+        assert_eq!(state.current_run_id(), Some("r2"));
     }
 }

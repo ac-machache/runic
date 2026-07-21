@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use runic_types::TokenUsage;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{DelegationStatus, RunEndStatus, SessionEvent, ToolStatus};
+use crate::event::{AgentEvent, DelegationStatus, RunEndStatus, ToolStatus};
 
 pub const MAX_TRACKED_TOOLS: usize = 64;
 pub const MAX_TRACKED_MODELS: usize = 16;
@@ -30,6 +30,8 @@ pub struct ThreadStats {
     pub cache_write_tokens: u64,
     pub model_ms: u64,
     pub last_prompt_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_model: Option<String>,
     pub total_tool_calls: u64,
     pub tools: HashMap<String, ToolStat>,
     pub other_tools: ToolStat,
@@ -44,15 +46,15 @@ pub struct ThreadStats {
 }
 
 impl ThreadStats {
-    pub fn fold(&mut self, event: &SessionEvent) {
+    pub fn fold(&mut self, event: &AgentEvent) {
         match event {
-            SessionEvent::RunStart { .. } => self.runs += 1,
-            SessionEvent::RunEnd { status, .. } => match status {
+            AgentEvent::RunStarted { .. } => self.runs += 1,
+            AgentEvent::RunEnd { status, .. } => match status {
                 RunEndStatus::Completed => {}
                 RunEndStatus::Failed(_) => self.errored_runs += 1,
                 RunEndStatus::Cancelled => self.cancelled_runs += 1,
             },
-            SessionEvent::TurnEnd {
+            AgentEvent::TurnEnd {
                 model,
                 usage,
                 model_ms,
@@ -65,6 +67,7 @@ impl ThreadStats {
                 self.cache_write_tokens += usage.cache_write_tokens;
                 self.model_ms += model_ms;
                 self.last_prompt_tokens = usage.input_tokens;
+                self.last_model = Some(model.clone());
                 let slot = if self.tokens_by_model.contains_key(model)
                     || self.tokens_by_model.len() < MAX_TRACKED_MODELS
                 {
@@ -74,7 +77,7 @@ impl ThreadStats {
                 };
                 slot.add(usage);
             }
-            SessionEvent::ToolFinished {
+            AgentEvent::ToolFinished {
                 tool,
                 status,
                 duration_ms,
@@ -94,22 +97,22 @@ impl ThreadStats {
                     stat.errors += 1;
                 }
             }
-            SessionEvent::DelegationFinished { status, usage, .. } => {
+            AgentEvent::DelegationFinished { status, usage, .. } => {
                 self.delegations += 1;
                 if matches!(status, DelegationStatus::Failed(_)) {
                     self.delegation_errors += 1;
                 }
                 self.delegated_usage.add(usage);
             }
-            SessionEvent::TaskSpawned { .. } => self.tasks_spawned += 1,
-            SessionEvent::TaskFinished { status, .. } => match status {
+            AgentEvent::TaskSpawned { .. } => self.tasks_spawned += 1,
+            AgentEvent::TaskFinished { status, .. } => match status {
                 crate::tasks::TaskStatus::Completed => self.tasks_finished += 1,
                 crate::tasks::TaskStatus::Failed | crate::tasks::TaskStatus::Cancelled => {
                     self.tasks_failed += 1
                 }
                 crate::tasks::TaskStatus::Running => {}
             },
-            SessionEvent::StateSnapshot {
+            AgentEvent::StateSnapshot {
                 stats: Some(stats), ..
             } => {
                 *self = (**stats).clone();
@@ -126,24 +129,26 @@ mod tests {
     use chrono::Utc;
     use runic_types::TokenUsage;
 
-    fn tool_result(tool: &str) -> SessionEvent {
+    fn tool_result(tool: &str) -> AgentEvent {
         tool_finished(tool, ToolStatus::Ok, 10)
     }
 
-    fn tool_finished(tool: &str, status: ToolStatus, duration_ms: u64) -> SessionEvent {
-        SessionEvent::ToolFinished {
+    fn tool_finished(tool: &str, status: ToolStatus, duration_ms: u64) -> AgentEvent {
+        AgentEvent::ToolFinished {
             run_id: "r1".into(),
             turn: 1,
             call_id: "c".into(),
             tool: tool.into(),
             status,
+            result: serde_json::Value::Null,
+            provenance: Vec::new(),
             duration_ms,
             at: Utc::now(),
         }
     }
 
-    fn run_start() -> SessionEvent {
-        SessionEvent::RunStart {
+    fn run_start() -> AgentEvent {
+        AgentEvent::RunStarted {
             run_id: "r1".into(),
             agent: None,
             audit: None,
@@ -151,8 +156,8 @@ mod tests {
         }
     }
 
-    fn run_end(status: RunEndStatus) -> SessionEvent {
-        SessionEvent::RunEnd {
+    fn run_end(status: RunEndStatus) -> AgentEvent {
+        AgentEvent::RunEnd {
             run_id: "r1".into(),
             status,
             outcome: RunOutcome::default(),
@@ -160,8 +165,8 @@ mod tests {
         }
     }
 
-    fn turn_end(model: &str, input: u64, output: u64, cache_read: u64, ms: u64) -> SessionEvent {
-        SessionEvent::TurnEnd {
+    fn turn_end(model: &str, input: u64, output: u64, cache_read: u64, ms: u64) -> AgentEvent {
+        AgentEvent::TurnEnd {
             run_id: "r1".into(),
             turn: 1,
             model: model.into(),
@@ -172,6 +177,7 @@ mod tests {
                 ..Default::default()
             },
             model_ms: ms,
+            stop_reason: String::new(),
             at: Utc::now(),
         }
     }
@@ -250,7 +256,7 @@ mod tests {
     #[test]
     fn delegation_edges_fold_into_delegated_usage() {
         let mut stats = ThreadStats::default();
-        stats.fold(&SessionEvent::DelegationFinished {
+        stats.fold(&AgentEvent::DelegationFinished {
             run_id: "r1".into(),
             turn: 1,
             call_id: "c".into(),
@@ -267,7 +273,7 @@ mod tests {
             child_persistence: None,
             at: Utc::now(),
         });
-        stats.fold(&SessionEvent::DelegationFinished {
+        stats.fold(&AgentEvent::DelegationFinished {
             run_id: "r1".into(),
             turn: 1,
             call_id: "c2".into(),
@@ -297,7 +303,7 @@ mod tests {
             total_tool_calls: 42,
             ..Default::default()
         };
-        stats.fold(&SessionEvent::StateSnapshot {
+        stats.fold(&AgentEvent::StateSnapshot {
             run_id: "r1".into(),
             messages: vec![],
             system_prompt: "sys".into(),
@@ -315,7 +321,7 @@ mod tests {
         let mut stats = ThreadStats::default();
         stats.fold(&tool_result("payment"));
 
-        stats.fold(&SessionEvent::StateSnapshot {
+        stats.fold(&AgentEvent::StateSnapshot {
             run_id: "r1".into(),
             messages: vec![],
             system_prompt: "sys".into(),

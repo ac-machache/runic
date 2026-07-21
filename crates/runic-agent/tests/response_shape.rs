@@ -40,7 +40,10 @@ async fn tool_use_block_without_parsed_tool_calls_does_not_crash_or_hang() {
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(outcome.total_turns, 1, "no dispatch ⇒ the run terminates");
     assert!(calls.lock().unwrap().is_empty(), "the tool must not run");
-    assert!(agent.state().current_run().is_none(), "run closed cleanly");
+    assert!(
+        agent.state().current_run_id().is_none(),
+        "run closed cleanly"
+    );
 }
 
 #[tokio::test]
@@ -94,5 +97,5 @@ async fn empty_content_and_no_calls_ends_cleanly() {
     let outcome = agent.run("go").await.unwrap();
     assert_eq!(outcome.total_turns, 1);
     assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }

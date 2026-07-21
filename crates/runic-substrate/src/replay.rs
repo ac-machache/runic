@@ -1,7 +1,8 @@
 //! Replay helpers — fold a stored event log back into an [`AgentState`] (or
 //! just its message list) ready to resume.
 
-use runic_state::{AgentState, SessionEvent};
+use crate::SessionEvent;
+use runic_state::AgentState;
 use runic_types::Message;
 
 use crate::{Error, SessionStore};
@@ -17,7 +18,7 @@ pub async fn replay_into_state(
     let stored = store.read(tenant, session_id).await?;
     let mut state = AgentState::new(tenant, session_id, system_prompt);
     for entry in stored {
-        state.push_event(entry.event);
+        state.fold(&entry.event.lift());
     }
     Ok(state)
 }

@@ -1,5 +1,3 @@
-//! `SessionEvent` — the unit of the event-sourced log.
-
 use chrono::{DateTime, Utc};
 use runic_types::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -193,166 +191,24 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum SessionEvent {
-    RunStart {
-        run_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        audit: Option<AuditStamp>,
-        at: DateTime<Utc>,
-    },
-
-    RunEnd {
-        run_id: String,
-        status: RunEndStatus,
-        outcome: RunOutcome,
-        at: DateTime<Utc>,
-    },
-
-    Message {
-        run_id: String,
-        msg: Message,
-        at: DateTime<Utc>,
-    },
-
-    TurnEnd {
-        run_id: String,
-        turn: u32,
-        model: String,
-        usage: TokenUsage,
-        model_ms: u64,
-        at: DateTime<Utc>,
-    },
-
-    ToolStarted {
-        run_id: String,
-        turn: u32,
-        call_id: String,
-        tool: String,
-        at: DateTime<Utc>,
-    },
-
-    ToolFinished {
-        run_id: String,
-        turn: u32,
-        call_id: String,
-        tool: String,
-        status: ToolStatus,
-        duration_ms: u64,
-        at: DateTime<Utc>,
-    },
-
-    DelegationStarted {
-        run_id: String,
-        turn: u32,
-        call_id: String,
-        agent: String,
-        mode: DelegationMode,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_session: Option<String>,
-        at: DateTime<Utc>,
-    },
-
-    DelegationFinished {
-        run_id: String,
-        turn: u32,
-        call_id: String,
-        agent: String,
-        status: DelegationStatus,
-        usage: TokenUsage,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        duration_ms: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_session: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_persistence: Option<ChildPersistenceStatus>,
-        at: DateTime<Utc>,
-    },
-
-    #[serde(alias = "HookRan")]
-    HookFired {
-        run_id: String,
-        hook: String,
-        lifecycle: HookLifecycle,
-        #[serde(default)]
-        hook_kind: String,
-        #[serde(default)]
-        outcome: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        note: Option<String>,
-        at: DateTime<Utc>,
-    },
-
-    StateSnapshot {
-        run_id: String,
-        messages: Vec<Message>,
-        system_prompt: String,
-        reason: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stats: Option<Box<crate::stats::ThreadStats>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        open_tasks: Option<Vec<crate::tasks::TaskRecord>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        data: Option<serde_json::Map<String, serde_json::Value>>,
-        at: DateTime<Utc>,
-    },
-
-    TaskSpawned {
-        run_id: String,
-        task_id: String,
-        agent: String,
-        prompt: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_session: Option<String>,
-        at: DateTime<Utc>,
-    },
-
-    TaskFinished {
-        run_id: String,
-        task_id: String,
-        status: crate::tasks::TaskStatus,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        at: DateTime<Utc>,
-    },
-
-    StateUpdated {
-        run_id: String,
-        key: String,
-        value: serde_json::Value,
-        at: DateTime<Utc>,
-    },
-
-    ToolDeferred {
-        run_id: String,
-        call_id: String,
-        channel: String,
-        payload: serde_json::Value,
-        at: DateTime<Utc>,
-    },
-}
-
-impl SessionEvent {
-    pub fn run_id(&self) -> &str {
+impl AgentEvent {
+    pub fn run_id(&self) -> Option<&str> {
         match self {
-            SessionEvent::RunStart { run_id, .. }
-            | SessionEvent::RunEnd { run_id, .. }
-            | SessionEvent::Message { run_id, .. }
-            | SessionEvent::TurnEnd { run_id, .. }
-            | SessionEvent::ToolStarted { run_id, .. }
-            | SessionEvent::ToolFinished { run_id, .. }
-            | SessionEvent::DelegationStarted { run_id, .. }
-            | SessionEvent::DelegationFinished { run_id, .. }
-            | SessionEvent::HookFired { run_id, .. }
-            | SessionEvent::StateSnapshot { run_id, .. }
-            | SessionEvent::TaskSpawned { run_id, .. }
-            | SessionEvent::TaskFinished { run_id, .. }
-            | SessionEvent::StateUpdated { run_id, .. }
-            | SessionEvent::ToolDeferred { run_id, .. } => run_id,
+            AgentEvent::TextDelta(_) | AgentEvent::ThinkingDelta(_) => None,
+            AgentEvent::RunStarted { run_id, .. }
+            | AgentEvent::Message { run_id, .. }
+            | AgentEvent::ToolStarted { run_id, .. }
+            | AgentEvent::ToolFinished { run_id, .. }
+            | AgentEvent::TurnEnd { run_id, .. }
+            | AgentEvent::ToolDeferred { run_id, .. }
+            | AgentEvent::HookFired { run_id, .. }
+            | AgentEvent::DelegationStarted { run_id, .. }
+            | AgentEvent::DelegationFinished { run_id, .. }
+            | AgentEvent::StateSnapshot { run_id, .. }
+            | AgentEvent::StateUpdated { run_id, .. }
+            | AgentEvent::TaskSpawned { run_id, .. }
+            | AgentEvent::TaskFinished { run_id, .. }
+            | AgentEvent::RunEnd { run_id, .. } => Some(run_id),
         }
     }
 }

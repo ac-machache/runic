@@ -5,7 +5,7 @@ use chrono::Utc;
 use runic_agent::Llm;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, Provider};
-use runic_state::{AgentState, SessionEvent};
+use runic_state::{AgentEvent, AgentState};
 use runic_types::{ContentBlock, Message, MessageContent, Role};
 
 pub const DEFAULT_SUMMARY_GUIDANCE: &str = "You compress conversation history. Summarize the transcript \
@@ -108,10 +108,7 @@ impl WriteHook for Compaction {
         messages.push(Message::assistant(format!("{SUMMARY_MARKER}\n{summary}")));
         messages.extend_from_slice(&msgs[split..]);
 
-        let run_id = state
-            .current_run()
-            .map(|r| r.id.clone())
-            .unwrap_or_else(|| "compaction".to_string());
+        let run_id = state.current_run_id().unwrap_or("compaction").to_string();
         let folded = split;
         let stats = state.stats().clone();
         let open_tasks = state.open_tasks();
@@ -122,14 +119,16 @@ impl WriteHook for Compaction {
             key.strip_prefix(super::task_reminder::NOTIFIED_KEY_PREFIX)
                 .is_none_or(|id| open_ids.contains(id))
         });
-        state.push_event(SessionEvent::StateSnapshot {
+        let reason = format!(
+            "context ~{est_tokens} tokens > {} max",
+            self.max_context_tokens
+        );
+        let system_prompt = state.system_prompt.clone();
+        state.emit(AgentEvent::StateSnapshot {
             run_id,
             messages,
-            system_prompt: state.system_prompt.clone(),
-            reason: format!(
-                "context ~{est_tokens} tokens > {} max",
-                self.max_context_tokens
-            ),
+            system_prompt,
+            reason,
             stats: Some(Box::new(stats)),
             open_tasks: Some(open_tasks),
             data: Some(data),

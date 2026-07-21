@@ -157,6 +157,7 @@ pub struct ToolContext {
     bag: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     config: serde_json::Map<String, serde_json::Value>,
     human: Option<Arc<dyn HumanInterface>>,
+    emitter: Option<Arc<dyn runic_state::Emitter>>,
 }
 
 impl ToolContext {
@@ -172,6 +173,7 @@ impl ToolContext {
             bag: HashMap::new(),
             config: serde_json::Map::new(),
             human: None,
+            emitter: None,
         }
     }
 
@@ -182,6 +184,39 @@ impl ToolContext {
 
     pub fn human(&self) -> Option<Arc<dyn HumanInterface>> {
         self.human.clone()
+    }
+
+    pub fn with_emitter(mut self, emitter: Option<Arc<dyn runic_state::Emitter>>) -> Self {
+        self.emitter = emitter;
+        self
+    }
+
+    pub fn emit(&self, event: runic_state::AgentEvent) {
+        if let Some(emitter) = &self.emitter {
+            emitter.emit(event);
+        }
+    }
+
+    pub fn emitter(&self) -> Option<Arc<dyn runic_state::Emitter>> {
+        self.emitter.clone()
+    }
+
+    pub fn update(&self, key: impl Into<String>, value: serde_json::Value) {
+        let key = key.into();
+        if runic_state::validate_state_key(&key).is_err() {
+            return;
+        }
+        let run_id = if self.run_id.is_empty() {
+            "update".to_string()
+        } else {
+            self.run_id.clone()
+        };
+        self.emit(runic_state::AgentEvent::StateUpdated {
+            run_id,
+            key,
+            value,
+            at: chrono::Utc::now(),
+        });
     }
 
     pub fn insert<T: 'static + Send + Sync>(&mut self, value: T) {

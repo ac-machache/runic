@@ -4,7 +4,7 @@
 
 use chrono::Utc;
 use runic_hook::{HookOutcome, HookSignal};
-use runic_state::{HookLifecycle, SessionEvent};
+use runic_state::HookLifecycle;
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
 
@@ -74,15 +74,6 @@ impl Session {
             HookOutcome::Cancel(reason) => Some(reason.clone()),
             _ => None,
         };
-        self.state.push_event(SessionEvent::HookFired {
-            run_id: run_id.to_string(),
-            hook: hook_name.to_string(),
-            lifecycle,
-            hook_kind: "write".to_string(),
-            outcome: kind.to_string(),
-            note: note.clone(),
-            at: Utc::now(),
-        });
         self.emit(AgentEvent::HookFired {
             run_id: run_id.to_string(),
             hook: hook_name.to_string(),
@@ -105,15 +96,6 @@ impl Session {
             return;
         }
         let kind = signal_kind(signal);
-        self.state.push_event(SessionEvent::HookFired {
-            run_id: run_id.to_string(),
-            hook: hook_name.to_string(),
-            lifecycle,
-            hook_kind: "read".to_string(),
-            outcome: kind.to_string(),
-            note: None,
-            at: Utc::now(),
-        });
         self.emit(AgentEvent::HookFired {
             run_id: run_id.to_string(),
             hook: hook_name.to_string(),

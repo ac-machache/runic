@@ -166,7 +166,10 @@ async fn write_hook_stop_before_model_halts_with_no_model_call() {
         0,
         "stop before_model must prevent the call"
     );
-    assert!(agent.state().current_run().is_none(), "run closed cleanly");
+    assert!(
+        agent.state().current_run_id().is_none(),
+        "run closed cleanly"
+    );
 }
 
 #[tokio::test]
@@ -240,7 +243,7 @@ async fn write_hook_stop_at_after_model_halts_before_a_second_turn() {
         calls.lock().unwrap().is_empty(),
         "no tool dispatched after stop"
     );
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
-use runic_state::{AgentState, SessionEvent, TaskStatus};
+use runic_state::{AgentEvent, AgentState, TaskStatus};
 use runic_types::Message;
 
 #[derive(Default)]
@@ -67,10 +67,10 @@ impl WriteHook for TaskReminder {
         }
 
         let run_id = state
-            .current_run()
-            .map(|r| r.id.clone())
-            .unwrap_or_else(|| "task-reminder".to_string());
-        state.push_event(SessionEvent::Message {
+            .current_run_id()
+            .unwrap_or("task-reminder")
+            .to_string();
+        state.emit(AgentEvent::Message {
             run_id,
             msg: Message::user(notes.join("\n")),
             at: Utc::now(),
@@ -90,7 +90,7 @@ mod tests {
     use super::*;
 
     fn spawn(s: &mut AgentState, id: &str) {
-        s.fold_event(SessionEvent::TaskSpawned {
+        s.emit(AgentEvent::TaskSpawned {
             run_id: "r".into(),
             task_id: id.into(),
             agent: "scout".into(),
@@ -101,7 +101,7 @@ mod tests {
     }
 
     fn finish(s: &mut AgentState, id: &str, status: TaskStatus, result: Option<&str>) {
-        s.fold_event(SessionEvent::TaskFinished {
+        s.emit(AgentEvent::TaskFinished {
             run_id: "r".into(),
             task_id: id.into(),
             status,

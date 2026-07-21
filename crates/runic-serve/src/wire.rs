@@ -11,7 +11,8 @@
 
 use chrono::{DateTime, Utc};
 use runic_agent::AgentEvent;
-use runic_state::{HookLifecycle, SessionEvent};
+use runic_state::HookLifecycle;
+use runic_substrate::SessionEvent;
 use runic_types::Message;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -319,16 +320,21 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
                 stop_reason: Some("suspended".to_string()),
             },
         ],
-        AgentEvent::RunEnd { outcome, .. } => vec![
-            WireEvent::Usage {
+        AgentEvent::RunEnd {
+            status, outcome, ..
+        } => {
+            let mut wires = vec![WireEvent::Usage {
                 input_tokens: outcome.usage.input_tokens,
                 output_tokens: outcome.usage.output_tokens,
-            },
-            WireEvent::Done {
-                total_turns: Some(outcome.total_turns),
-                stop_reason: outcome.stop_reason,
-            },
-        ],
+            }];
+            if !matches!(status, runic_state::RunEndStatus::Failed(_)) {
+                wires.push(WireEvent::Done {
+                    total_turns: Some(outcome.total_turns),
+                    stop_reason: outcome.stop_reason,
+                });
+            }
+            wires
+        }
         AgentEvent::HookFired {
             hook,
             hook_kind,
@@ -343,15 +349,80 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             outcome,
             note,
         }],
-        // Committed-message + state-mutation events are wired to the stream in
-        // the loop→emit cut (Commit B); until then they can't reach here.
-        AgentEvent::Message { .. }
-        | AgentEvent::DelegationStarted { .. }
-        | AgentEvent::DelegationFinished { .. }
-        | AgentEvent::StateSnapshot { .. }
-        | AgentEvent::StateUpdated { .. }
-        | AgentEvent::TaskSpawned { .. }
-        | AgentEvent::TaskFinished { .. } => vec![],
+        AgentEvent::Message { run_id, msg, at } => vec![WireEvent::Message { run_id, msg, at }],
+        AgentEvent::DelegationStarted {
+            run_id,
+            call_id,
+            agent,
+            mode,
+            child_session,
+            ..
+        } => vec![WireEvent::DelegationStart {
+            run_id,
+            call_id,
+            agent,
+            mode: match mode {
+                runic_state::DelegationMode::Sync => "sync".to_string(),
+                runic_state::DelegationMode::Parallel => "parallel".to_string(),
+                runic_state::DelegationMode::Background => "background".to_string(),
+            },
+            child_session,
+        }],
+        AgentEvent::DelegationFinished {
+            run_id,
+            call_id,
+            agent,
+            status,
+            usage,
+            model,
+            duration_ms,
+            child_session,
+            child_persistence,
+            ..
+        } => vec![WireEvent::DelegationFinish {
+            run_id,
+            call_id,
+            agent,
+            ok: matches!(status, runic_state::DelegationStatus::Ok),
+            model,
+            duration_ms,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            child_session,
+            child_persisted: child_persistence
+                .map(|p| matches!(p, runic_state::ChildPersistenceStatus::Flushed)),
+        }],
+        AgentEvent::StateUpdated { run_id, key, .. } => {
+            vec![WireEvent::StateUpdated { run_id, key }]
+        }
+        AgentEvent::TaskSpawned {
+            run_id,
+            task_id,
+            agent,
+            ..
+        } => vec![WireEvent::TaskSpawned {
+            run_id,
+            task_id,
+            agent,
+        }],
+        AgentEvent::TaskFinished {
+            run_id,
+            task_id,
+            status,
+            result,
+            ..
+        } => vec![WireEvent::TaskFinished {
+            run_id,
+            task_id,
+            status: match status {
+                runic_state::TaskStatus::Running => "running".to_string(),
+                runic_state::TaskStatus::Completed => "completed".to_string(),
+                runic_state::TaskStatus::Failed => "failed".to_string(),
+                runic_state::TaskStatus::Cancelled => "cancelled".to_string(),
+            },
+            preview: result.map(|r| truncate(&r, 300)),
+        }],
+        AgentEvent::StateSnapshot { .. } => vec![],
     }
 }
 

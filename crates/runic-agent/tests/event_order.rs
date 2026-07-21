@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use harness::*;
-use runic_agent::{CancelToken, RunContext, Session};
+use runic_agent::{AgentEvent, CancelToken, RunContext, Session};
 use runic_hook::{HookLifecycle, HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::ProviderError;
-use runic_state::{AgentState, SessionEvent};
+use runic_state::AgentState;
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
 
@@ -35,7 +35,7 @@ async fn every_hook_execution_leaves_a_hookfired_entry() {
     agent.run("go").await.unwrap();
 
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -85,16 +85,16 @@ async fn default_bodies_fire_without_leaving_audit_entries() {
 
     agent.run("go").await.unwrap();
 
-    let hook_events: Vec<SessionEvent> = drain_session(&mut events)
+    let hook_events: Vec<AgentEvent> = drain_session(&mut events)
         .into_iter()
-        .filter(|e| matches!(e, SessionEvent::HookFired { .. }))
+        .filter(|e| matches!(e, AgentEvent::HookFired { .. }))
         .collect();
     assert_eq!(
         hook_events.len(),
         1,
         "an unscoped hook fires at all six points but only its overridden method leaves an entry"
     );
-    let SessionEvent::HookFired {
+    let AgentEvent::HookFired {
         lifecycle, outcome, ..
     } = &hook_events[0]
     else {
@@ -135,7 +135,7 @@ async fn scoped_hook_fires_only_at_its_declared_points() {
     agent.run("go").await.unwrap();
 
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -186,12 +186,12 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
 
     agent.run("go").await.unwrap();
 
-    let hook_events: Vec<SessionEvent> = drain_session(&mut events)
+    let hook_events: Vec<AgentEvent> = drain_session(&mut events)
         .into_iter()
-        .filter(|e| matches!(e, SessionEvent::HookFired { .. }))
+        .filter(|e| matches!(e, AgentEvent::HookFired { .. }))
         .collect();
     assert_eq!(hook_events.len(), 1);
-    let SessionEvent::HookFired {
+    let AgentEvent::HookFired {
         hook,
         lifecycle,
         hook_kind,
@@ -209,15 +209,22 @@ async fn scoped_read_hook_records_one_entry_with_full_fields() {
     assert!(note.is_none());
 }
 
-fn terminal_shape(evs: &[SessionEvent]) -> (usize, usize, Option<runic_state::RunEndStatus>) {
+fn durable_kinds(evs: &[AgentEvent]) -> Vec<&'static str> {
+    session_kinds(evs)
+        .into_iter()
+        .filter(|kind| *kind != "TextDelta" && *kind != "ThinkingDelta")
+        .collect()
+}
+
+fn terminal_shape(evs: &[AgentEvent]) -> (usize, usize, Option<runic_state::RunEndStatus>) {
     let starts = evs
         .iter()
-        .filter(|e| matches!(e, SessionEvent::RunStart { .. }))
+        .filter(|e| matches!(e, AgentEvent::RunStarted { .. }))
         .count();
     let ends: Vec<_> = evs
         .iter()
         .filter_map(|e| match e {
-            SessionEvent::RunEnd { status, .. } => Some(status.clone()),
+            AgentEvent::RunEnd { status, .. } => Some(status.clone()),
             _ => None,
         })
         .collect();
@@ -268,7 +275,7 @@ async fn a_failing_after_model_hook_cannot_erase_the_turns_accounting() {
     let evs = drain_session(&mut events);
     let turn_ends = evs
         .iter()
-        .filter(|e| matches!(e, SessionEvent::TurnEnd { .. }))
+        .filter(|e| matches!(e, AgentEvent::TurnEnd { .. }))
         .count();
     assert_eq!(
         turn_ends, 1,
@@ -304,18 +311,21 @@ async fn the_audit_stamp_carries_actor_and_model_but_never_the_config_map() {
     agent.run_with("go", ctx).await.unwrap();
 
     let evs = drain_session(&mut events);
-    let run_start = evs
+    let audit = evs
         .iter()
-        .find(|e| matches!(e, SessionEvent::RunStart { .. }))
-        .unwrap();
-    let json = serde_json::to_string(run_start).unwrap();
-    assert!(json.contains("user-42"));
-    assert!(json.contains("test"));
+        .find_map(|e| match e {
+            AgentEvent::RunStarted { audit, .. } => audit.clone(),
+            _ => None,
+        })
+        .expect("run start carries an audit stamp");
+    assert_eq!(audit.actor.as_deref(), Some("user-42"));
+    assert_eq!(audit.model.as_deref(), Some("test"));
+    let json = serde_json::to_string(&audit).unwrap();
     assert!(!json.contains("supersecret"), "{json}");
     assert!(!json.contains("hunter2"), "{json}");
     assert!(!json.contains("api_key"), "{json}");
 
-    let all = serde_json::to_string(&evs).unwrap();
+    let all = format!("{evs:?}");
     assert!(!all.contains("supersecret"), "no event may carry config");
 }
 
@@ -333,7 +343,7 @@ async fn precancel_path_emits_only_runstart_message_runend() {
         .unwrap();
 
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec!["RunStart", "Message", "RunEnd"]
     );
 }
@@ -361,7 +371,7 @@ async fn cancel_after_tool_stops_before_the_next_assistant_message() {
         .unwrap();
 
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user
@@ -387,7 +397,7 @@ async fn first_call_failure_emits_runstart_message_runend() {
 
     // No assistant message was ever appended (the call failed before that).
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec!["RunStart", "Message", "RunEnd"]
     );
 }
@@ -410,7 +420,7 @@ async fn failure_after_a_tool_round_trip_keeps_the_partial_log() {
     agent.run("go").await.unwrap_err();
 
     assert_eq!(
-        session_kinds(&drain_session(&mut events)),
+        durable_kinds(&drain_session(&mut events)),
         vec![
             "RunStart",
             "Message",      // user

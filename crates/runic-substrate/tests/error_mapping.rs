@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{
     ArtifactSource, ArtifactStore, Error, MemoryArtifactStore, MemorySessionStore, Result,
     SessionMeta, SessionStore, StoredEvent,

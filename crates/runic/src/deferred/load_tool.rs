@@ -2,9 +2,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use runic_skills::SkillSet;
-use runic_state::{ExternalEvents, SessionEvent};
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
 
 use super::gate::LoadedAbilities;
@@ -72,24 +70,9 @@ impl Tool for LoadAbilityTool {
         };
 
         let tool_names: Vec<&str> = entry.bundle.tools.iter().map(|tool| tool.name()).collect();
-        match ctx.get::<ExternalEvents>() {
-            Some(events) => {
-                let emit = |key: String| {
-                    events.emit(SessionEvent::StateUpdated {
-                        run_id: ctx.run_id.clone(),
-                        key,
-                        value: serde_json::Value::Bool(true),
-                        at: Utc::now(),
-                    })
-                };
-                emit(ability_activated_key(id));
-                for name in &tool_names {
-                    emit(activated_key(name));
-                }
-            }
-            None => {
-                tracing::warn!(ability = %id, "no event rail in tool context — activation not recorded");
-            }
+        ctx.update(ability_activated_key(id), serde_json::Value::Bool(true));
+        for name in &tool_names {
+            ctx.update(activated_key(name), serde_json::Value::Bool(true));
         }
         self.loaded.mark(id);
 

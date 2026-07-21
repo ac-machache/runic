@@ -19,12 +19,13 @@ use std::time::Duration;
 
 use runic_hook::{ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
-use runic_state::AgentState;
+use runic_state::{AgentState, Emitter};
 use runic_tool::{
     ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, ToolCatalog, ToolSpec,
 };
 use tokio::sync::mpsc;
 
+mod emit;
 mod external;
 mod llm;
 pub(crate) mod run;
@@ -34,6 +35,7 @@ mod turn;
 pub mod loop_guard;
 pub mod retry;
 
+pub use emit::{ChannelEmitter, ToolEmitter};
 pub use external::{ReminderQueue, TasksSnapshot};
 pub use llm::{Llm, LlmOutput, schema_of};
 pub use runic_state::{AgentEvent, RunOutcome};
@@ -103,10 +105,7 @@ pub struct RunContext {
     /// Optional steering channel: text pushed here is injected into the
     /// conversation as a user message at the start of the next turn.
     pub steering: Option<mpsc::UnboundedReceiver<String>>,
-    /// Optional live-event sink. When set, the loop streams the model via
-    /// `Provider::stream` and emits [`AgentEvent`]s (token deltas + tool
-    /// lifecycle) here.
-    pub events: Option<mpsc::UnboundedSender<AgentEvent>>,
+    pub events: Option<Arc<dyn Emitter>>,
     /// Optional human channel for HITL tools (`ask_user` / `escalate_to_human`).
     /// Provided per run by the surface; flows into [`ToolContext`].
     pub human: Option<Arc<dyn HumanInterface>>,
@@ -121,10 +120,6 @@ pub struct RunContext {
     /// Invocation mode recorded on the run trace span (`stream` / `wait` /
     /// `background` / `queued`); defaults to `direct`.
     pub mode: Option<&'static str>,
-    /// Optional child-transcript persistence for this run's delegations. When
-    /// set, the delegate tool begins a durable child session per delegation;
-    /// absent → children stay ephemeral.
-    pub child_persistence: Option<runic_state::ChildPersistenceHandle>,
 }
 
 impl RunContext {
@@ -157,8 +152,7 @@ impl RunContext {
         self.steering = Some(steering);
         self
     }
-    /// Attach a live-event sink (enables streaming for this run).
-    pub fn with_events(mut self, events: mpsc::UnboundedSender<AgentEvent>) -> Self {
+    pub fn with_events(mut self, events: Arc<dyn Emitter>) -> Self {
         self.events = Some(events);
         self
     }
@@ -169,11 +163,6 @@ impl RunContext {
     }
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
-        self
-    }
-
-    pub fn with_child_persistence(mut self, handle: runic_state::ChildPersistenceHandle) -> Self {
-        self.child_persistence = Some(handle);
         self
     }
 
@@ -278,9 +267,6 @@ pub struct Session {
     pub(crate) state: AgentState,
     pub(crate) config: AgentConfig,
     pub(crate) guard: loop_guard::LoopGuard,
-    /// Live-event sink, installed per-run from [`RunContext`] (None for a
-    /// non-streaming run).
-    pub(crate) events: Option<mpsc::UnboundedSender<AgentEvent>>,
     /// Human channel, installed per-run from [`RunContext`] (None when no HITL
     /// surface is wired).
     pub(crate) human: Option<Arc<dyn HumanInterface>>,
@@ -290,11 +276,10 @@ pub struct Session {
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
     pub(crate) spill: Option<Arc<dyn ToolOutputSpill>>,
-    pub(crate) child_persistence: Option<runic_state::ChildPersistenceHandle>,
     pub(crate) transient_tool_outputs: HashMap<String, Vec<serde_json::Value>>,
     pub(crate) pending_deferral: Option<PendingDeferral>,
-    pub(crate) pending_external_tx: mpsc::UnboundedSender<runic_state::SessionEvent>,
-    pub(crate) pending_external_rx: mpsc::UnboundedReceiver<runic_state::SessionEvent>,
+    pub(crate) fold_tx: mpsc::UnboundedSender<AgentEvent>,
+    pub(crate) fold_rx: mpsc::UnboundedReceiver<AgentEvent>,
 }
 
 impl Session {
@@ -317,11 +302,8 @@ impl Session {
             .collect()
     }
 
-    /// Emit a live event if a streaming sink is attached for this run.
-    pub(crate) fn emit(&self, event: AgentEvent) {
-        if let Some(sink) = &self.events {
-            let _ = sink.send(event);
-        }
+    pub(crate) fn emit(&mut self, event: AgentEvent) {
+        self.state.emit(event);
     }
 
     /// Materialize this conversation's activated tools from state: every
@@ -522,16 +504,14 @@ impl SessionBuilder {
             state,
             config: self.config,
             guard: loop_guard::LoopGuard::default(),
-            events: None,
             human: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
             spill: self.spill,
-            child_persistence: None,
             transient_tool_outputs: HashMap::new(),
             pending_deferral: None,
-            pending_external_tx: pending_tx,
-            pending_external_rx: pending_rx,
+            fold_tx: pending_tx,
+            fold_rx: pending_rx,
         }
     }
 }

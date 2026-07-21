@@ -22,7 +22,7 @@ impl Session {
         let span = tracing::info_span!(
             "provider_call",
             model = %request.model,
-            streaming = self.events.is_some(),
+            streaming = self.state.emitter().is_some(),
             messages = request.messages.len(),
             tools = request.tools.len(),
             input_tokens = tracing::field::Empty,
@@ -68,7 +68,7 @@ impl Session {
                 "unresolved artifact reference {id} reached the model call"
             )));
         }
-        if self.events.is_some() {
+        if self.state.emitter().is_some() {
             self.call_model_streaming(request).await
         } else {
             self.call_model_complete(request).await
@@ -82,19 +82,18 @@ impl Session {
     ) -> Result<(CompletionResponse, String), AgentError> {
         let (se_tx, mut se_rx) = mpsc::channel::<StreamEvent>(64);
         let provider = self.provider.clone();
-        let sink = self.events.clone();
+        let sink = self.state.emitter();
 
-        // Forward provider stream events → AgentEvents until the channel closes.
         let forward = async move {
             while let Some(ev) = se_rx.recv().await {
                 let Some(sink) = &sink else { continue };
-                let _ = match ev {
-                    StreamEvent::TextDelta { text } => sink.send(AgentEvent::TextDelta(text)),
+                match ev {
+                    StreamEvent::TextDelta { text } => sink.emit(AgentEvent::TextDelta(text)),
                     StreamEvent::ThinkingDelta { text } => {
-                        sink.send(AgentEvent::ThinkingDelta(text))
+                        sink.emit(AgentEvent::ThinkingDelta(text))
                     }
-                    _ => Ok(()),
-                };
+                    _ => {}
+                }
             }
         };
 

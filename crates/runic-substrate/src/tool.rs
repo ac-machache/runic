@@ -104,9 +104,9 @@ impl Tool for SearchChatsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SessionEvent;
     use crate::{MemorySessionStore, SessionStore};
     use chrono::Utc;
-    use runic_state::SessionEvent;
     use runic_types::Message;
 
     async fn seed(store: &MemorySessionStore, tenant: &str, session: &str, text: &str) {

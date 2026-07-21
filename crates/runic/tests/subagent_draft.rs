@@ -353,13 +353,21 @@ async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
         .await
         .unwrap();
 
+    let (cap_tx, mut cap_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .state_mut()
+        .set_emitter(Some(Arc::new(runic_agent::ChannelEmitter(cap_tx))));
+
     let outcome = agent.run("start").await.unwrap();
 
-    let events = agent.state().events();
+    let mut events: Vec<runic_state::AgentEvent> = Vec::new();
+    while let Ok(ev) = cap_rx.try_recv() {
+        events.push(ev);
+    }
     let started = events
         .iter()
         .find_map(|e| match e {
-            runic_state::SessionEvent::DelegationStarted {
+            runic_state::AgentEvent::DelegationStarted {
                 agent, mode, turn, ..
             } => Some((agent.clone(), *mode, *turn)),
             _ => None,
@@ -372,7 +380,7 @@ async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
     let finished = events
         .iter()
         .find_map(|e| match e {
-            runic_state::SessionEvent::DelegationFinished {
+            runic_state::AgentEvent::DelegationFinished {
                 agent,
                 status,
                 usage,
@@ -424,13 +432,21 @@ async fn parallel_delegation_emits_an_edge_per_child() {
         .await
         .unwrap();
 
+    let (cap_tx, mut cap_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .state_mut()
+        .set_emitter(Some(Arc::new(runic_agent::ChannelEmitter(cap_tx))));
+
     agent.run("start").await.unwrap();
 
-    let events = agent.state().events();
+    let mut events: Vec<runic_state::AgentEvent> = Vec::new();
+    while let Ok(ev) = cap_rx.try_recv() {
+        events.push(ev);
+    }
     let mut started: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            runic_state::SessionEvent::DelegationStarted {
+            runic_state::AgentEvent::DelegationStarted {
                 agent,
                 mode,
                 call_id,
@@ -462,7 +478,7 @@ async fn parallel_delegation_emits_an_edge_per_child() {
     let mut finished: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
-            runic_state::SessionEvent::DelegationFinished { agent, status, .. } => {
+            runic_state::AgentEvent::DelegationFinished { agent, status, .. } => {
                 Some((agent.clone(), status.clone()))
             }
             _ => None,

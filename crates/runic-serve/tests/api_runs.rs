@@ -1025,9 +1025,9 @@ async fn streamed_lifecycle_is_persisted_for_replay() {
     let kinds: Vec<&str> = events
         .iter()
         .map(|s| match &s.event {
-            runic_state::SessionEvent::RunStart { .. } => "run_start",
-            runic_state::SessionEvent::RunEnd { .. } => "run_end",
-            runic_state::SessionEvent::Message { .. } => "message",
+            runic_substrate::SessionEvent::RunStart { .. } => "run_start",
+            runic_substrate::SessionEvent::RunEnd { .. } => "run_end",
+            runic_substrate::SessionEvent::Message { .. } => "message",
             _ => "other",
         })
         .collect();
@@ -1180,7 +1180,7 @@ async fn seed_paused_deferred_run(
             .append(
                 TENANT,
                 thread,
-                &runic_state::SessionEvent::Message {
+                &runic_substrate::SessionEvent::Message {
                     run_id: run_id.to_string(),
                     msg: Message::assistant_with_blocks(vec![ContentBlock::ToolUse {
                         id: call_id.to_string(),
@@ -1198,7 +1198,7 @@ async fn seed_paused_deferred_run(
         .append(
             TENANT,
             thread,
-            &runic_state::SessionEvent::ToolDeferred {
+            &runic_substrate::SessionEvent::ToolDeferred {
                 run_id: run_id.to_string(),
                 call_id: call_id.to_string(),
                 channel: "human_ask".to_string(),
@@ -1231,7 +1231,7 @@ async fn ask_defers_then_answer_resumes_the_run_to_completion() {
         .unwrap()
         .into_iter()
         .any(|e| matches!(&e.event,
-            runic_state::SessionEvent::Message { msg, .. }
+            runic_substrate::SessionEvent::Message { msg, .. }
                 if matches!(&msg.content, MessageContent::Blocks(b)
                     if b.iter().any(|blk| matches!(blk, ContentBlock::Text { text, .. } if text == "done")))));
     assert!(answered, "the resumed run produced its final answer");
@@ -1433,7 +1433,7 @@ async fn answering_a_deferred_call_without_matching_tool_use_is_400_and_stays_pa
         .into_iter()
         .filter(|e| {
             matches!(&e.event,
-            runic_state::SessionEvent::Message { msg, .. }
+            runic_substrate::SessionEvent::Message { msg, .. }
                 if matches!(&msg.content, MessageContent::Blocks(blocks)
                     if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
         })
@@ -1489,7 +1489,7 @@ impl SessionStore for RacingResumeStore {
         &self,
         tenant: &str,
         session_id: &str,
-        event: &runic_state::SessionEvent,
+        event: &runic_substrate::SessionEvent,
     ) -> runic_substrate::Result<u64> {
         self.inner.append(tenant, session_id, event).await
     }
@@ -1498,7 +1498,7 @@ impl SessionStore for RacingResumeStore {
         &self,
         tenant: &str,
         session_id: &str,
-        events: &[runic_state::SessionEvent],
+        events: &[runic_substrate::SessionEvent],
     ) -> runic_substrate::Result<()> {
         self.inner.append_batch(tenant, session_id, events).await
     }
@@ -1586,7 +1586,7 @@ impl SessionStore for RacingResumeStore {
         &self,
         tenant: &str,
         run_id: &str,
-        event: &runic_state::SessionEvent,
+        event: &runic_substrate::SessionEvent,
     ) -> runic_substrate::Result<bool> {
         self.resume_barrier.wait().await;
         self.inner.deliver_and_resume(tenant, run_id, event).await
@@ -1622,7 +1622,7 @@ async fn concurrent_answers_to_the_same_deferred_call_accept_only_one() {
         .into_iter()
         .filter(|e| {
             matches!(&e.event,
-            runic_state::SessionEvent::Message { msg, .. }
+            runic_substrate::SessionEvent::Message { msg, .. }
                 if matches!(&msg.content, MessageContent::Blocks(blocks)
                     if blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }))))
         })
@@ -1703,7 +1703,7 @@ impl SessionStore for SlowStore {
         &self,
         tenant: &str,
         session_id: &str,
-        event: &runic_state::SessionEvent,
+        event: &runic_substrate::SessionEvent,
     ) -> runic_substrate::Result<u64> {
         tokio::time::sleep(self.delay).await;
         self.inner.append(tenant, session_id, event).await
@@ -1713,7 +1713,7 @@ impl SessionStore for SlowStore {
         &self,
         tenant: &str,
         session_id: &str,
-        events: &[runic_state::SessionEvent],
+        events: &[runic_substrate::SessionEvent],
     ) -> runic_substrate::Result<()> {
         tokio::time::sleep(self.delay).await;
         self.inner.append_batch(tenant, session_id, events).await
@@ -1853,7 +1853,7 @@ async fn wait_response_implies_the_run_is_durable() {
     assert!(
         stored
             .iter()
-            .any(|s| matches!(s.event, runic_state::SessionEvent::RunEnd { .. })),
+            .any(|s| matches!(s.event, runic_substrate::SessionEvent::RunEnd { .. })),
         "RunEnd must be durable before the wait response returns"
     );
 }
@@ -1888,7 +1888,7 @@ async fn stream_done_implies_the_run_is_durable() {
     assert!(
         stored
             .iter()
-            .any(|s| matches!(s.event, runic_state::SessionEvent::RunEnd { .. })),
+            .any(|s| matches!(s.event, runic_substrate::SessionEvent::RunEnd { .. })),
         "RunEnd must be durable before the stream's done event"
     );
 }
@@ -2027,7 +2027,7 @@ async fn steer_lands_at_the_next_turn_boundary() {
     let stored = store.read(TENANT, "t1").await.unwrap();
     assert!(stored.iter().any(|s| matches!(
         &s.event,
-        runic_state::SessionEvent::Message { msg, .. }
+        runic_substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("check the db instead")
     )));
 }
@@ -2232,7 +2232,7 @@ async fn queued_mode_executes_background_runs_via_workers() {
     let events = store.read(TENANT, "t1").await.unwrap();
     assert!(events.iter().any(|e| matches!(
         &e.event,
-        runic_state::SessionEvent::RunEnd { run_id: r, .. } if r == &run_id
+        runic_substrate::SessionEvent::RunEnd { run_id: r, .. } if r == &run_id
     )));
 
     let resp = app
@@ -2393,14 +2393,14 @@ struct FakeBroker {
     subs: tokio::sync::Mutex<
         std::collections::HashMap<
             String,
-            Vec<tokio::sync::mpsc::UnboundedSender<runic_state::SessionEvent>>,
+            Vec<tokio::sync::mpsc::UnboundedSender<runic_substrate::SessionEvent>>,
         >,
     >,
 }
 
 #[async_trait]
 impl runic_serve::EventBroker for FakeBroker {
-    async fn publish(&self, tenant: &str, thread_id: &str, event: &runic_state::SessionEvent) {
+    async fn publish(&self, tenant: &str, thread_id: &str, event: &runic_substrate::SessionEvent) {
         let key = format!("{tenant}:{thread_id}");
         let mut subs = self.subs.lock().await;
         if let Some(senders) = subs.get_mut(&key) {
@@ -2412,7 +2412,7 @@ impl runic_serve::EventBroker for FakeBroker {
         &self,
         tenant: &str,
         thread_id: &str,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<runic_state::SessionEvent>> {
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<runic_substrate::SessionEvent>> {
         let key = format!("{tenant}:{thread_id}");
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.subs.lock().await.entry(key).or_default().push(tx);
@@ -2420,16 +2420,16 @@ impl runic_serve::EventBroker for FakeBroker {
     }
 }
 
-fn replay_message(run_id: &str, text: &str) -> runic_state::SessionEvent {
-    runic_state::SessionEvent::Message {
+fn replay_message(run_id: &str, text: &str) -> runic_substrate::SessionEvent {
+    runic_substrate::SessionEvent::Message {
         run_id: run_id.into(),
         msg: runic_types::Message::assistant(text),
         at: chrono::Utc::now(),
     }
 }
 
-fn replay_end(run_id: &str) -> runic_state::SessionEvent {
-    runic_state::SessionEvent::RunEnd {
+fn replay_end(run_id: &str) -> runic_substrate::SessionEvent {
+    runic_substrate::SessionEvent::RunEnd {
         run_id: run_id.into(),
         status: runic_state::RunEndStatus::Completed,
         outcome: runic_state::RunOutcome {

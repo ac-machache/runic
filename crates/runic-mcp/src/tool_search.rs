@@ -16,7 +16,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use runic_state::{ExternalEvents, SessionEvent};
+use runic_state::{AgentEvent, Emitter};
 use runic_tool::{ActivatedToolNames, Tool, ToolContext, ToolResult, ToolSpec, activated_key};
 
 use crate::deferred::{DeferredMcpToolSet, ToolAccessPolicy};
@@ -31,7 +31,7 @@ pub struct ToolSearchTool {
 }
 
 struct Activation<'a> {
-    events: Option<Arc<ExternalEvents>>,
+    events: Option<Arc<dyn Emitter>>,
     already_active: Option<Arc<ActivatedToolNames>>,
     run_id: &'a str,
 }
@@ -46,7 +46,7 @@ impl Activation<'_> {
             return;
         }
         match &self.events {
-            Some(events) => events.emit(SessionEvent::StateUpdated {
+            Some(events) => events.emit(AgentEvent::StateUpdated {
                 run_id: self.run_id.to_string(),
                 key: activated_key(name),
                 value: serde_json::Value::Bool(true),
@@ -195,7 +195,7 @@ impl Tool for ToolSearchTool {
             .unwrap_or(DEFAULT_MAX_RESULTS);
 
         let activation = Activation {
-            events: ctx.get::<ExternalEvents>(),
+            events: ctx.emitter(),
             already_active: ctx.get::<ActivatedToolNames>(),
             run_id: &ctx.run_id,
         };
@@ -265,18 +265,26 @@ mod tests {
         )
     }
 
+    #[derive(Debug)]
+    struct ChanEmitter(tokio::sync::mpsc::UnboundedSender<AgentEvent>);
+    impl Emitter for ChanEmitter {
+        fn emit(&self, event: AgentEvent) {
+            let _ = self.0.send(event);
+        }
+    }
+
     fn ctx_with_rail() -> (
         ToolContext,
-        tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut ctx = ToolContext::new("u", "s", "r");
-        ctx.insert(ExternalEvents::new(None, None, tx));
+        let ctx = ToolContext::new("u", "s", "r")
+            .with_emitter(Some(std::sync::Arc::new(ChanEmitter(tx))));
         (ctx, rx)
     }
 
     fn activated_keys(
-        pending: &mut tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+        pending: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
     ) -> Vec<String> {
         let mut events = Vec::new();
         while let Ok(e) = pending.try_recv() {
@@ -285,7 +293,7 @@ mod tests {
         events
             .iter()
             .filter_map(|e| match e {
-                SessionEvent::StateUpdated { key, value, .. } if value.as_bool() == Some(true) => {
+                AgentEvent::StateUpdated { key, value, .. } if value.as_bool() == Some(true) => {
                     Some(
                         key.strip_prefix(runic_tool::ACTIVATED_KEY_PREFIX)?
                             .to_string(),

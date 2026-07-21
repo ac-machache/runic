@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use runic::hooks::TaskReminder;
 use runic_agent::{Session, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_state::SessionEvent;
+use runic_state::AgentEvent;
 use runic_state::{TaskStatus, ThreadStats};
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
@@ -98,39 +98,42 @@ fn scout_roster() -> Vec<Subagent> {
     vec![Subagent::new("scout", "research").prompt("you research")]
 }
 
-async fn wait_for_finish(rx: &mut tokio::sync::broadcast::Receiver<Arc<SessionEvent>>) {
-    loop {
-        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
-            Ok(Ok(ev)) if matches!(ev.as_ref(), SessionEvent::TaskFinished { .. }) => return,
-            Ok(Ok(_)) => continue,
-            other => panic!("background task never finished: {other:?}"),
-        }
+fn background_script() -> Vec<CompletionResponse> {
+    let mut responses = vec![delegate_background_response("t1")];
+    for _ in 0..64 {
+        responses.push(text_response("ok"));
     }
+    responses
+}
+
+async fn settle_background(agent: &mut Session) {
+    for _ in 0..100 {
+        agent.run_message(Message::user("and now?")).await.unwrap();
+        let stats = agent.state().stats();
+        if stats.tasks_finished + stats.tasks_failed >= 1 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("background task never folded into state");
 }
 
 #[tokio::test]
 async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
-    let provider = ScriptedProvider::new(vec![
-        delegate_background_response("t1"),
-        text_response("spawned, moving on"),
-        text_response("done"),
-    ]);
+    let provider = ScriptedProvider::new(background_script());
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
     let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .write_hook(Arc::new(TaskReminder::new()))
         .build();
-    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
-    agent.state_mut().set_events_tx(tx);
 
     agent
         .run_message(Message::user("go research"))
         .await
         .unwrap();
-    wait_for_finish(&mut rx).await;
 
-    agent.run_message(Message::user("and now?")).await.unwrap();
+    settle_background(&mut agent).await;
 
     let record = agent
         .state()
@@ -152,45 +155,48 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
     assert_eq!(stats.tasks_finished, 1);
     assert_eq!(stats.tasks_failed, 0);
 
-    let last = provider.requests().last().unwrap().clone();
-    let all_text: String = last
-        .messages
-        .iter()
-        .map(|m| m.content.text_content())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(all_text.contains("<system-reminder>"));
-    assert!(all_text.contains("found 3 competitors"));
+    let saw_reminder = provider.requests().iter().any(|req| {
+        let all_text: String = req
+            .messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .collect::<Vec<_>>()
+            .join("\n");
+        all_text.contains("<system-reminder>") && all_text.contains("found 3 competitors")
+    });
+    assert!(
+        saw_reminder,
+        "the background result must reach a subsequent model call"
+    );
 }
 
 #[tokio::test]
 async fn background_delegation_emits_a_navigable_edge() {
-    let provider = ScriptedProvider::new(vec![
-        delegate_background_response("t1"),
-        text_response("spawned, moving on"),
-        text_response("done"),
-    ]);
+    let provider = ScriptedProvider::new(background_script());
     let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
     let mut agent = Session::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
         .build();
-    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
-    agent.state_mut().set_events_tx(tx);
 
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .state_mut()
+        .set_emitter(Some(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))));
     agent
         .run_message(Message::user("go research"))
         .await
         .unwrap();
-    wait_for_finish(&mut rx).await;
+    settle_background(&mut agent).await;
+    let mut events: Vec<AgentEvent> = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
 
-    agent.run_message(Message::user("and now?")).await.unwrap();
-
-    let events = agent.state().events();
     let started = events
         .iter()
         .find_map(|e| match e {
-            SessionEvent::DelegationStarted {
+            AgentEvent::DelegationStarted {
                 agent,
                 mode,
                 call_id,
@@ -208,7 +214,7 @@ async fn background_delegation_emits_a_navigable_edge() {
     let finished = events
         .iter()
         .find_map(|e| match e {
-            SessionEvent::DelegationFinished {
+            AgentEvent::DelegationFinished {
                 agent,
                 status,
                 call_id,
@@ -228,21 +234,14 @@ async fn background_delegation_emits_a_navigable_edge() {
 #[tokio::test]
 async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     let rebuilt_view = {
-        let provider = ScriptedProvider::new(vec![
-            delegate_background_response("t1"),
-            text_response("spawned"),
-            text_response("later"),
-        ]);
+        let provider = ScriptedProvider::new(background_script());
         let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
         let mut agent = Session::builder(provider, "u1", "s1")
             .system_prompt("sys")
             .tool(Arc::new(delegate))
             .build();
-        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
-        agent.state_mut().set_events_tx(tx);
         agent.run_message(Message::user("go")).await.unwrap();
-        wait_for_finish(&mut rx).await;
-        agent.run_message(Message::user("sync")).await.unwrap();
+        settle_background(&mut agent).await;
         agent.state().tasks().clone()
     };
     assert_eq!(rebuilt_view.len(), 1);

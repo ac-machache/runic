@@ -8,7 +8,8 @@ use proptest::prelude::*;
 
 use runic_agent::AgentEvent;
 use runic_serve::wire::{from_agent_event, from_session_event};
-use runic_state::{RunEndStatus, RunOutcome, SessionEvent, ToolStatus};
+use runic_state::{RunEndStatus, RunOutcome, ToolStatus};
+use runic_substrate::SessionEvent;
 use runic_types::{Message, TokenUsage};
 
 fn ts() -> DateTime<Utc> {

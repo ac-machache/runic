@@ -46,7 +46,10 @@ async fn text_and_thinking_deltas_are_forwarded_in_order() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     agent
-        .run_with("go", RunContext::new().with_events(tx))
+        .run_with(
+            "go",
+            RunContext::new().with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))),
+        )
         .await
         .unwrap();
 
@@ -84,7 +87,10 @@ async fn fallback_worthy_stream_error_recovers_via_non_streaming_complete() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let outcome = agent
-        .run_with("go", RunContext::new().with_events(tx))
+        .run_with(
+            "go",
+            RunContext::new().with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))),
+        )
         .await
         .unwrap();
 
@@ -116,10 +122,16 @@ async fn non_fallback_worthy_stream_error_fails_the_run() {
 
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let err = agent
-        .run_with("go", RunContext::new().with_events(tx))
+        .run_with(
+            "go",
+            RunContext::new().with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))),
+        )
         .await
         .unwrap_err();
 
     assert!(matches!(err, AgentError::Provider(_)), "got {err:?}");
-    assert!(agent.state().current_run().is_none(), "run closed cleanly");
+    assert!(
+        agent.state().current_run_id().is_none(),
+        "run closed cleanly"
+    );
 }

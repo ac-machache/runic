@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{
     ArtifactSource, ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
 };

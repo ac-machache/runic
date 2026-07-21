@@ -1976,7 +1976,6 @@ dependencies = [
  "runic-types",
  "serde",
  "serde_json",
- "tokio",
  "uuid",
 ]
 
@@ -2029,6 +2028,8 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "runic-state",
  "runic-types",
  "serde",
  "serde_json",

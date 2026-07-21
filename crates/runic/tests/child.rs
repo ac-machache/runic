@@ -81,7 +81,6 @@ fn ctx() -> DelegationCtx {
         tenant: "alice".into(),
         session: "s1".into(),
         child_session: None,
-        persistence: None,
     }
 }
 

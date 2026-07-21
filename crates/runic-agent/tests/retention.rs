@@ -287,7 +287,11 @@ async fn provenance_is_sanitized_bounded_and_persisted_on_the_block() {
     let (events_tx, mut events_rx) =
         tokio::sync::mpsc::unbounded_channel::<runic_agent::AgentEvent>();
     agent
-        .run_with("go", runic_agent::RunContext::new().with_events(events_tx))
+        .run_with(
+            "go",
+            runic_agent::RunContext::new()
+                .with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(events_tx))),
+        )
         .await
         .unwrap();
 

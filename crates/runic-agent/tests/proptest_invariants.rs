@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use harness::*;
 use proptest::prelude::*;
-use runic_agent::{CancelToken, RunContext, Session};
-use runic_state::SessionEvent;
+use runic_agent::{AgentEvent, CancelToken, RunContext, Session};
 
 const FULL: &str = "FULL_SECRET_BYTES";
 const SUMMARY: &str = "summary; content omitted from log";
@@ -59,27 +58,27 @@ proptest! {
             prop_assert_eq!(provider.call_count(), tool_turns + 1);
 
             let evs = drain_session(&mut events);
-            let starts = evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count();
-            let ends = evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count();
-            let boundaries = evs.iter().filter(|e| matches!(e, SessionEvent::TurnEnd { .. })).count();
+            let starts = evs.iter().filter(|e| matches!(e, AgentEvent::RunStarted { .. })).count();
+            let ends = evs.iter().filter(|e| matches!(e, AgentEvent::RunEnd { .. })).count();
+            let boundaries = evs.iter().filter(|e| matches!(e, AgentEvent::TurnEnd { .. })).count();
             prop_assert_eq!(starts, 1, "exactly one RunStart");
             prop_assert_eq!(ends, 1, "exactly one RunEnd");
             prop_assert_eq!(boundaries as u32, expected_turns, "a TurnEnd per turn");
             prop_assert!(
-                matches!(evs.first(), Some(SessionEvent::RunStart { .. })),
+                matches!(evs.first(), Some(AgentEvent::RunStarted { .. })),
                 "first event is RunStart"
             );
             prop_assert!(
-                matches!(evs.last(), Some(SessionEvent::RunEnd { .. })),
+                matches!(evs.last(), Some(AgentEvent::RunEnd { .. })),
                 "last event is RunEnd"
             );
 
             // All events share the single minted run id.
-            let run_id = evs.first().unwrap().run_id().to_string();
-            prop_assert!(evs.iter().all(|e| e.run_id() == run_id));
+            let run_id = evs.first().unwrap().run_id().expect("run start has a run id").to_string();
+            prop_assert!(evs.iter().filter_map(|e| e.run_id()).all(|id| id == run_id));
 
             // Terminal: nothing left in flight.
-            prop_assert!(agent.state().current_run().is_none());
+            prop_assert!(agent.state().current_run_id().is_none());
 
             // Persistence-summary safety holds for every executed tool turn.
             let persisted = tool_result_contents(agent.state().messages_for_provider());
@@ -100,15 +99,23 @@ proptest! {
             let provider = Arc::new(ScriptedProvider::new(responses));
             let mut agent = Session::builder(provider, "u", "s").model("test").build();
 
+            let mut ids: Vec<String> = Vec::new();
             for i in 0..run_count {
+                let mut cap = capture_session_events(&mut agent);
                 agent.run(format!("msg {i}")).await.unwrap();
-                prop_assert!(agent.state().current_run().is_none());
+                prop_assert!(agent.state().current_run_id().is_none());
+                let id = drain_session(&mut cap)
+                    .iter()
+                    .find_map(|e| match e {
+                        runic_state::AgentEvent::RunStarted { run_id, .. } => Some(run_id.clone()),
+                        _ => None,
+                    })
+                    .expect("a run emits RunStart");
+                ids.push(id);
             }
 
-            let runs = agent.state().runs();
-            prop_assert_eq!(runs.len(), run_count);
-            prop_assert!(runs.iter().all(|r| r.ended_at.is_some()));
-            let mut ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+            prop_assert_eq!(agent.state().stats().runs, run_count as u64);
+            prop_assert!(agent.state().current_run_id().is_none());
             let n = ids.len();
             ids.sort_unstable();
             ids.dedup();
@@ -158,13 +165,13 @@ proptest! {
             prop_assert_eq!(provider.call_count(), kinds.len() + 1);
 
             let evs = drain_session(&mut events);
-            prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunStart { .. })).count(), 1);
-            prop_assert_eq!(evs.iter().filter(|e| matches!(e, SessionEvent::RunEnd { .. })).count(), 1);
+            prop_assert_eq!(evs.iter().filter(|e| matches!(e, AgentEvent::RunStarted { .. })).count(), 1);
+            prop_assert_eq!(evs.iter().filter(|e| matches!(e, AgentEvent::RunEnd { .. })).count(), 1);
             prop_assert!(
-                matches!(evs.last(), Some(SessionEvent::RunEnd { .. })),
+                matches!(evs.last(), Some(AgentEvent::RunEnd { .. })),
                 "last event is RunEnd"
             );
-            prop_assert!(agent.state().current_run().is_none());
+            prop_assert!(agent.state().current_run_id().is_none());
             Ok(())
         })?;
     }
@@ -208,7 +215,7 @@ proptest! {
                 prop_assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
                 prop_assert_eq!(outcome.total_turns, (n + 1) as u32);
             }
-            prop_assert!(agent.state().current_run().is_none());
+            prop_assert!(agent.state().current_run_id().is_none());
             Ok(())
         })?;
     }

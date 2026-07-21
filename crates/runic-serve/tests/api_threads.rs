@@ -474,7 +474,7 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
             .append(
                 TENANT,
                 child,
-                &runic_state::SessionEvent::RunStart {
+                &runic_substrate::SessionEvent::RunStart {
                     run_id: format!("r-{child}"),
                     agent: Some("scout".into()),
                     audit: None,

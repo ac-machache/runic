@@ -134,7 +134,7 @@ impl Llm {
         events: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
     ) -> anyhow::Result<LlmOutput> {
         let mut agent = self.build_agent();
-        let ctx = RunContext::new().with_events(events);
+        let ctx = RunContext::new().with_events(std::sync::Arc::new(crate::ChannelEmitter(events)));
         let outcome = agent
             .run_with(message.into(), ctx)
             .await

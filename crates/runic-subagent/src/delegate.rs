@@ -22,8 +22,7 @@ use async_trait::async_trait;
 use runic_agent::{CancelToken, RunContext, Session, SessionBuilder, TasksSnapshot};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_state::SessionEvent;
-use runic_state::{ChildPersistenceHandle, ChildPersistenceStatus, ChildSink, ExternalEvents};
+use runic_state::{AgentEvent, Emitter};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::subagent::Subagent;
@@ -50,7 +49,6 @@ pub struct DelegationCtx {
     pub tenant: String,
     pub session: String,
     pub child_session: Option<String>,
-    pub persistence: Option<ChildPersistenceHandle>,
 }
 
 pub struct SubagentReq<'a> {
@@ -362,7 +360,6 @@ impl DelegateTool {
             tenant: ctx.user_id.clone(),
             session: ctx.session_id.clone(),
             child_session: None,
-            persistence: ctx.get::<ChildPersistenceHandle>().map(|h| (*h).clone()),
         }
     }
 
@@ -377,10 +374,9 @@ impl DelegateTool {
             Ok(g) => g,
             Err(e) => return ToolResult::error(e),
         };
-        let external = ctx.get::<ExternalEvents>();
+        let external = ctx.emitter();
         let (call_id, turn) = edge_keys(ctx);
-        let mut dctx = self.child_ctx(self.cancel.clone(), ctx);
-        let sink = begin_child(&mut dctx, agent).await;
+        let dctx = self.child_ctx(self.cancel.clone(), ctx);
         emit_started(
             &external,
             &ctx.run_id,
@@ -391,7 +387,7 @@ impl DelegateTool {
             dctx.child_session.clone(),
         );
         let started = std::time::Instant::now();
-        let outcome = run_child(&self.builder, &sub, &dctx, &prompt, sink).await;
+        let outcome = run_child(&self.builder, &sub, &dctx, &prompt).await;
         emit_finished(
             &external,
             &ctx.run_id,
@@ -420,8 +416,8 @@ impl DelegateTool {
             let sub = self.find(&name).cloned();
             let builder = self.builder.clone();
             let acquired = self.budget.acquire();
-            let mut dctx = self.child_ctx(self.cancel.clone(), ctx);
-            let external = ctx.get::<ExternalEvents>();
+            let dctx = self.child_ctx(self.cancel.clone(), ctx);
+            let external = ctx.emitter();
             let (call_id, turn) = edge_keys(ctx);
             let run_id = ctx.run_id.clone();
             async move {
@@ -432,7 +428,6 @@ impl DelegateTool {
                     Ok(g) => g,
                     Err(e) => return format!("[{name}] error: {e}"),
                 };
-                let sink = begin_child(&mut dctx, &name).await;
                 emit_started(
                     &external,
                     &run_id,
@@ -443,7 +438,7 @@ impl DelegateTool {
                     dctx.child_session.clone(),
                 );
                 let started = std::time::Instant::now();
-                let outcome = run_child(&builder, &sub, &dctx, &prompt, sink).await;
+                let outcome = run_child(&builder, &sub, &dctx, &prompt).await;
                 emit_finished(&external, &run_id, turn, &call_id, &name, &outcome, started);
                 let out = match outcome.result {
                     Ok(child) => format!("[{name}]\n{}", child.text),
@@ -484,12 +479,11 @@ impl DelegateTool {
             },
         );
 
-        let external = ctx.get::<ExternalEvents>();
+        let external = ctx.emitter();
         let run_id = ctx.run_id.clone();
-        let mut dctx = self.child_ctx(cancel, ctx);
-        let sink = begin_child(&mut dctx, agent).await;
+        let dctx = self.child_ctx(cancel, ctx);
         if let Some(external) = &external {
-            external.emit(SessionEvent::TaskSpawned {
+            external.emit(AgentEvent::TaskSpawned {
                 run_id: run_id.clone(),
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
@@ -516,7 +510,7 @@ impl DelegateTool {
                 dctx.child_session.clone(),
             );
             let started = std::time::Instant::now();
-            let outcome = run_child(&builder, &sub, &dctx, &prompt, sink).await;
+            let outcome = run_child(&builder, &sub, &dctx, &prompt).await;
             emit_finished(
                 &external,
                 &run_id,
@@ -549,7 +543,7 @@ impl DelegateTool {
                 }
             };
             if let Some(external) = &external {
-                external.emit(SessionEvent::TaskFinished {
+                external.emit(AgentEvent::TaskFinished {
                     run_id,
                     task_id: tid,
                     status: outcome.0,
@@ -650,8 +644,8 @@ impl DelegateTool {
                 }
             }
         };
-        if transitioned && let Some(external) = ctx.get::<ExternalEvents>() {
-            external.emit(SessionEvent::TaskFinished {
+        if transitioned && let Some(external) = ctx.emitter() {
+            external.emit(AgentEvent::TaskFinished {
                 run_id: ctx.run_id.clone(),
                 task_id: task_id.to_string(),
                 status: runic_state::TaskStatus::Cancelled,
@@ -681,21 +675,6 @@ struct ChildRun {
 struct ChildOutcome {
     result: anyhow::Result<ChildRun>,
     child_session: Option<String>,
-    persistence: Option<ChildPersistenceStatus>,
-}
-
-async fn begin_child(dctx: &mut DelegationCtx, agent: &str) -> Option<Box<dyn ChildSink>> {
-    let handle = dctx.persistence.clone()?;
-    match handle.0.begin(agent).await {
-        Ok(sink) => {
-            dctx.child_session = Some(sink.session_id().to_string());
-            Some(sink)
-        }
-        Err(e) => {
-            tracing::warn!(agent, error = %e, "child persistence begin failed; running ephemeral");
-            None
-        }
-    }
 }
 
 async fn run_child(
@@ -703,31 +682,21 @@ async fn run_child(
     subagent: &Subagent,
     dctx: &DelegationCtx,
     prompt: &str,
-    sink: Option<Box<dyn ChildSink>>,
 ) -> ChildOutcome {
     let req = SubagentReq { subagent, dctx };
     let mut child = assemble_subagent(builder.as_ref(), &req).await;
     let configured = child.model().to_string();
-    if let Some(sink) = &sink {
-        child.state_mut().set_persist_tx(sink.sink());
-    }
-    let mut rc = RunContext::new()
+    let rc = RunContext::new()
         .with_cancel(dctx.cancel.clone())
         .with_config(dctx.config.clone());
-    if let Some(sink) = &sink {
-        rc = rc.with_child_persistence(sink.nested());
-    }
+
     let result = match child.run_with(prompt.to_string(), rc).await {
         Ok(outcome) => {
             let served = child
                 .state()
-                .events()
-                .iter()
-                .rev()
-                .find_map(|event| match event {
-                    SessionEvent::TurnEnd { model, .. } => Some(model.clone()),
-                    _ => None,
-                })
+                .stats()
+                .last_model
+                .clone()
                 .unwrap_or(configured);
             Ok(ChildRun {
                 text: child.state().last_assistant_text().unwrap_or_default(),
@@ -737,17 +706,9 @@ async fn run_child(
         }
         Err(e) => Err(anyhow::anyhow!("{e}")),
     };
-    let persistence = match &sink {
-        Some(sink) => Some(match sink.flush().await {
-            Ok(()) => ChildPersistenceStatus::Flushed,
-            Err(e) => ChildPersistenceStatus::FlushFailed(e.to_string()),
-        }),
-        None => None,
-    };
     ChildOutcome {
         result,
         child_session: dctx.child_session.clone(),
-        persistence,
     }
 }
 
@@ -764,7 +725,7 @@ fn edge_keys(ctx: &ToolContext) -> (String, u32) {
 
 #[allow(clippy::too_many_arguments)]
 fn emit_finished(
-    external: &Option<std::sync::Arc<ExternalEvents>>,
+    external: &Option<std::sync::Arc<dyn Emitter>>,
     run_id: &str,
     turn: u32,
     call_id: &str,
@@ -785,7 +746,7 @@ fn emit_finished(
             None,
         ),
     };
-    external.emit(SessionEvent::DelegationFinished {
+    external.emit(AgentEvent::DelegationFinished {
         run_id: run_id.to_string(),
         turn,
         call_id: call_id.to_string(),
@@ -795,14 +756,14 @@ fn emit_finished(
         model,
         duration_ms: started.elapsed().as_millis() as u64,
         child_session: outcome.child_session.clone(),
-        child_persistence: outcome.persistence.clone(),
+        child_persistence: None,
         at: chrono::Utc::now(),
     });
 }
 
 #[allow(clippy::too_many_arguments)]
 fn emit_started(
-    external: &Option<std::sync::Arc<ExternalEvents>>,
+    external: &Option<std::sync::Arc<dyn Emitter>>,
     run_id: &str,
     turn: u32,
     call_id: &str,
@@ -811,7 +772,7 @@ fn emit_started(
     child_session: Option<String>,
 ) {
     let Some(external) = external else { return };
-    external.emit(SessionEvent::DelegationStarted {
+    external.emit(AgentEvent::DelegationStarted {
         run_id: run_id.to_string(),
         turn,
         call_id: call_id.to_string(),

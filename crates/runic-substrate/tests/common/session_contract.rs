@@ -7,7 +7,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use runic_state::{HookLifecycle, RunOutcome, SessionEvent};
+use runic_state::{HookLifecycle, RunOutcome};
+use runic_substrate::SessionEvent;
 use runic_substrate::{RunStatus, SessionStore, StoredEvent, replay_into_state, replay_messages};
 use runic_types::{ContentBlock, Message, TokenUsage};
 
@@ -871,11 +872,9 @@ pub async fn reconstruct_completed_run(store: &dyn SessionStore) {
         .unwrap();
     let state = replay_into_state(store, &t, &s, "sys").await.unwrap();
     assert_eq!(state.user_id, t);
-    let runs = state.runs();
-    assert_eq!(runs.len(), 1);
-    assert!(runs[0].started_at.is_some() && runs[0].ended_at.is_some());
+    assert_eq!(state.stats().runs, 1);
     assert!(
-        state.current_run().is_none(),
+        state.current_run_id().is_none(),
         "a completed run is not in-flight"
     );
     assert_eq!(state.last_assistant_text().as_deref(), Some("the answer"));
@@ -888,11 +887,11 @@ pub async fn reconstruct_in_flight_run(store: &dyn SessionStore) {
         .await
         .unwrap();
     let state = replay_into_state(store, &t, &s, "sys").await.unwrap();
-    let cur = state
-        .current_run()
-        .expect("RunStart with no RunEnd is in-flight");
-    assert_eq!(cur.id, "r1");
-    assert!(cur.ended_at.is_none());
+    assert_eq!(
+        state.current_run_id(),
+        Some("r1"),
+        "RunStart with no RunEnd is in-flight"
+    );
 }
 
 pub async fn reconstruct_terminal_run_preserves_stop_reason(store: &dyn SessionStore) {
@@ -907,10 +906,11 @@ pub async fn reconstruct_terminal_run_preserves_stop_reason(store: &dyn SessionS
         .unwrap();
     let state = replay_into_state(store, &t, &s, "sys").await.unwrap();
     assert!(
-        state.current_run().is_none(),
+        state.current_run_id().is_none(),
         "a run with RunEnd is terminal"
     );
-    let stop = state.events().iter().find_map(|e| match e {
+    let stored = store.read(&t, &s).await.unwrap();
+    let stop = stored.iter().find_map(|entry| match &entry.event {
         SessionEvent::RunEnd { outcome, .. } => outcome.stop_reason.clone(),
         _ => None,
     });
@@ -932,9 +932,15 @@ pub async fn reconstruct_multiple_runs_in_order(store: &dyn SessionStore) {
         )
         .await
         .unwrap();
-    let state = replay_into_state(store, &t, &s, "sys").await.unwrap();
-    let runs = state.runs();
-    let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+    let _state = replay_into_state(store, &t, &s, "sys").await.unwrap();
+    let stored = store.read(&t, &s).await.unwrap();
+    let ids: Vec<&str> = stored
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            SessionEvent::RunStart { run_id, .. } => Some(run_id.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(ids, ["r1", "r2"]);
 }
 

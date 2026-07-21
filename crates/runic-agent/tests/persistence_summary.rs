@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use harness::*;
 use runic_agent::{AgentEvent, RunContext, Session};
-use runic_state::SessionEvent;
 use runic_types::{ContentBlock, MessageContent};
 
 const FULL: &str = "FULL_SECRET_CONTENT_THAT_MUST_NOT_PERSIST";
@@ -103,7 +102,7 @@ async fn persisted_session_events_never_carry_the_full_bytes() {
     agent.run("go").await.unwrap();
 
     for ev in drain_session(&mut events) {
-        if let SessionEvent::Message { msg, .. } = &ev
+        if let AgentEvent::Message { msg, .. } = &ev
             && let MessageContent::Blocks(blocks) = &msg.content
         {
             for b in blocks {
@@ -132,7 +131,10 @@ async fn live_tool_finished_event_carries_the_summary_not_the_full_output() {
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     agent
-        .run_with("go", RunContext::new().with_events(tx))
+        .run_with(
+            "go",
+            RunContext::new().with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(tx))),
+        )
         .await
         .unwrap();
 

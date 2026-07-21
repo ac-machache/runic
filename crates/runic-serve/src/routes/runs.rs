@@ -25,7 +25,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use base64::Engine;
 use runic_agent::AgentEvent;
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{ArtifactSource, RunStatus};
 use runic_types::{ContentBlock, Message, MessageContent};
 
@@ -268,20 +268,20 @@ pub async fn create_and_stream_run(
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let persist = begun.persist.clone();
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    let stateless = state.agents.factory(&agent_name)?.stateless();
+    let (agent_tx, _tee) = crate::registry::tee_events(
+        (!stateless).then(|| begun.persist_sink.clone()),
+        begun.events_tx.clone(),
+        Some(evt_tx),
+    );
+
     run_ctx = run_ctx
-        .with_events(evt_tx)
+        .with_events(agent_tx)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("stream");
-    if !state.agents.factory(&agent_name)?.stateless() {
-        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
-            state.session_store.clone(),
-            &tenant,
-            &thread_id,
-        ));
-    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "run stream accepted");
 
@@ -337,7 +337,10 @@ pub async fn create_and_stream_run(
                 .await
             {
                 Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
-                Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+                Err(e) => {
+                    drop(run_ctx);
+                    Err(runic_agent::AgentError::Build(e.to_string()))
+                }
             };
         claim.release();
         let (status, error) = match &outcome {
@@ -470,19 +473,19 @@ pub async fn wait_run(
         .await?;
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    let stateless = state.agents.factory(&agent_name)?.stateless();
+    let (agent_tx, tee) = crate::registry::tee_events(
+        (!stateless).then(|| begun.persist_sink.clone()),
+        begun.events_tx.clone(),
+        None,
+    );
     run_ctx = run_ctx
+        .with_events(agent_tx)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("wait");
-    if !state.agents.factory(&agent_name)?.stateless() {
-        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
-            state.session_store.clone(),
-            &tenant,
-            &thread_id,
-        ));
-    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "wait run accepted");
 
@@ -537,7 +540,10 @@ pub async fn wait_run(
                     let result = agent.run_message_with(user_msg, run_ctx).await;
                     (Some(agent), result)
                 }
-                Err(e) => (None, Err(runic_agent::AgentError::Build(e.to_string()))),
+                Err(e) => {
+                    drop(run_ctx);
+                    (None, Err(runic_agent::AgentError::Build(e.to_string())))
+                }
             };
         claim.release();
         let (status, error) = match &result {
@@ -546,6 +552,7 @@ pub async fn wait_run(
             Ok(_) => (RunStatus::Success, None),
             Err(e) => (RunStatus::Error, Some(e.to_string())),
         };
+        let _ = tee.await;
         flush_persist(&begun.persist).await;
         if let Err(e) = store
             .set_run_status(&run_id, status, error.as_deref())
@@ -668,19 +675,19 @@ pub async fn background_run(
         .await;
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
+    let stateless = state.agents.factory(&agent_name)?.stateless();
+    let (agent_tx, tee) = crate::registry::tee_events(
+        (!stateless).then(|| begun.persist_sink.clone()),
+        begun.events_tx.clone(),
+        None,
+    );
     run_ctx = run_ctx
+        .with_events(agent_tx)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
         .with_run_id(&run_id)
         .with_mode("background");
-    if !state.agents.factory(&agent_name)?.stateless() {
-        run_ctx = run_ctx.with_child_persistence(crate::child::child_persistence(
-            state.session_store.clone(),
-            &tenant,
-            &thread_id,
-        ));
-    }
 
     tracing::info!(%tenant, %thread_id, agent = %agent_name, %run_id, "background run accepted");
 
@@ -733,7 +740,10 @@ pub async fn background_run(
                 .await
             {
                 Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
-                Err(e) => Err(runic_agent::AgentError::Build(e.to_string())),
+                Err(e) => {
+                    drop(run_ctx);
+                    Err(runic_agent::AgentError::Build(e.to_string()))
+                }
             };
         claim.release();
         let (status, error) = match &outcome {
@@ -745,6 +755,7 @@ pub async fn background_run(
         if let Err(e) = &outcome {
             tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
         }
+        let _ = tee.await;
         flush_persist(&begun.persist).await;
         if let Err(e) = store
             .set_run_status(&run_id, status, error.as_deref())
@@ -910,7 +921,7 @@ pub async fn run_timeline(
         .session_store
         .read_run_after(&tenant, &thread_id, &run_id, 0)
         .await?;
-    let trace = runic_state::timeline::project(events.iter().map(|entry| &entry.event))
+    let trace = runic_substrate::timeline::project(events.iter().map(|entry| &entry.event))
         .into_iter()
         .next()
         .ok_or(ServeError::RunNotFound {

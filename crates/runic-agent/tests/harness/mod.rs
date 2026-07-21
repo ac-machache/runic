@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::Session;
+use runic_agent::{AgentEvent, Session};
 use runic_hook::{HookOutcome, HookSignal, ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_state::{AgentState, SessionEvent};
+use runic_state::AgentState;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 use tokio::sync::mpsc;
@@ -584,11 +584,8 @@ impl RecordWriteHook {
                 HookOutcome::SubstituteToolResult(ToolResult::ok(s.clone()))
             }
             Some(Act::Inject(text)) => {
-                state.push_event(SessionEvent::Message {
-                    run_id: state
-                        .current_run()
-                        .map(|r| r.id)
-                        .unwrap_or_else(|| "r".into()),
+                state.emit(AgentEvent::Message {
+                    run_id: state.current_run_id().unwrap_or("r").to_string(),
                     msg: runic_types::Message::user(text.clone()),
                     at: chrono::Utc::now(),
                 });
@@ -724,24 +721,20 @@ impl ReadHook for RecordReadHook {
 
 // ─── Event capture ───────────────────────────────────────────────────────────
 
-/// Install a lossless persist sink on the agent and return its receiver. Every
-/// [`SessionEvent`] the run pushes lands here in order.
-pub fn capture_session_events(
-    agent: &mut Session,
-) -> mpsc::UnboundedReceiver<std::sync::Arc<SessionEvent>> {
+/// Install an event sink on the agent and return its receiver. Every
+/// [`AgentEvent`] the run emits lands here in order.
+pub fn capture_session_events(agent: &mut Session) -> mpsc::UnboundedReceiver<AgentEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     agent
         .state_mut()
-        .set_persist_tx(runic_state::PersistSink::new(tx));
+        .set_emitter(Some(Arc::new(runic_agent::ChannelEmitter(tx))));
     rx
 }
 
-pub fn drain_session(
-    rx: &mut mpsc::UnboundedReceiver<std::sync::Arc<SessionEvent>>,
-) -> Vec<SessionEvent> {
+pub fn drain_session(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
     let mut out = Vec::new();
-    while let Ok(v) = rx.try_recv() {
-        out.push(std::sync::Arc::try_unwrap(v).unwrap_or_else(|shared| (*shared).clone()));
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
     }
     out
 }
@@ -777,24 +770,25 @@ pub fn tool_results(messages: &[runic_types::Message]) -> Vec<(String, String, b
         .collect()
 }
 
-/// A short label per [`SessionEvent`] for exact-ordering assertions.
-pub fn session_kinds(evs: &[SessionEvent]) -> Vec<&'static str> {
+pub fn session_kinds(evs: &[AgentEvent]) -> Vec<&'static str> {
     evs.iter()
         .map(|e| match e {
-            SessionEvent::RunStart { .. } => "RunStart",
-            SessionEvent::RunEnd { .. } => "RunEnd",
-            SessionEvent::Message { .. } => "Message",
-            SessionEvent::TurnEnd { .. } => "TurnEnd",
-            SessionEvent::ToolStarted { .. } => "ToolStarted",
-            SessionEvent::ToolFinished { .. } => "ToolFinished",
-            SessionEvent::DelegationStarted { .. } => "DelegationStarted",
-            SessionEvent::DelegationFinished { .. } => "DelegationFinished",
-            SessionEvent::HookFired { .. } => "HookFired",
-            SessionEvent::StateSnapshot { .. } => "StateSnapshot",
-            SessionEvent::TaskSpawned { .. } => "TaskSpawned",
-            SessionEvent::TaskFinished { .. } => "TaskFinished",
-            SessionEvent::StateUpdated { .. } => "StateUpdated",
-            SessionEvent::ToolDeferred { .. } => "ToolDeferred",
+            AgentEvent::TextDelta(_) => "TextDelta",
+            AgentEvent::ThinkingDelta(_) => "ThinkingDelta",
+            AgentEvent::RunStarted { .. } => "RunStart",
+            AgentEvent::RunEnd { .. } => "RunEnd",
+            AgentEvent::Message { .. } => "Message",
+            AgentEvent::TurnEnd { .. } => "TurnEnd",
+            AgentEvent::ToolStarted { .. } => "ToolStarted",
+            AgentEvent::ToolFinished { .. } => "ToolFinished",
+            AgentEvent::DelegationStarted { .. } => "DelegationStarted",
+            AgentEvent::DelegationFinished { .. } => "DelegationFinished",
+            AgentEvent::HookFired { .. } => "HookFired",
+            AgentEvent::StateSnapshot { .. } => "StateSnapshot",
+            AgentEvent::TaskSpawned { .. } => "TaskSpawned",
+            AgentEvent::TaskFinished { .. } => "TaskFinished",
+            AgentEvent::StateUpdated { .. } => "StateUpdated",
+            AgentEvent::ToolDeferred { .. } => "ToolDeferred",
         })
         .collect()
 }

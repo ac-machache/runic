@@ -7,7 +7,7 @@ use runic::ability::ability;
 use runic::composer::{Agent, Composer, Runtime};
 use runic_agent::RunContext;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_state::SessionEvent;
+use runic_state::AgentEvent;
 use runic_substrate::MemoryArtifactStore;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{
@@ -146,22 +146,19 @@ async fn a_suspended_spill_is_retrievable_through_the_auto_wired_reader_after_re
 
     let artifact_id = agent
         .state()
-        .events()
+        .messages_for_provider()
         .iter()
-        .find_map(|event| match event {
-            SessionEvent::Message { msg, .. } => match &msg.content {
-                MessageContent::Blocks(blocks) => blocks.iter().find_map(|block| match block {
-                    ContentBlock::ToolResult {
-                        content: ToolResultPayload::Artifact { id, preview, .. },
-                        ..
-                    } => {
-                        assert_eq!(preview, "short summary");
-                        Some(id.clone())
-                    }
-                    _ => None,
-                }),
+        .find_map(|msg| match &msg.content {
+            MessageContent::Blocks(blocks) => blocks.iter().find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    content: ToolResultPayload::Artifact { id, preview, .. },
+                    ..
+                } => {
+                    assert_eq!(preview, "short summary");
+                    Some(id.clone())
+                }
                 _ => None,
-            },
+            }),
             _ => None,
         })
         .expect("the summarized output was spilled to an artifact");
@@ -173,7 +170,7 @@ async fn a_suspended_spill_is_retrievable_through_the_auto_wired_reader_after_re
     )]));
     provider.push_response(text("done"));
 
-    agent.state_mut().push_event(SessionEvent::Message {
+    agent.state_mut().emit(AgentEvent::Message {
         run_id: "r1".into(),
         msg: Message::user_with_blocks(vec![ContentBlock::ToolResult {
             tool_use_id: "c2".into(),

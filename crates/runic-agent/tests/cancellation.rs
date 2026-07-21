@@ -7,8 +7,7 @@ mod harness;
 use std::sync::Arc;
 
 use harness::*;
-use runic_agent::{CancelToken, RunContext, Session};
-use runic_state::SessionEvent;
+use runic_agent::{AgentEvent, CancelToken, RunContext, Session};
 
 #[tokio::test]
 async fn cancel_before_the_first_turn_makes_no_model_call() {
@@ -27,7 +26,7 @@ async fn cancel_before_the_first_turn_makes_no_model_call() {
     assert_eq!(outcome.total_turns, 0);
     assert_eq!(outcome.stop_reason.as_deref(), Some("cancelled"));
     assert_eq!(provider.call_count(), 0, "no model call after pre-cancel");
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }
 
 #[tokio::test]
@@ -63,7 +62,7 @@ async fn cancel_during_a_tool_ends_before_the_next_model_call() {
     // The tool result from turn 1 is still present and well-formed.
     let contents = tool_result_contents(agent.state().messages_for_provider());
     assert!(contents.iter().any(|c| c.contains("cancelled the run")));
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }
 
 #[tokio::test]
@@ -100,7 +99,7 @@ async fn cancel_while_a_model_call_is_in_flight_finishes_that_turn_then_stops() 
     assert_eq!(outcome.total_turns, 1, "that turn completed");
     assert_eq!(outcome.stop_reason.as_deref(), Some("cancelled"));
     assert_eq!(calls.lock().unwrap().len(), 1, "its tool still dispatched");
-    assert!(agent.state().current_run().is_none());
+    assert!(agent.state().current_run_id().is_none());
 }
 
 #[tokio::test]
@@ -118,7 +117,7 @@ async fn cancelled_run_is_recorded_as_a_clean_terminal_run_end() {
 
     let evs = drain_session(&mut events);
     let end = evs.iter().rev().find_map(|e| match e {
-        SessionEvent::RunEnd { outcome, .. } => Some(outcome.clone()),
+        AgentEvent::RunEnd { outcome, .. } => Some(outcome.clone()),
         _ => None,
     });
     let end = end.expect("a RunEnd closes the cancelled run");

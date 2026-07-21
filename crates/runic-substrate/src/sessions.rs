@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use runic_state::SessionEvent;
+use crate::SessionEvent;
 
 use crate::{Error, Result};
 

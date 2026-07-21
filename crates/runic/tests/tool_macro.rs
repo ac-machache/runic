@@ -177,11 +177,10 @@ async fn a_macro_tool_runs_end_to_end_through_the_composer() {
     let outcome = agent.run("add 2 and 3").await.unwrap();
     assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
 
-    let executed = agent.state().events().iter().any(|event| {
-        matches!(event, runic_state::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, runic_types::MessageContent::Blocks(blocks)
-                if blocks.iter().any(|block| matches!(block,
-                    ContentBlock::ToolResult { content, .. } if content.text() == "5"))))
+    let executed = agent.state().messages_for_provider().iter().any(|msg| {
+        matches!(&msg.content, runic_types::MessageContent::Blocks(blocks)
+            if blocks.iter().any(|block| matches!(block,
+                ContentBlock::ToolResult { content, .. } if content.text() == "5")))
     });
     assert!(executed, "macro tool result must land in the log");
 }

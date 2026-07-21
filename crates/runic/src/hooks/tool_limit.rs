@@ -155,7 +155,7 @@ impl WriteHook for ToolCallLimit {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use runic_state::SessionEvent;
+    use runic_state::AgentEvent;
     use runic_types::Message;
 
     fn state() -> AgentState {
@@ -170,13 +170,15 @@ mod tests {
         }
     }
 
-    fn tool_result_event(run: &str, tool: &str) -> SessionEvent {
-        SessionEvent::ToolFinished {
+    fn tool_result_event(run: &str, tool: &str) -> AgentEvent {
+        AgentEvent::ToolFinished {
             run_id: run.into(),
             turn: 1,
             call_id: "tu".into(),
             tool: tool.into(),
             status: runic_state::ToolStatus::Ok,
+            result: serde_json::Value::Null,
+            provenance: Vec::new(),
             duration_ms: 1,
             at: Utc::now(),
         }
@@ -226,8 +228,8 @@ mod tests {
         hook.before_agent(&mut s).await;
         assert!(allowed(&hook, &mut s, "payment").await);
         assert!(allowed(&hook, &mut s, "payment").await);
-        s.push_event(tool_result_event("r1", "payment"));
-        s.push_event(tool_result_event("r1", "payment"));
+        s.emit(tool_result_event("r1", "payment"));
+        s.emit(tool_result_event("r1", "payment"));
 
         hook.before_agent(&mut s).await;
         let blocked = hook.before_tool(&mut s, &mut call("payment")).await;
@@ -241,7 +243,7 @@ mod tests {
             .per_thread("payment", 1)
             .message("payment", "No more charges — ask the user to confirm.");
         let mut s = state();
-        s.push_event(tool_result_event("r1", "payment"));
+        s.emit(tool_result_event("r1", "payment"));
 
         hook.before_agent(&mut s).await;
         match hook.before_tool(&mut s, &mut call("payment")).await {
@@ -257,9 +259,9 @@ mod tests {
     async fn per_thread_survives_compaction() {
         let hook = ToolCallLimit::new().per_thread("payment", 2);
         let mut s = state();
-        s.push_event(tool_result_event("r1", "payment"));
-        s.push_event(tool_result_event("r1", "payment"));
-        s.push_event(SessionEvent::StateSnapshot {
+        s.emit(tool_result_event("r1", "payment"));
+        s.emit(tool_result_event("r1", "payment"));
+        s.emit(AgentEvent::StateSnapshot {
             run_id: "r1".into(),
             messages: vec![Message::assistant("summary of earlier context")],
             system_prompt: "sys".into(),
@@ -280,8 +282,8 @@ mod tests {
     async fn per_thread_survives_an_agent_rebuild() {
         let hook = ToolCallLimit::new().per_thread("payment", 2);
         let mut replayed = state();
-        replayed.push_event(tool_result_event("r1", "payment"));
-        replayed.push_event(tool_result_event("r2", "payment"));
+        replayed.emit(tool_result_event("r1", "payment"));
+        replayed.emit(tool_result_event("r2", "payment"));
 
         hook.before_agent(&mut replayed).await;
         let blocked = hook.before_tool(&mut replayed, &mut call("payment")).await;
@@ -309,12 +311,12 @@ mod tests {
         assert!(allowed(&hook, &mut s, "b").await);
         let blocked = hook.before_tool(&mut s, &mut call("c")).await;
         assert!(is_blocked(&blocked, "this run"));
-        s.push_event(tool_result_event("r1", "a"));
-        s.push_event(tool_result_event("r1", "b"));
+        s.emit(tool_result_event("r1", "a"));
+        s.emit(tool_result_event("r1", "b"));
 
         hook.before_agent(&mut s).await;
         assert!(allowed(&hook, &mut s, "c").await);
-        s.push_event(tool_result_event("r2", "c"));
+        s.emit(tool_result_event("r2", "c"));
 
         hook.before_agent(&mut s).await;
         let blocked = hook.before_tool(&mut s, &mut call("d")).await;

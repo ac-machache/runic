@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
-use runic_state::SessionEvent;
+use crate::SessionEvent;
 use runic_types::Role;
 
 use tokio::sync::RwLock;

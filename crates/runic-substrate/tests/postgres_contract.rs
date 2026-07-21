@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use runic_state::SessionEvent;
+use runic_substrate::SessionEvent;
 use runic_substrate::{
     ArtifactStore, Error, MemoryArtifactStore, PostgresArtifactStore, PostgresSessionStore,
     SessionStore,

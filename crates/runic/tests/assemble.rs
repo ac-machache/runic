@@ -220,16 +220,24 @@ async fn compaction_folds_history_before_the_model_call() {
         runic_types::Message::user("recent question"),
     ];
     for msg in old {
-        agent
-            .state_mut()
-            .push_event(runic_state::SessionEvent::Message {
-                run_id: "r0".into(),
-                msg,
-                at: chrono::Utc::now(),
-            });
+        agent.state_mut().emit(runic_state::AgentEvent::Message {
+            run_id: "r0".into(),
+            msg,
+            at: chrono::Utc::now(),
+        });
     }
 
+    let (cap_tx, mut cap_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .state_mut()
+        .set_emitter(Some(Arc::new(runic_agent::ChannelEmitter(cap_tx))));
+
     agent.run("final question").await.unwrap();
+
+    let mut captured: Vec<runic_state::AgentEvent> = Vec::new();
+    while let Ok(ev) = cap_rx.try_recv() {
+        captured.push(ev);
+    }
 
     assert_eq!(
         provider.count(),
@@ -252,11 +260,9 @@ async fn compaction_folds_history_before_the_model_call() {
             .contains("recent question")
     );
     assert!(
-        agent
-            .state()
-            .events()
+        captured
             .iter()
-            .any(|e| matches!(e, runic_state::SessionEvent::StateSnapshot { .. }))
+            .any(|e| matches!(e, runic_state::AgentEvent::StateSnapshot { .. }))
     );
 }
 
@@ -280,13 +286,11 @@ async fn summary_guidance_override_reaches_the_summarizer() {
         runic_types::Message::assistant("y".repeat(40)),
         runic_types::Message::user("recent question"),
     ] {
-        agent
-            .state_mut()
-            .push_event(runic_state::SessionEvent::Message {
-                run_id: "r0".into(),
-                msg,
-                at: chrono::Utc::now(),
-            });
+        agent.state_mut().emit(runic_state::AgentEvent::Message {
+            run_id: "r0".into(),
+            msg,
+            at: chrono::Utc::now(),
+        });
     }
 
     agent.run("final question").await.unwrap();
@@ -314,7 +318,7 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
     .unwrap();
 
     let state = agent.state_mut();
-    state.fold_event(runic_state::SessionEvent::TaskSpawned {
+    state.emit(runic_state::AgentEvent::TaskSpawned {
         run_id: "r0".into(),
         task_id: "t-done".into(),
         agent: "scout".into(),
@@ -322,7 +326,7 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
         child_session: None,
         at: chrono::Utc::now(),
     });
-    state.fold_event(runic_state::SessionEvent::TaskFinished {
+    state.emit(runic_state::AgentEvent::TaskFinished {
         run_id: "r0".into(),
         task_id: "t-done".into(),
         status: runic_state::TaskStatus::Completed,
@@ -338,21 +342,29 @@ async fn compaction_sweeps_notified_keys_of_departed_tasks() {
         runic_types::Message::assistant("y".repeat(40)),
         runic_types::Message::user("recent question"),
     ] {
-        state.push_event(runic_state::SessionEvent::Message {
+        state.emit(runic_state::AgentEvent::Message {
             run_id: "r0".into(),
             msg,
             at: chrono::Utc::now(),
         });
     }
 
+    let (cap_tx, mut cap_rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .state_mut()
+        .set_emitter(Some(Arc::new(runic_agent::ChannelEmitter(cap_tx))));
+
     agent.run("final question").await.unwrap();
 
+    let mut captured: Vec<runic_state::AgentEvent> = Vec::new();
+    while let Ok(ev) = cap_rx.try_recv() {
+        captured.push(ev);
+    }
+
     assert!(
-        agent
-            .state()
-            .events()
+        captured
             .iter()
-            .any(|e| matches!(e, runic_state::SessionEvent::StateSnapshot { .. }))
+            .any(|e| matches!(e, runic_state::AgentEvent::StateSnapshot { .. }))
     );
     assert!(
         agent.state().get("task-reminder/notified/t-done").is_none(),

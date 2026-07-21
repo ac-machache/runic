@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use runic_agent::Llm;
+use runic_substrate::ArtifactStore;
 
 use crate::ability::Ability;
 
@@ -9,6 +10,7 @@ pub struct Agent {
     pub(crate) llm: Llm,
     pub(crate) abilities: Vec<Arc<dyn Ability>>,
     pub(crate) output_schema: Option<serde_json::Value>,
+    pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl Agent {
@@ -17,11 +19,17 @@ impl Agent {
             llm,
             abilities: Vec::new(),
             output_schema: None,
+            artifact_store: None,
         }
     }
 
     pub fn with(mut self, ability: impl Ability + 'static) -> Self {
         self.abilities.push(Arc::new(ability));
+        self
+    }
+
+    pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
         self
     }
 
@@ -40,7 +48,11 @@ impl Agent {
         tenant: &str,
         session: &str,
     ) -> Result<runic_agent::Runner, super::ComposeError> {
-        super::Composer::new(self.clone(), super::Runtime::new())
+        let mut runtime = super::Runtime::new();
+        if let Some(store) = &self.artifact_store {
+            runtime = runtime.artifacts(store.clone());
+        }
+        super::Composer::new(self.clone(), runtime)
             .build(tenant, session)
             .await
     }

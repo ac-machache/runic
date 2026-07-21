@@ -30,7 +30,7 @@ impl Session {
     pub async fn run(&self, message: impl Into<String>) -> anyhow::Result<AgentOutput> {
         let mut runner = self.agent.build(&self.tenant, &self.session_id).await?;
 
-        for entry in self.store.read(&self.tenant, &self.session_id).await? {
+        for entry in self.store.read_tail(&self.tenant, &self.session_id).await? {
             runner.state_mut().fold(&entry.event.lift());
         }
 

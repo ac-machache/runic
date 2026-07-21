@@ -2,10 +2,13 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::subagent;
+use runic::ability::{ability, subagent};
+use runic::tool::{Tool, ToolContext, ToolResult};
 use runic::{Agent, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
+use runic_substrate::{
+    ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
+};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -99,6 +102,59 @@ async fn session_persists_and_hydrates_across_runs() {
     assert!(
         texts.iter().any(|t| t == "my name is Ada"),
         "run 2 hydrated run 1's assistant reply: {texts:?}"
+    );
+}
+
+struct SpillingTool;
+
+#[async_trait]
+impl Tool for SpillingTool {
+    fn name(&self) -> &str {
+        "dump"
+    }
+
+    fn description(&self) -> &str {
+        "returns a large blob that spills to the artifact store"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("x".repeat(4096)).spill())
+    }
+}
+
+#[tokio::test]
+async fn agent_with_an_artifact_store_spills_a_tool_output_to_it() {
+    let provider = ScriptedProvider::new(vec![
+        call("c1", "dump", serde_json::json!({})),
+        text("done"),
+    ]);
+    let artifacts: Arc<MemoryArtifactStore> = Arc::new(MemoryArtifactStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+
+    let agent = Agent::new(Llm::new(provider, "test-model"))
+        .with(ability("dumper").tool(SpillingTool))
+        .artifacts(artifacts.clone() as Arc<dyn ArtifactStore>);
+
+    let out = agent
+        .session(store.clone(), "tenant", "t1")
+        .run("go")
+        .await
+        .unwrap();
+    assert_eq!(out.text, "done");
+
+    let listed = artifacts.list("tenant", "t1").await.unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "the spilled tool output landed in the artifact store"
     );
 }
 

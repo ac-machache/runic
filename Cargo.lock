@@ -1999,7 +1999,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -2021,7 +2020,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tracing-subscriber",
  "tracing",
  "tracing-subscriber",
  "uuid",

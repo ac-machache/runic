@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use runic_agent::{CancelToken, RunContext, Runner, RunnerBuilder, TasksSnapshot};
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_state::{AgentEvent, Emitter};
+use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::subagent::Subagent;
@@ -377,6 +377,7 @@ impl DelegateTool {
         let external = ctx.emitter();
         let (call_id, turn) = edge_keys(ctx);
         let dctx = self.child_ctx(self.cancel.clone(), ctx);
+        let sub_run = begin_sub(ctx.sub_session(), agent).await;
         emit_started(
             &external,
             &ctx.run_id,
@@ -384,10 +385,10 @@ impl DelegateTool {
             &call_id,
             agent,
             runic_state::DelegationMode::Sync,
-            dctx.child_session.clone(),
+            sub_run.as_ref().map(|s| s.session_id().to_string()),
         );
         let started = std::time::Instant::now();
-        let outcome = run_child(&self.builder, &sub, &dctx, &prompt).await;
+        let outcome = run_child(&self.builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
         emit_finished(
             &external,
             &ctx.run_id,
@@ -418,6 +419,7 @@ impl DelegateTool {
             let acquired = self.budget.acquire();
             let dctx = self.child_ctx(self.cancel.clone(), ctx);
             let external = ctx.emitter();
+            let sub_session = ctx.sub_session();
             let (call_id, turn) = edge_keys(ctx);
             let run_id = ctx.run_id.clone();
             async move {
@@ -428,6 +430,7 @@ impl DelegateTool {
                     Ok(g) => g,
                     Err(e) => return format!("[{name}] error: {e}"),
                 };
+                let sub_run = begin_sub(sub_session, &name).await;
                 emit_started(
                     &external,
                     &run_id,
@@ -435,10 +438,10 @@ impl DelegateTool {
                     &call_id,
                     &name,
                     runic_state::DelegationMode::Parallel,
-                    dctx.child_session.clone(),
+                    sub_run.as_ref().map(|s| s.session_id().to_string()),
                 );
                 let started = std::time::Instant::now();
-                let outcome = run_child(&builder, &sub, &dctx, &prompt).await;
+                let outcome = run_child(&builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
                 emit_finished(&external, &run_id, turn, &call_id, &name, &outcome, started);
                 let out = match outcome.result {
                     Ok(child) => format!("[{name}]\n{}", child.text),
@@ -482,13 +485,15 @@ impl DelegateTool {
         let external = ctx.emitter();
         let run_id = ctx.run_id.clone();
         let dctx = self.child_ctx(cancel, ctx);
+        let sub_run = begin_sub(ctx.sub_session(), agent).await;
+        let child_session = sub_run.as_ref().map(|s| s.session_id().to_string());
         if let Some(external) = &external {
             external.emit(AgentEvent::TaskSpawned {
                 run_id: run_id.clone(),
                 task_id: task_id.clone(),
                 agent: agent.to_string(),
                 prompt: head(&prompt, 300),
-                child_session: dctx.child_session.clone(),
+                child_session: child_session.clone(),
                 at: chrono::Utc::now(),
             });
         }
@@ -507,10 +512,10 @@ impl DelegateTool {
                 &call_id,
                 &agent_name,
                 runic_state::DelegationMode::Background,
-                dctx.child_session.clone(),
+                child_session,
             );
             let started = std::time::Instant::now();
-            let outcome = run_child(&builder, &sub, &dctx, &prompt).await;
+            let outcome = run_child(&builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
             emit_finished(
                 &external,
                 &run_id,
@@ -675,6 +680,7 @@ struct ChildRun {
 struct ChildOutcome {
     result: anyhow::Result<ChildRun>,
     child_session: Option<String>,
+    persistence: Option<runic_state::ChildPersistenceStatus>,
 }
 
 async fn run_child(
@@ -682,13 +688,17 @@ async fn run_child(
     subagent: &Subagent,
     dctx: &DelegationCtx,
     prompt: &str,
+    sub: Option<&dyn SubRun>,
 ) -> ChildOutcome {
     let req = SubagentReq { subagent, dctx };
     let mut child = assemble_subagent(builder.as_ref(), &req).await;
     let configured = child.model().to_string();
-    let rc = RunContext::new()
+    let mut rc = RunContext::new()
         .with_cancel(dctx.cancel.clone())
         .with_config(dctx.config.clone());
+    if let Some(sub) = sub {
+        rc = rc.with_events(sub.emitter()).with_sub_session(sub.nested());
+    }
 
     let result = match child.run_with(prompt.to_string(), rc).await {
         Ok(outcome) => {
@@ -706,9 +716,33 @@ async fn run_child(
         }
         Err(e) => Err(anyhow::anyhow!("{e}")),
     };
+    let persistence = match sub {
+        Some(sub) => Some(match sub.flush().await {
+            Ok(()) => runic_state::ChildPersistenceStatus::Flushed,
+            Err(e) => runic_state::ChildPersistenceStatus::FlushFailed(e.to_string()),
+        }),
+        None => None,
+    };
     ChildOutcome {
         result,
-        child_session: dctx.child_session.clone(),
+        child_session: sub.map(|s| s.session_id().to_string()),
+        persistence,
+    }
+}
+
+async fn begin_sub(
+    sub_session: Option<Arc<dyn SubSession>>,
+    agent: &str,
+) -> Option<Box<dyn SubRun>> {
+    match sub_session {
+        Some(ss) => match ss.begin(agent).await {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!(agent, error = %e, "sub-session begin failed; running ephemeral");
+                None
+            }
+        },
+        None => None,
     }
 }
 
@@ -756,7 +790,7 @@ fn emit_finished(
         model,
         duration_ms: started.elapsed().as_millis() as u64,
         child_session: outcome.child_session.clone(),
-        child_persistence: None,
+        child_persistence: outcome.persistence.clone(),
         at: chrono::Utc::now(),
     });
 }

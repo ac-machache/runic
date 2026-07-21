@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use runic_hook::{ReadHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
-use runic_state::{AgentState, Emitter};
+use runic_state::{AgentState, Emitter, SubSession};
 use runic_tool::{
     ACTIVATED_KEY_PREFIX, ActivatedToolSet, HumanInterface, Tool, ToolCatalog, ToolSpec,
 };
@@ -109,6 +109,7 @@ pub struct RunContext {
     /// Optional human channel for HITL tools (`ask_user` / `escalate_to_human`).
     /// Provided per run by the surface; flows into [`ToolContext`].
     pub human: Option<Arc<dyn HumanInterface>>,
+    pub sub_session: Option<Arc<dyn SubSession>>,
     /// Optional agent name recorded on the run's `RunStart` event.
     pub agent: Option<String>,
     /// Optional actor identifier recorded on the run's audit stamp. The
@@ -159,6 +160,11 @@ impl RunContext {
     /// Attach a human channel for HITL tools this run.
     pub fn with_human(mut self, human: Arc<dyn HumanInterface>) -> Self {
         self.human = Some(human);
+        self
+    }
+
+    pub fn with_sub_session(mut self, sub_session: Arc<dyn SubSession>) -> Self {
+        self.sub_session = Some(sub_session);
         self
     }
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
@@ -270,6 +276,7 @@ pub struct Runner {
     /// Human channel, installed per-run from [`RunContext`] (None when no HITL
     /// surface is wired).
     pub(crate) human: Option<Arc<dyn HumanInterface>>,
+    pub(crate) sub_session: Option<Arc<dyn SubSession>>,
     /// Boot-scoped resolver for on-demand tools (e.g. the deferred MCP
     /// catalog). Which tools are switched on lives in `state.data` under
     /// activation keys; `activated` below is this agent's materialization.
@@ -505,6 +512,7 @@ impl RunnerBuilder {
             config: self.config,
             guard: loop_guard::LoopGuard::default(),
             human: None,
+            sub_session: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
             spill: self.spill,

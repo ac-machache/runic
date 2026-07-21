@@ -491,6 +491,7 @@ impl Runner {
         let mut ctx = ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)
             .with_config(self.state.config.clone())
             .with_human(self.human.clone())
+            .with_sub_session(self.sub_session.clone())
             .with_emitter(Some(tool_emitter));
         ctx.insert(crate::TasksSnapshot(std::sync::Arc::new(
             self.state.tasks().clone(),

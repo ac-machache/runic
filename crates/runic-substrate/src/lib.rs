@@ -23,6 +23,7 @@ mod builders;
 mod event;
 mod local;
 mod memory;
+mod persister;
 mod replay;
 mod sessions;
 pub mod timeline;
@@ -37,6 +38,7 @@ pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use event::{SessionEvent, project};
 pub use local::LocalArtifactStore;
 pub use memory::{MemoryArtifactStore, MemorySessionStore};
+pub use persister::{PersistHandle, StoreSubSession, attach as attach_persister};
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{
     ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore,

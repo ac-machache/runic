@@ -158,6 +158,7 @@ pub struct ToolContext {
     config: serde_json::Map<String, serde_json::Value>,
     human: Option<Arc<dyn HumanInterface>>,
     emitter: Option<Arc<dyn runic_state::Emitter>>,
+    sub_session: Option<Arc<dyn runic_state::SubSession>>,
 }
 
 impl ToolContext {
@@ -174,6 +175,7 @@ impl ToolContext {
             config: serde_json::Map::new(),
             human: None,
             emitter: None,
+            sub_session: None,
         }
     }
 
@@ -189,6 +191,18 @@ impl ToolContext {
     pub fn with_emitter(mut self, emitter: Option<Arc<dyn runic_state::Emitter>>) -> Self {
         self.emitter = emitter;
         self
+    }
+
+    pub fn with_sub_session(
+        mut self,
+        sub_session: Option<Arc<dyn runic_state::SubSession>>,
+    ) -> Self {
+        self.sub_session = sub_session;
+        self
+    }
+
+    pub fn sub_session(&self) -> Option<Arc<dyn runic_state::SubSession>> {
+        self.sub_session.clone()
     }
 
     pub fn emit(&self, event: runic_state::AgentEvent) {

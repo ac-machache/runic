@@ -11,6 +11,7 @@
 pub mod event;
 pub mod state;
 pub mod stats;
+pub mod subsession;
 pub mod tasks;
 
 pub use event::{
@@ -22,6 +23,7 @@ pub use state::{
     validate_state_key,
 };
 pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, ThreadStats, ToolStat};
+pub use subsession::{SubRun, SubSession};
 pub use tasks::{TaskRecord, TaskStatus};
 
 #[cfg(test)]

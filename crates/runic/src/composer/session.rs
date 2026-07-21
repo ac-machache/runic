@@ -1,8 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use runic_agent::RunContext;
-use runic_state::{AgentEvent, Emitter};
-use runic_substrate::{SessionStore, project};
+use runic_substrate::{SessionStore, StoreSubSession, attach_persister};
 
 use super::{Agent, AgentOutput};
 
@@ -35,35 +34,27 @@ impl Session {
             runner.state_mut().fold(&entry.event.lift());
         }
 
-        let sink = Arc::new(Collector::default());
-        let ctx = RunContext::new().with_events(sink.clone());
+        let (emitter, handle) = attach_persister(
+            self.store.clone(),
+            self.tenant.clone(),
+            self.session_id.clone(),
+        );
+        let sub_session = Arc::new(StoreSubSession::new(
+            self.store.clone(),
+            self.tenant.clone(),
+            self.session_id.clone(),
+        ));
+        let ctx = RunContext::new()
+            .with_events(emitter)
+            .with_sub_session(sub_session);
+
         let outcome = runner
             .run_with(message.into(), ctx)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-        let events: Vec<_> = sink.take().iter().filter_map(project).collect();
-        if !events.is_empty() {
-            self.store
-                .append_batch(&self.tenant, &self.session_id, &events)
-                .await?;
-        }
+        handle.flush().await?;
 
         Ok(AgentOutput::from_run(&runner, outcome))
-    }
-}
-
-#[derive(Default, Debug)]
-struct Collector(Mutex<Vec<AgentEvent>>);
-
-impl Emitter for Collector {
-    fn emit(&self, event: AgentEvent) {
-        self.0.lock().unwrap().push(event);
-    }
-}
-
-impl Collector {
-    fn take(&self) -> Vec<AgentEvent> {
-        std::mem::take(&mut self.0.lock().unwrap())
     }
 }

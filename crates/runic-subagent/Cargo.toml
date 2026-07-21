@@ -28,3 +28,4 @@ runic-types = { path = "../runic-types" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 runic-provider = { path = "../runic-provider" }
 runic-types = { path = "../runic-types" }
+tracing-subscriber = { workspace = true }

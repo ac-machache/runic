@@ -24,6 +24,7 @@ use runic_provider::Provider;
 use runic_skills::SkillSet;
 use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
 use runic_tool::{Tool, ToolContext, ToolResult};
+use tracing::Instrument;
 
 use crate::subagent::Subagent;
 
@@ -378,26 +379,20 @@ impl DelegateTool {
         let (call_id, turn) = edge_keys(ctx);
         let dctx = self.child_ctx(self.cancel.clone(), ctx);
         let sub_run = begin_sub(ctx.sub_session(), agent).await;
-        emit_started(
+        let outcome = traced_run_child(
+            &self.builder,
+            &sub,
+            &dctx,
+            &prompt,
+            sub_run.as_deref(),
             &external,
             &ctx.run_id,
             turn,
             &call_id,
             agent,
             runic_state::DelegationMode::Sync,
-            sub_run.as_ref().map(|s| s.session_id().to_string()),
-        );
-        let started = std::time::Instant::now();
-        let outcome = run_child(&self.builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
-        emit_finished(
-            &external,
-            &ctx.run_id,
-            turn,
-            &call_id,
-            agent,
-            &outcome,
-            started,
-        );
+        )
+        .await;
         drop(guard);
         match outcome.result {
             Ok(child) => ToolResult::ok(child.text),
@@ -431,18 +426,20 @@ impl DelegateTool {
                     Err(e) => return format!("[{name}] error: {e}"),
                 };
                 let sub_run = begin_sub(sub_session, &name).await;
-                emit_started(
+                let outcome = traced_run_child(
+                    &builder,
+                    &sub,
+                    &dctx,
+                    &prompt,
+                    sub_run.as_deref(),
                     &external,
                     &run_id,
                     turn,
                     &call_id,
                     &name,
                     runic_state::DelegationMode::Parallel,
-                    sub_run.as_ref().map(|s| s.session_id().to_string()),
-                );
-                let started = std::time::Instant::now();
-                let outcome = run_child(&builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
-                emit_finished(&external, &run_id, turn, &call_id, &name, &outcome, started);
+                )
+                .await;
                 let out = match outcome.result {
                     Ok(child) => format!("[{name}]\n{}", child.text),
                     Err(e) => format!("[{name}] error: {e}"),
@@ -505,26 +502,20 @@ impl DelegateTool {
         let agent_name = agent.to_string();
         tokio::spawn(async move {
             let _guard = guard; // hold the concurrent slot until done
-            emit_started(
+            let outcome = traced_run_child(
+                &builder,
+                &sub,
+                &dctx,
+                &prompt,
+                sub_run.as_deref(),
                 &external,
                 &run_id,
                 turn,
                 &call_id,
                 &agent_name,
                 runic_state::DelegationMode::Background,
-                child_session,
-            );
-            let started = std::time::Instant::now();
-            let outcome = run_child(&builder, &sub, &dctx, &prompt, sub_run.as_deref()).await;
-            emit_finished(
-                &external,
-                &run_id,
-                turn,
-                &call_id,
-                &agent_name,
-                &outcome,
-                started,
-            );
+            )
+            .await;
             let result = outcome.result;
             let outcome = {
                 let mut tasks = tasks.lock().unwrap_or_else(|p| p.into_inner());
@@ -728,6 +719,66 @@ async fn run_child(
         child_session: sub.map(|s| s.session_id().to_string()),
         persistence,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn traced_run_child(
+    builder: &Arc<dyn SubagentBuilder>,
+    subagent: &Subagent,
+    dctx: &DelegationCtx,
+    prompt: &str,
+    sub_run: Option<&dyn SubRun>,
+    external: &Option<Arc<dyn Emitter>>,
+    run_id: &str,
+    turn: u32,
+    call_id: &str,
+    agent: &str,
+    mode: runic_state::DelegationMode,
+) -> ChildOutcome {
+    let span = tracing::info_span!(
+        "delegate",
+        agent = %agent,
+        mode = %mode.as_str(),
+        depth = dctx.depth,
+        child_session = tracing::field::Empty,
+        persistence = tracing::field::Empty,
+        status = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    if let Some(sub_run) = sub_run {
+        span.record("child_session", sub_run.session_id());
+    }
+    async {
+        emit_started(
+            external,
+            run_id,
+            turn,
+            call_id,
+            agent,
+            mode,
+            sub_run.map(|s| s.session_id().to_string()),
+        );
+        let started = std::time::Instant::now();
+        let outcome = run_child(builder, subagent, dctx, prompt, sub_run).await;
+        emit_finished(external, run_id, turn, call_id, agent, &outcome, started);
+
+        let current = tracing::Span::current();
+        current.record("persistence", format!("{:?}", outcome.persistence));
+        current.record(
+            "status",
+            if outcome.result.is_ok() {
+                "ok"
+            } else {
+                "failed"
+            },
+        );
+        if outcome.result.is_err() {
+            current.record("otel.status_code", "ERROR");
+        }
+        outcome
+    }
+    .instrument(span)
+    .await
 }
 
 async fn begin_sub(

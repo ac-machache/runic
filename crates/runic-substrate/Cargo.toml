@@ -35,3 +35,4 @@ postgres = ["dep:sqlx"]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 proptest = { workspace = true }
+tracing-subscriber = { workspace = true }

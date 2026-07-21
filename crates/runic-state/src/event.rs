@@ -51,6 +51,16 @@ pub enum DelegationMode {
     Background,
 }
 
+impl DelegationMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DelegationMode::Sync => "sync",
+            DelegationMode::Parallel => "parallel",
+            DelegationMode::Background => "background",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DelegationStatus {
     Ok,

@@ -22,6 +22,7 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
+use tracing::Instrument;
 
 use base64::Engine;
 use runic_agent::AgentEvent;
@@ -288,53 +289,56 @@ pub async fn create_and_stream_run(
     let registry = state.runs.clone();
     let store = state.session_store.clone();
     let factory = state.agents.factory(&agent_name)?.clone();
-    tokio::spawn(async move {
-        let lock = registry.thread_lock(&tenant, &thread_id).await;
-        let _guard = lock.lock().await;
-        if !crate::registry::acquire_thread_lease(
-            &store,
-            &registry,
-            &tenant,
-            &thread_id,
-            &begun.cancel,
-        )
-        .await
-        {
-            let _ = store
-                .set_run_status(&run_id, RunStatus::Cancelled, None)
-                .await;
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            return;
-        }
-        let claim = crate::registry::claim_lease(
-            &store,
-            &registry,
-            crate::registry::HeartbeatRun {
-                tenant: tenant.clone(),
-                thread_id: thread_id.clone(),
-                run_id: run_id.clone(),
-                cancel: begun.cancel.clone(),
-                steering: begun.steering_tx.clone(),
-            },
-        )
-        .await;
-        if matches!(claim, crate::registry::Claim::Lost) {
-            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
-            let _ = err_tx.send(WireEvent::RunError {
-                run_id: Some(run_id.clone()),
-                message: "run was claimed by another instance".into(),
-            });
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-            return;
-        }
-        let outcome =
-            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
-                .await
+    let parent = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            let lock = registry.thread_lock(&tenant, &thread_id).await;
+            let _guard = lock.lock().await;
+            if !crate::registry::acquire_thread_lease(
+                &store,
+                &registry,
+                &tenant,
+                &thread_id,
+                &begun.cancel,
+            )
+            .await
+            {
+                let _ = store
+                    .set_run_status(&run_id, RunStatus::Cancelled, None)
+                    .await;
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                return;
+            }
+            let claim = crate::registry::claim_lease(
+                &store,
+                &registry,
+                crate::registry::HeartbeatRun {
+                    tenant: tenant.clone(),
+                    thread_id: thread_id.clone(),
+                    run_id: run_id.clone(),
+                    cancel: begun.cancel.clone(),
+                    steering: begun.steering_tx.clone(),
+                },
+            )
+            .await;
+            if matches!(claim, crate::registry::Claim::Lost) {
+                tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+                let _ = err_tx.send(WireEvent::RunError {
+                    run_id: Some(run_id.clone()),
+                    message: "run was claimed by another instance".into(),
+                });
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+                return;
+            }
+            let outcome = match crate::registry::hydrate_agent(
+                &store, &factory, &tenant, &thread_id, &mut begun,
+            )
+            .await
             {
                 Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
                 Err(e) => {
@@ -342,33 +346,37 @@ pub async fn create_and_stream_run(
                     Err(runic_agent::AgentError::Build(e.to_string()))
                 }
             };
-        claim.release();
-        let (status, error) = match &outcome {
-            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
-            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
-            Ok(_) => (RunStatus::Success, None),
-            Err(e) => (RunStatus::Error, Some(e.to_string())),
-        };
-        if let Err(e) = store
-            .set_run_status(&run_id, status, error.as_deref())
-            .await
-        {
-            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+            claim.release();
+            let (status, error) = match &outcome {
+                Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => {
+                    (RunStatus::Cancelled, None)
+                }
+                Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
+                Ok(_) => (RunStatus::Success, None),
+                Err(e) => (RunStatus::Error, Some(e.to_string())),
+            };
+            if let Err(e) = store
+                .set_run_status(&run_id, status, error.as_deref())
+                .await
+            {
+                tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+            }
+            if let Err(e) = outcome {
+                tracing::error!(%tenant, %thread_id, error = %e, "run task failed");
+                let _ = err_tx.send(WireEvent::RunError {
+                    run_id: Some(run_id.clone()),
+                    message: e.to_string(),
+                });
+            }
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+            // Guard drops → the next queued run on this thread proceeds. The agent
+            // clears its event sender + human channel here, closing both rx ends.
         }
-        if let Err(e) = outcome {
-            tracing::error!(%tenant, %thread_id, error = %e, "run task failed");
-            let _ = err_tx.send(WireEvent::RunError {
-                run_id: Some(run_id.clone()),
-                message: e.to_string(),
-            });
-        }
-        registry
-            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-            .await;
-        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-        // Guard drops → the next queued run on this thread proceeds. The agent
-        // clears its event sender + human channel here, closing both rx ends.
-    });
+        .instrument(parent),
+    );
 
     let stream = stream! {
         let mut evt_open = true;
@@ -492,49 +500,52 @@ pub async fn wait_run(
     let registry = state.runs.clone();
     let store = state.session_store.clone();
     let factory = state.agents.factory(&agent_name)?.clone();
-    let task = tokio::spawn(async move {
-        let lock = registry.thread_lock(&tenant, &thread_id).await;
-        let _guard = lock.lock().await;
-        if !crate::registry::acquire_thread_lease(
-            &store,
-            &registry,
-            &tenant,
-            &thread_id,
-            &begun.cancel,
-        )
-        .await
-        {
-            let _ = store
-                .set_run_status(&run_id, RunStatus::Cancelled, None)
-                .await;
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            return Err("run cancelled before it started".to_string());
-        }
-        let claim = crate::registry::claim_lease(
-            &store,
-            &registry,
-            crate::registry::HeartbeatRun {
-                tenant: tenant.clone(),
-                thread_id: thread_id.clone(),
-                run_id: run_id.clone(),
-                cancel: begun.cancel.clone(),
-                steering: begun.steering_tx.clone(),
-            },
-        )
-        .await;
-        if matches!(claim, crate::registry::Claim::Lost) {
-            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-            return Err("run was claimed by another instance".to_string());
-        }
-        let (agent, result) =
-            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
-                .await
+    let parent = tracing::Span::current();
+    let task = tokio::spawn(
+        async move {
+            let lock = registry.thread_lock(&tenant, &thread_id).await;
+            let _guard = lock.lock().await;
+            if !crate::registry::acquire_thread_lease(
+                &store,
+                &registry,
+                &tenant,
+                &thread_id,
+                &begun.cancel,
+            )
+            .await
+            {
+                let _ = store
+                    .set_run_status(&run_id, RunStatus::Cancelled, None)
+                    .await;
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                return Err("run cancelled before it started".to_string());
+            }
+            let claim = crate::registry::claim_lease(
+                &store,
+                &registry,
+                crate::registry::HeartbeatRun {
+                    tenant: tenant.clone(),
+                    thread_id: thread_id.clone(),
+                    run_id: run_id.clone(),
+                    cancel: begun.cancel.clone(),
+                    steering: begun.steering_tx.clone(),
+                },
+            )
+            .await;
+            if matches!(claim, crate::registry::Claim::Lost) {
+                tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+                return Err("run was claimed by another instance".to_string());
+            }
+            let (agent, result) = match crate::registry::hydrate_agent(
+                &store, &factory, &tenant, &thread_id, &mut begun,
+            )
+            .await
             {
                 Ok(mut agent) => {
                     let result = agent.run_message_with(user_msg, run_ctx).await;
@@ -545,44 +556,48 @@ pub async fn wait_run(
                     (None, Err(runic_agent::AgentError::Build(e.to_string())))
                 }
             };
-        claim.release();
-        let (status, error) = match &result {
-            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
-            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
-            Ok(_) => (RunStatus::Success, None),
-            Err(e) => (RunStatus::Error, Some(e.to_string())),
-        };
-        let _ = tee.await;
-        flush_persist(&begun.persist).await;
-        if let Err(e) = store
-            .set_run_status(&run_id, status, error.as_deref())
-            .await
-        {
-            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
-        }
-        registry
-            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-            .await;
-        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-        match result {
-            Ok(outcome) => {
-                let text = agent
-                    .as_ref()
-                    .and_then(|agent| agent.state().last_assistant_text())
-                    .unwrap_or_default();
-                Ok(WaitRunResponse {
-                    run_id,
-                    text,
-                    stop_reason: outcome.stop_reason,
-                    total_turns: outcome.total_turns,
-                    input_tokens: outcome.usage.input_tokens,
-                    output_tokens: outcome.usage.output_tokens,
-                    structured: outcome.structured,
-                })
+            claim.release();
+            let (status, error) = match &result {
+                Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => {
+                    (RunStatus::Cancelled, None)
+                }
+                Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
+                Ok(_) => (RunStatus::Success, None),
+                Err(e) => (RunStatus::Error, Some(e.to_string())),
+            };
+            let _ = tee.await;
+            flush_persist(&begun.persist).await;
+            if let Err(e) = store
+                .set_run_status(&run_id, status, error.as_deref())
+                .await
+            {
+                tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
             }
-            Err(e) => Err(e.to_string()),
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+            match result {
+                Ok(outcome) => {
+                    let text = agent
+                        .as_ref()
+                        .and_then(|agent| agent.state().last_assistant_text())
+                        .unwrap_or_default();
+                    Ok(WaitRunResponse {
+                        run_id,
+                        text,
+                        stop_reason: outcome.stop_reason,
+                        total_turns: outcome.total_turns,
+                        input_tokens: outcome.usage.input_tokens,
+                        output_tokens: outcome.usage.output_tokens,
+                        structured: outcome.structured,
+                    })
+                }
+                Err(e) => Err(e.to_string()),
+            }
         }
-    });
+        .instrument(parent),
+    );
 
     match task.await {
         Ok(Ok(response)) => Ok(Json(response)),
@@ -695,49 +710,52 @@ pub async fn background_run(
     let store = state.session_store.clone();
     let factory = state.agents.factory(&agent_name)?.clone();
     let response_run_id = run_id.clone();
-    tokio::spawn(async move {
-        let lock = registry.thread_lock(&tenant, &thread_id).await;
-        let _guard = lock.lock().await;
-        if !crate::registry::acquire_thread_lease(
-            &store,
-            &registry,
-            &tenant,
-            &thread_id,
-            &begun.cancel,
-        )
-        .await
-        {
-            let _ = store
-                .set_run_status(&run_id, RunStatus::Cancelled, None)
-                .await;
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            return;
-        }
-        let claim = crate::registry::claim_lease(
-            &store,
-            &registry,
-            crate::registry::HeartbeatRun {
-                tenant: tenant.clone(),
-                thread_id: thread_id.clone(),
-                run_id: run_id.clone(),
-                cancel: begun.cancel.clone(),
-                steering: begun.steering_tx.clone(),
-            },
-        )
-        .await;
-        if matches!(claim, crate::registry::Claim::Lost) {
-            tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
-            registry
-                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-                .await;
-            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-            return;
-        }
-        let outcome =
-            match crate::registry::hydrate_agent(&store, &factory, &tenant, &thread_id, &mut begun)
-                .await
+    let parent = tracing::Span::current();
+    tokio::spawn(
+        async move {
+            let lock = registry.thread_lock(&tenant, &thread_id).await;
+            let _guard = lock.lock().await;
+            if !crate::registry::acquire_thread_lease(
+                &store,
+                &registry,
+                &tenant,
+                &thread_id,
+                &begun.cancel,
+            )
+            .await
+            {
+                let _ = store
+                    .set_run_status(&run_id, RunStatus::Cancelled, None)
+                    .await;
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                return;
+            }
+            let claim = crate::registry::claim_lease(
+                &store,
+                &registry,
+                crate::registry::HeartbeatRun {
+                    tenant: tenant.clone(),
+                    thread_id: thread_id.clone(),
+                    run_id: run_id.clone(),
+                    cancel: begun.cancel.clone(),
+                    steering: begun.steering_tx.clone(),
+                },
+            )
+            .await;
+            if matches!(claim, crate::registry::Claim::Lost) {
+                tracing::warn!(%tenant, %thread_id, %run_id, "run already claimed elsewhere");
+                registry
+                    .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                    .await;
+                crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
+                return;
+            }
+            let outcome = match crate::registry::hydrate_agent(
+                &store, &factory, &tenant, &thread_id, &mut begun,
+            )
+            .await
             {
                 Ok(mut agent) => agent.run_message_with(user_msg, run_ctx).await,
                 Err(e) => {
@@ -745,29 +763,33 @@ pub async fn background_run(
                     Err(runic_agent::AgentError::Build(e.to_string()))
                 }
             };
-        claim.release();
-        let (status, error) = match &outcome {
-            Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => (RunStatus::Cancelled, None),
-            Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
-            Ok(_) => (RunStatus::Success, None),
-            Err(e) => (RunStatus::Error, Some(e.to_string())),
-        };
-        if let Err(e) = &outcome {
-            tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
+            claim.release();
+            let (status, error) = match &outcome {
+                Ok(o) if o.stop_reason.as_deref() == Some("cancelled") => {
+                    (RunStatus::Cancelled, None)
+                }
+                Ok(o) if o.stop_reason.as_deref() == Some("suspended") => (RunStatus::Paused, None),
+                Ok(_) => (RunStatus::Success, None),
+                Err(e) => (RunStatus::Error, Some(e.to_string())),
+            };
+            if let Err(e) = &outcome {
+                tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
+            }
+            let _ = tee.await;
+            flush_persist(&begun.persist).await;
+            if let Err(e) = store
+                .set_run_status(&run_id, status, error.as_deref())
+                .await
+            {
+                tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
+            }
+            registry
+                .end(&tenant, &thread_id, &run_id, begun.persist.clone())
+                .await;
+            crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
         }
-        let _ = tee.await;
-        flush_persist(&begun.persist).await;
-        if let Err(e) = store
-            .set_run_status(&run_id, status, error.as_deref())
-            .await
-        {
-            tracing::warn!(%tenant, %thread_id, %run_id, error = %e, "run row update failed");
-        }
-        registry
-            .end(&tenant, &thread_id, &run_id, begun.persist.clone())
-            .await;
-        crate::registry::release_thread_lease(&store, &registry, &tenant, &thread_id).await;
-    });
+        .instrument(parent),
+    );
 
     Ok((
         StatusCode::ACCEPTED,
@@ -936,6 +958,7 @@ pub async fn run_timeline(
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(crate) async fn flush_persist(persist: &runic_substrate::PersistHandle) {
+    tracing::info!(backlog = persist.backlog(), "flushing persisted events");
     match tokio::time::timeout(FLUSH_TIMEOUT, persist.flush()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

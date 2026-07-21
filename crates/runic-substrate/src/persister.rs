@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
 use tokio::sync::{Notify, mpsc};
+use tracing::Instrument;
 
 use crate::{SessionEvent, SessionStore, project};
 
@@ -161,21 +162,48 @@ async fn drain_loop(
         }
         let count = batch.len() as u64;
         let owned: Vec<SessionEvent> = batch.iter().map(|event| (**event).clone()).collect();
+        if persist_batch(&store, &tenant, &session_id, policy, owned, count, &pipe).await {
+            return;
+        }
+    }
+}
+
+async fn persist_batch(
+    store: &Arc<dyn SessionStore>,
+    tenant: &str,
+    session_id: &str,
+    policy: RetryPolicy,
+    owned: Vec<SessionEvent>,
+    count: u64,
+    pipe: &PersistPipe,
+) -> bool {
+    let span = tracing::info_span!(
+        "persist_batch",
+        tenant = %tenant,
+        session_id = %session_id,
+        batch_size = count,
+        attempt = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    async {
         let mut attempt = 0u32;
         loop {
-            match store.append_batch(&tenant, &session_id, &owned).await {
+            match store.append_batch(tenant, session_id, &owned).await {
                 Ok(()) => {
+                    tracing::Span::current().record("attempt", attempt + 1);
                     pipe.committed.fetch_add(count, Ordering::SeqCst);
                     pipe.notify.notify_waiters();
-                    break;
+                    return false;
                 }
                 Err(err) => {
                     attempt += 1;
                     if policy.max_retries.is_some_and(|max| attempt >= max) {
+                        tracing::Span::current().record("attempt", attempt);
+                        tracing::Span::current().record("otel.status_code", "ERROR");
                         tracing::error!(%tenant, %session_id, attempt, error = %err, "persist gave up");
                         *pipe.error.lock().unwrap() = Some(err.to_string());
                         pipe.notify.notify_waiters();
-                        return;
+                        return true;
                     }
                     tracing::warn!(%tenant, %session_id, attempt, error = %err, "persist batch failed — retrying");
                     let delay = policy
@@ -187,6 +215,8 @@ async fn drain_loop(
             }
         }
     }
+    .instrument(span)
+    .await
 }
 
 pub struct StoreSubSession {

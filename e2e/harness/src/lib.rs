@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use runic::ability::ability;
-use runic::composer::Composer;
-use runic_agent::Session;
+use runic::composer::{Composer, Runtime};
+use runic::{Agent, Llm};
+use runic_agent::Runner;
 use runic_hook::{HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, BoxedAgentFactory, single_agent};
@@ -30,7 +31,7 @@ pub struct DummyFactory {
 
 #[async_trait]
 impl AgentFactory for DummyFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Agent> {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
         let provider: Arc<dyn Provider> = if self.real_mistral {
             let key = std::env::var("MISTRAL_API_KEY").unwrap_or_default();
             Arc::new(runic_provider::mistral::MistralDriver::new(key))
@@ -38,8 +39,7 @@ impl AgentFactory for DummyFactory {
             Arc::new(ScriptedProvider)
         };
         let model = std::env::var("RUNIC_MODEL").unwrap_or_else(|_| "mistral-medium-latest".into());
-        let agent = Composer::new(provider, model)
-            .instructions("e2e harness agent")
+        let def = Agent::new(Llm::new(provider, model).instructions("e2e harness agent"))
             .with(
                 ability("core")
                     .tool(AddTool)
@@ -60,11 +60,11 @@ impl AgentFactory for DummyFactory {
                     .deferred()
                     .skills(docs_skill().await)
                     .subagent(docs_worker()),
-            )
-            .subagent_builder(Arc::new(ChildBuilder))
+            );
+        let runner = Composer::new(def, Runtime::new().subagent_builder(Arc::new(ChildBuilder)))
             .build(tenant, session_id)
             .await?;
-        Ok(agent)
+        Ok(runner)
     }
 }
 

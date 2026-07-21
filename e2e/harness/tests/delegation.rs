@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use proptest::prelude::*;
-use runic_agent::Session;
+use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage, ToolCall};
+use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 
 fn text(t: &str) -> CompletionResponse {
     CompletionResponse {
@@ -204,8 +204,8 @@ async fn run_delegations(steps: Vec<ParentStep>) -> Result<(), TestCaseError> {
         steps: Mutex::new(steps.into()),
         seq: AtomicU64::new(0),
     });
-    let delegate = DelegateTool::new(roster(), Arc::new(Builder));
-    let mut agent = Agent::builder(provider, "tenant", "session")
+    let delegate = DelegateTool::with_builder(roster(), Arc::new(Builder));
+    let mut agent = Runner::builder(provider, "tenant", "session")
         .model("parent-model")
         .system_prompt("parent")
         .max_turns(12)
@@ -222,22 +222,20 @@ async fn run_delegations(steps: Vec<ParentStep>) -> Result<(), TestCaseError> {
         );
     }
 
-    let dangling = agent.state().events().iter().any(|e| {
-        matches!(e, runic_state::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|x| matches!(x, ContentBlock::ToolUse { id, .. }
-                    if !has_result(agent.state().events(), id)))))
+    let dangling = agent.state().messages_for_provider().iter().any(|msg| {
+        matches!(&msg.content, MessageContent::Blocks(b)
+            if b.iter().any(|x| matches!(x, ContentBlock::ToolUse { id, .. }
+                if !has_result(agent.state().messages_for_provider(), id))))
     });
     prop_assert!(!dangling, "a delegate call was left without a result");
     Ok(())
 }
 
-fn has_result(events: &[runic_state::SessionEvent], call_id: &str) -> bool {
-    events.iter().any(|e| {
-        matches!(e, runic_state::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|x| matches!(x, ContentBlock::ToolResult { tool_use_id, .. }
-                    if tool_use_id == call_id))))
+fn has_result(messages: &[Message], call_id: &str) -> bool {
+    messages.iter().any(|msg| {
+        matches!(&msg.content, MessageContent::Blocks(b)
+            if b.iter().any(|x| matches!(x, ContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == call_id)))
     })
 }
 

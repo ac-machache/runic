@@ -6,9 +6,9 @@ use axum::http::{Request, StatusCode};
 use proptest::prelude::*;
 use runic_e2e_harness::dummy_agents;
 use runic_serve::{ServeConfig, WorkerConfig, router};
-use runic_state::SessionEvent;
 use runic_substrate::{
-    ArtifactStore, MemoryArtifactStore, MemorySessionStore, RunStatus, SessionStore, StoredEvent,
+    ArtifactStore, MemoryArtifactStore, MemorySessionStore, RunStatus, SessionEvent, SessionStore,
+    StoredEvent,
 };
 use runic_types::{ContentBlock, MessageContent};
 use serde_json::json;

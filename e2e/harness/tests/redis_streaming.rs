@@ -5,8 +5,9 @@ use axum::body::Body;
 use axum::http::Request;
 use runic_e2e_harness::dummy_agents;
 use runic_serve::{EventBroker, RedisBroker, ServeConfig, WorkerConfig, router};
-use runic_state::SessionEvent;
-use runic_substrate::{ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_substrate::{
+    ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
+};
 use serde_json::json;
 use tower::ServiceExt;
 

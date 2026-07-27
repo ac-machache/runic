@@ -6,11 +6,11 @@ use runic::Llm;
 use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, Tools};
 use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
+use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::AgentState;
-use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult, activated_key};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 

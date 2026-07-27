@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::subagent::Subagent;
 use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::Subagent;
 use runic_tool::{Tool, ToolCatalog};
 
 use super::subagent::SubagentDraft;

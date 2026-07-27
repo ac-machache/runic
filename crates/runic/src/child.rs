@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::subagent::{SubagentBuilder, SubagentReq};
 use crate::tools::default_tools;
 use async_trait::async_trait;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{SubagentBuilder, SubagentReq};
 use runic_tool::Tool;
 
 pub struct FoundrySubagentBuilder {

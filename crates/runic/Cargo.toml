@@ -15,10 +15,8 @@ runic-skills = { path = "../runic-skills" }
 runic-state = { path = "../runic-state" }
 runic-types = { path = "../runic-types" }
 runic-agent = { path = "../runic-agent" }
-runic-subagent = { path = "../runic-subagent" }
 runic-mcp = { path = "../runic-mcp" }
 runic-transcriber = { path = "../runic-transcriber" }
-runic-commands = { workspace = true }
 runic-macros = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -32,6 +30,8 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net"] }
+uuid = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

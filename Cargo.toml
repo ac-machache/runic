@@ -7,9 +7,7 @@ members = [
     "crates/runic-tool",
     "crates/runic-hook",
     "crates/runic-agent",
-    "crates/runic-subagent",
     "crates/runic-skills",
-    "crates/runic-commands",
     "crates/runic-mcp",
     "crates/runic-substrate",
     "crates/runic-serve",
@@ -63,7 +61,6 @@ syn = { version = "2", features = ["full"] }
 schemars = "1"
 
 runic-skills = { path = "crates/runic-skills" }
-runic-commands = { path = "crates/runic-commands" }
 runic-mcp = { path = "crates/runic-mcp" }
 runic-substrate = { path = "crates/runic-substrate" }
 runic-serve = { path = "crates/runic-serve" }

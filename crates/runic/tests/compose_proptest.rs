@@ -6,9 +6,9 @@ use proptest::prelude::*;
 use runic::Llm;
 use runic::ability::ability;
 use runic::composer::{Agent, Composer, Runtime};
+use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage, ToolCall};
 

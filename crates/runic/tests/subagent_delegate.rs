@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+use runic::subagent::{DelegateTool, SpawnBudget, Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{DelegateTool, SpawnBudget, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 

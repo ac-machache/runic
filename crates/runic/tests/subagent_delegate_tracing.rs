@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
-use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 use tracing_subscriber::fmt::format::FmtSpan;

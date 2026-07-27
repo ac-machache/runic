@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::FoundrySubagentBuilder;
+use runic::subagent::{DelegationCtx, Subagent, SubagentBuilder, SubagentReq, assemble_subagent};
 use runic_agent::{AgentError, Runner};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_subagent::{DelegationCtx, Subagent, SubagentBuilder, SubagentReq, assemble_subagent};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {

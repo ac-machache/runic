@@ -20,7 +20,6 @@ runic-provider = { path = "../../crates/runic-provider", features = ["mistral"] 
 runic-tool = { path = "../../crates/runic-tool" }
 runic-hook = { path = "../../crates/runic-hook" }
 runic-state = { path = "../../crates/runic-state" }
-runic-subagent = { path = "../../crates/runic-subagent" }
 runic-serve = { path = "../../crates/runic-serve" }
 runic-skills = { path = "../../crates/runic-skills" }
 runic-substrate = { path = "../../crates/runic-substrate", features = ["postgres"] }

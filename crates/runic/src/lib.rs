@@ -36,9 +36,6 @@ pub mod __private {
 pub mod agent {
     pub use runic_agent::*;
 }
-pub mod commands {
-    pub use runic_commands::*;
-}
 pub mod hook {
     pub use runic_hook::*;
 }
@@ -55,10 +52,7 @@ pub mod skills {
 pub mod state {
     pub use runic_state::*;
 }
-pub mod subagent {
-    pub use crate::ability::subagent::{SubagentDraft, subagent};
-    pub use runic_subagent::*;
-}
+pub mod subagent;
 pub mod substrate {
     pub use runic_substrate::*;
 }

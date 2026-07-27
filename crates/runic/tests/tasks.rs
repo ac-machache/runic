@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use runic::hooks::TaskReminder;
+use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_agent::{Runner, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentEvent;
 use runic_state::{TaskStatus, ThreadStats};
-use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage, ToolCall};
 

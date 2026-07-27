@@ -147,7 +147,7 @@ impl RosterVoice {
     pub fn resolved_tool_name(&self) -> &str {
         self.tool_name
             .as_deref()
-            .unwrap_or(crate::delegate::DEFAULT_TOOL_NAME)
+            .unwrap_or(crate::subagent::delegate::DEFAULT_TOOL_NAME)
     }
 
     pub fn roster_section(&self, subagents: &[Subagent]) -> String {

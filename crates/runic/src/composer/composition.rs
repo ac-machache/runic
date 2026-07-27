@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::subagent::{RosterVoice, Subagent};
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::{RosterVoice, Subagent};
 use runic_tool::{Tool, ToolCatalog};
 
 use crate::ability::AbilityBundle;

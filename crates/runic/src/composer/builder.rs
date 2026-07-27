@@ -1,7 +1,7 @@
+use crate::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_agent::RunnerBuilder;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolCatalog};
 use std::{
     collections::{HashMap, HashSet},

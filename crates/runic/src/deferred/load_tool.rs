@@ -92,7 +92,7 @@ impl Tool for LoadAbilityTool {
                 .bundle
                 .subagents
                 .iter()
-                .map(runic_subagent::Subagent::roster_line)
+                .map(crate::subagent::Subagent::roster_line)
                 .collect();
             output.push_str(&lines.join("\n"));
             output.push_str("\n\n");

@@ -1798,17 +1798,16 @@ dependencies = [
  "base64",
  "chrono",
  "chrono-tz",
+ "futures",
  "proptest",
  "reqwest",
  "runic-agent",
- "runic-commands",
  "runic-hook",
  "runic-macros",
  "runic-mcp",
  "runic-provider",
  "runic-skills",
  "runic-state",
- "runic-subagent",
  "runic-substrate",
  "runic-tool",
  "runic-transcriber",
@@ -1821,6 +1820,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1844,17 +1844,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "runic-commands"
-version = "0.10.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_yml",
- "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -1977,28 +1966,6 @@ dependencies = [
  "runic-types",
  "serde",
  "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "runic-subagent"
-version = "0.10.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "futures",
- "runic-agent",
- "runic-hook",
- "runic-provider",
- "runic-skills",
- "runic-state",
- "runic-tool",
- "runic-types",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use crate::subagent::SubagentBuilder;
 use runic_hook::WriteHook;
-use runic_subagent::SubagentBuilder;
 use runic_substrate::ArtifactStore;
 
 #[derive(Default)]

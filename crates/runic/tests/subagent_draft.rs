@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::{ability, subagent};
 use runic::composer::Agent;
+use runic::subagent::Subagent;
 use runic_agent::RunContext;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentState;
-use runic_subagent::Subagent;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 

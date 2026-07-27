@@ -1,6 +1,6 @@
+use crate::subagent::{RosterVoice, Subagent, SubagentBuilder};
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::{RosterVoice, Subagent, SubagentBuilder};
 use runic_tool::{Tool, ToolCatalog};
 use std::collections::HashMap;
 use std::sync::Arc;

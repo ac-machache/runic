@@ -12,7 +12,7 @@ use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderEr
 use runic_serve::{AgentFactory, BoxedAgentFactory, single_agent};
 use runic_skills::SkillSet;
 use runic_state::AgentState;
-use runic_subagent::{SubagentBuilder, SubagentReq};
+use runic::subagent::{SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 

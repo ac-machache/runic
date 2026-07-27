@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::subagent::{RosterVoice, Subagent};
 use async_trait::async_trait;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_subagent::{RosterVoice, Subagent};
 use runic_substrate::{SearchChatsTool, SessionStore};
 use runic_tool::Tool;
 

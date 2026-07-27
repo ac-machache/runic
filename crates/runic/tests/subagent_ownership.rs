@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::{Ability, AbilityBundle, BuildCtx};
 use runic::composer::Agent;
+use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 

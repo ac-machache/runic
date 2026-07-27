@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use proptest::prelude::*;
 use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
+use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 

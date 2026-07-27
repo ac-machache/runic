@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use crate::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use async_trait::async_trait;
 use runic_agent::RunnerBuilder;
 use runic_hook::WriteHook;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolCatalog};
 
 use super::builtin::{Hooks, Skills, Tools};

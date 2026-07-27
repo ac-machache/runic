@@ -43,8 +43,8 @@ async fn write_skill(root: &std::path::Path, name: &str) {
     .unwrap();
 }
 
-fn bench_subagent(name: &str) -> runic_subagent::Subagent {
-    runic_subagent::Subagent::new(name, format!("handles {name} work"))
+fn bench_subagent(name: &str) -> runic::subagent::Subagent {
+    runic::subagent::Subagent::new(name, format!("handles {name} work"))
         .prompt(format!("You are {name}. {}", "detail ".repeat(120)))
 }
 

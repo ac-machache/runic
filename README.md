@@ -97,16 +97,15 @@ runic-provider    Provider trait + Anthropic / Gemini / Mistral / OpenAI-compati
 runic-tool        Tool trait, ToolContext, HumanInterface
 runic-hook        ReadHook / WriteHook (six lifecycle points)
 runic-agent       the agent loop — turns, dispatch, hooks, structured output, suspend/resume
-runic-subagent    delegate tool + AGENT.md roster + ChildBuilder
 runic-skills      SKILL.md registry + skill_view tool
-runic-commands    COMMAND.md slash-command templates
 runic-mcp         MCP client (stdio + Streamable HTTP)
 runic-substrate   sessions + artifacts persistence (Postgres / local / memory) + search_chats
 runic-transcriber speech-to-text trait + Mistral/Voxtral (audio → text preprocess)
 runic-macros      the #[tool] proc-macro
 runic-serve       axum HTTP server (threads, SSE runs, pooling, resume, deferred-tool answers)
-runic             umbrella crate — Composer/Ability, the built-in tool abilities (calc, time,
-                  web, weather, composio, hitl), typed output; re-exports the whole SDK
+runic             umbrella crate — Composer/Ability, subagents + the delegate tool, the
+                  built-in tool abilities (calc, time, web, weather, composio, hitl),
+                  typed output; re-exports the whole SDK
 ```
 
 ## Developing

@@ -5,10 +5,10 @@ use runic::ability::{
     Delegation, Skills, Tools, ask_user, basics, search_chats, weather, web_fetch,
 };
 use runic::composer::{Agent, Composer, Runtime};
+use runic::subagent::Subagent;
 use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_subagent::Subagent;
 use runic_substrate::sessions_memory;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};

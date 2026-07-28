@@ -44,8 +44,14 @@ async fn write_skill(root: &std::path::Path, name: &str) {
 }
 
 fn bench_subagent(name: &str) -> runic::subagent::Subagent {
-    runic::subagent::Subagent::new(name, format!("handles {name} work"))
-        .prompt(format!("You are {name}. {}", "detail ".repeat(120)))
+    runic::subagent::Subagent::new(
+        name,
+        format!("handles {name} work"),
+        Agent::new(
+            Llm::new(Arc::new(NoopProvider), "child-model")
+                .instructions(format!("You are {name}. {}", "detail ".repeat(120))),
+        ),
+    )
 }
 
 struct Fixture {

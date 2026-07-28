@@ -6,7 +6,7 @@ use runic::Llm;
 use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, Tools};
 use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
-use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
+use runic::subagent::Subagent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -205,24 +205,18 @@ async fn skill_catalog(namespace: &str, skill_name: &str, body: &str) -> Arc<Ski
 }
 
 fn worker_def() -> Subagent {
-    Subagent::new("worker", "a worker subagent")
-        .max_turns(3)
-        .prompt("you are a worker")
-}
-
-struct ChildBuilder;
-
-#[async_trait]
-impl SubagentBuilder for ChildBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        ScriptedProvider::new(vec![text("child done")])
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".into()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![]
-    }
+    Subagent::new(
+        "worker",
+        "a worker subagent",
+        Agent::new(
+            Llm::new(
+                ScriptedProvider::new(vec![text("child done")]),
+                "child-model",
+            )
+            .instructions("you are a worker")
+            .max_turns(3),
+        ),
+    )
 }
 
 fn state_flag(agent: &runic_agent::Runner, key: &str) -> bool {
@@ -637,7 +631,7 @@ async fn deferred_subagents_are_gated_until_load_then_delegatable_in_the_same_ru
     let mut agent = Composer::new(
         Agent::new(Llm::new(provider, "test-model"))
             .with(DeferredAbility::new("ops", "operations crew").subagent(worker_def())),
-        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+        Runtime::new(),
     )
     .build("alice", "s1")
     .await
@@ -683,7 +677,7 @@ async fn a_rebuild_with_the_activated_id_ungates_skills_and_subagents() {
                 .skill(crm)
                 .subagent(worker_def()),
         ),
-        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+        Runtime::new(),
     )
     .activated(["crm-pack"])
     .build("alice", "s1")

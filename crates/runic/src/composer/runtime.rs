@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::subagent::SubagentBuilder;
 use runic_hook::WriteHook;
 use runic_substrate::ArtifactStore;
 
@@ -8,7 +7,6 @@ use runic_substrate::ArtifactStore;
 pub struct Runtime {
     pub(crate) hooks: Vec<Arc<dyn WriteHook>>,
     pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
-    pub(crate) subagent_builder: Option<Arc<dyn SubagentBuilder>>,
     pub(crate) auto_spill_over: Option<usize>,
 }
 
@@ -29,11 +27,6 @@ impl Runtime {
 
     pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
-        self
-    }
-
-    pub fn subagent_builder(mut self, builder: Arc<dyn SubagentBuilder>) -> Self {
-        self.subagent_builder = Some(builder);
         self
     }
 

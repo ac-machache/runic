@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
+use runic::Llm;
+use runic::composer::Agent;
+use runic::subagent::{DelegateTool, Subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
 use runic_tool::{Tool, ToolContext};
@@ -29,19 +31,6 @@ impl Provider for OneShot {
             tool_calls: vec![],
             usage: TokenUsage::default(),
         })
-    }
-}
-
-struct FakeBuilder;
-
-#[async_trait]
-impl SubagentBuilder for FakeBuilder {
-    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(OneShot(format!("done: {}", req.subagent.name)))
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "test".to_string()
     }
 }
 
@@ -105,10 +94,14 @@ async fn delegate_span_carries_the_child_session_and_outcome() {
         .with_writer(move || writer.clone())
         .finish();
 
-    let delegate = DelegateTool::with_builder(
-        vec![Subagent::new("reviewer", "reviews").prompt("Review things.")],
-        Arc::new(FakeBuilder),
-    );
+    let delegate = DelegateTool::new(vec![Subagent::new(
+        "reviewer",
+        "reviews",
+        Agent::new(
+            Llm::new(Arc::new(OneShot("done: reviewer".into())), "test")
+                .instructions("Review things."),
+        ),
+    )]);
     let ctx = ToolContext::new("u", "s", "r").with_sub_session(Some(Arc::new(FakeSubSession)));
 
     let _guard = tracing::subscriber::set_default(subscriber);

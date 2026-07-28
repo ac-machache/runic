@@ -1,6 +1,4 @@
-use crate::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
-use runic_agent::RunnerBuilder;
-use runic_provider::Provider;
+use crate::subagent::{DelegateTool, Subagent};
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
 use std::{
@@ -12,7 +10,6 @@ use super::view::{AbilityView, SkillInfo, SubagentInfo};
 use super::{Agent, ComposeError, Composition, Runtime};
 use crate::ability::{Ability, AbilityBundle, ActivationPolicy, BuildCtx, Layer};
 use crate::artifact_resolver::ArtifactResolver;
-use crate::child::FoundrySubagentBuilder;
 use crate::deferred::{
     AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
     LoadedAbilities, delegate_subjects, skill_subjects,
@@ -82,46 +79,6 @@ fn into_catalog(mut catalogs: Vec<Arc<dyn ToolCatalog>>) -> Option<Arc<dyn ToolC
     }
 }
 
-struct DispatchingSubagentBuilder {
-    by_name: HashMap<String, Arc<dyn SubagentBuilder>>,
-    default: Arc<dyn SubagentBuilder>,
-}
-
-impl DispatchingSubagentBuilder {
-    fn for_req(&self, req: &SubagentReq<'_>) -> &Arc<dyn SubagentBuilder> {
-        self.by_name
-            .get(&req.subagent.name)
-            .unwrap_or(&self.default)
-    }
-}
-
-#[async_trait::async_trait]
-impl SubagentBuilder for DispatchingSubagentBuilder {
-    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        self.for_req(req).provider(req).await
-    }
-
-    fn default_model(&self, req: &SubagentReq<'_>) -> String {
-        self.for_req(req).default_model(req)
-    }
-
-    async fn tool_pool(&self, req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        self.for_req(req).tool_pool(req).await
-    }
-
-    fn skill_catalog(&self, req: &SubagentReq<'_>) -> Option<Arc<SkillSet>> {
-        self.for_req(req).skill_catalog(req)
-    }
-
-    fn identity(&self, req: &SubagentReq<'_>) -> (String, String) {
-        self.for_req(req).identity(req)
-    }
-
-    fn decorate(&self, b: RunnerBuilder, req: &SubagentReq<'_>) -> RunnerBuilder {
-        self.for_req(req).decorate(b, req)
-    }
-}
-
 pub struct Composer {
     agent: Agent,
     runtime: Runtime,
@@ -179,7 +136,6 @@ impl Composer {
         let mut subagent_owner_names: HashMap<String, String> = HashMap::new();
         let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
         let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
-        let mut subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>> = HashMap::new();
         for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
@@ -255,7 +211,6 @@ impl Composer {
                     deferred_subagent_owners.insert(def.name.clone(), id.clone());
                 }
             }
-            subagent_builders.extend(bundle.subagent_builders.clone());
             match deferred_id {
                 Some(id) => registry.entries.push(DeferredEntry {
                     id,
@@ -312,24 +267,8 @@ impl Composer {
                 .cloned()
                 .chain(deferred_defs)
                 .collect();
-            let default_builder = self.runtime.subagent_builder.clone().unwrap_or_else(|| {
-                Arc::new(FoundrySubagentBuilder {
-                    provider: provider.clone(),
-                    model: model.clone(),
-                    skills: None,
-                })
-            });
-            let builder: Arc<dyn SubagentBuilder> = if subagent_builders.is_empty() {
-                default_builder
-            } else {
-                Arc::new(DispatchingSubagentBuilder {
-                    by_name: subagent_builders,
-                    default: default_builder,
-                })
-            };
             let delegate: Arc<dyn Tool> = Arc::new(
-                DelegateTool::with_builder(full_roster, builder)
-                    .voice(composition.delegation_voice.clone()),
+                DelegateTool::new(full_roster).voice(composition.delegation_voice.clone()),
             );
             composition.tools.push(Arc::new(GatedTool::new(
                 delegate,

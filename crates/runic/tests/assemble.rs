@@ -13,6 +13,18 @@ use runic_substrate::sessions_memory;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
+fn child_agent(prompt: &str) -> Agent {
+    Agent::new(
+        Llm::new(
+            Arc::new(RecordingProvider {
+                requests: Mutex::new(Vec::new()),
+            }),
+            "child-model",
+        )
+        .instructions(prompt),
+    )
+}
+
 #[derive(Default)]
 struct RecordingProvider {
     requests: Mutex<Vec<CompletionRequest>>,
@@ -81,9 +93,11 @@ async fn composes_prompt_sections_in_order() {
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation::new([
-            Subagent::new("researcher", "researches").prompt("Act carefully.")
-        ]))
+        .with(Delegation::new([Subagent::new(
+            "researcher",
+            "researches",
+            child_agent("Act carefully."),
+        )]))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -102,11 +116,15 @@ async fn delegation_voice_flows_through_the_composer() {
     let provider = Arc::new(RecordingProvider::default());
     let agent = base(provider)
         .with(
-            Delegation::new([Subagent::new("researcher", "researches").prompt("dig")])
-                .tag("team")
-                .intro("Hand self-contained work to your team:")
-                .tool_name("dispatch")
-                .tool_description("Send a teammate a task."),
+            Delegation::new([Subagent::new(
+                "researcher",
+                "researches",
+                child_agent("dig"),
+            )])
+            .tag("team")
+            .intro("Hand self-contained work to your team:")
+            .tool_name("dispatch")
+            .tool_description("Send a teammate a task."),
         )
         .build("alice", "s1")
         .await
@@ -139,9 +157,11 @@ async fn registers_enabled_tool_surfaces() {
         .with(Skills(Arc::new(
             SkillSet::load_dir("", skill_dir.path()).await,
         )))
-        .with(Delegation::new([
-            Subagent::new("researcher", "researches").prompt("Act carefully.")
-        ]))
+        .with(Delegation::new([Subagent::new(
+            "researcher",
+            "researches",
+            child_agent("Act carefully."),
+        )]))
         .with(search_chats(sessions_memory().store()))
         .build("alice", "s1")
         .await

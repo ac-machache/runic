@@ -276,10 +276,10 @@ impl runic::ability::Ability for CtxProbe {
 #[tokio::test]
 async fn child_abilities_see_the_child_model_not_the_parents() {
     let seen_model = Arc::new(Mutex::new(None));
-    let child = ScriptedProvider::new(vec![]);
-    let provider = ScriptedProvider::new(vec![]);
+    let child = ScriptedProvider::new(vec![text("child done")]);
+    let provider = ScriptedProvider::new(vec![delegate_to("expert"), text("done")]);
 
-    Agent::new(Llm::new(provider, "main-model"))
+    let mut agent = Agent::new(Llm::new(provider, "main-model"))
         .with(
             subagent("expert", "digs")
                 .prompt("dig")
@@ -291,6 +291,14 @@ async fn child_abilities_see_the_child_model_not_the_parents() {
         .build("alice", "s1")
         .await
         .unwrap();
+
+    assert_eq!(
+        *seen_model.lock().unwrap(),
+        None,
+        "a subagent's abilities compose when the child runs, not at parent build"
+    );
+
+    agent.run("start").await.unwrap();
 
     assert_eq!(
         seen_model.lock().unwrap().as_deref(),
@@ -495,30 +503,28 @@ async fn parallel_delegation_emits_an_edge_per_child() {
 }
 
 #[tokio::test]
-async fn nested_subagents_inside_a_draft_are_rejected() {
-    let def = Subagent::new("inner", "inner").prompt("inner");
+async fn nested_subagents_inside_a_draft_compose() {
     let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
-        .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(def)))
+    let inner = Subagent::new(
+        "inner",
+        "inner",
+        Agent::new(Llm::new(ScriptedProvider::new(vec![]), "inner-model").instructions("inner")),
+    );
+    Agent::new(Llm::new(provider, "main-model"))
+        .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(inner)))
         .build("alice", "s1")
         .await
-    else {
-        panic!("nested subagents must not compose");
-    };
-    assert!(format!("{err:#}").contains("nested subagents"));
+        .expect("a subagent is a full Agent, so it composes its own subagents");
 }
 
 #[tokio::test]
-async fn deferred_abilities_inside_a_draft_are_rejected() {
+async fn deferred_abilities_inside_a_draft_compose() {
     let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
+    Agent::new(Llm::new(provider, "main-model"))
         .with(subagent("outer", "outer").with(ability("gated").describe("gated stuff").deferred()))
         .build("alice", "s1")
         .await
-    else {
-        panic!("deferred child abilities must not compose");
-    };
-    assert!(format!("{err:#}").contains("always eager"));
+        .expect("a subagent's abilities go through the real Composer, deferred included");
 }
 
 #[tokio::test]

@@ -3,8 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use runic::Llm;
+use runic::composer::Agent;
 use runic::hooks::TaskReminder;
-use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
+use runic::subagent::{DelegateTool, Subagent};
 use runic_agent::{Runner, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentEvent;
@@ -81,21 +83,18 @@ fn delegate_background_response(id: &str) -> CompletionResponse {
     }
 }
 
-struct StubBuilder;
-
-#[async_trait]
-impl SubagentBuilder for StubBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        ScriptedProvider::new(vec![text_response("found 3 competitors")])
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        String::new()
-    }
-}
-
 fn scout_roster() -> Vec<Subagent> {
-    vec![Subagent::new("scout", "research").prompt("you research")]
+    vec![Subagent::new(
+        "scout",
+        "research",
+        Agent::new(
+            Llm::new(
+                ScriptedProvider::new(vec![text_response("found 3 competitors")]),
+                "child-model",
+            )
+            .instructions("you research"),
+        ),
+    )]
 }
 
 fn background_script() -> Vec<CompletionResponse> {
@@ -121,7 +120,7 @@ async fn settle_background(agent: &mut Runner) {
 #[tokio::test]
 async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
     let provider = ScriptedProvider::new(background_script());
-    let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
+    let delegate = DelegateTool::new(scout_roster());
     let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
@@ -173,7 +172,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
 #[tokio::test]
 async fn background_delegation_emits_a_navigable_edge() {
     let provider = ScriptedProvider::new(background_script());
-    let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
+    let delegate = DelegateTool::new(scout_roster());
     let mut agent = Runner::builder(provider.clone(), "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(delegate))
@@ -235,7 +234,7 @@ async fn background_delegation_emits_a_navigable_edge() {
 async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     let rebuilt_view = {
         let provider = ScriptedProvider::new(background_script());
-        let delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
+        let delegate = DelegateTool::new(scout_roster());
         let mut agent = Runner::builder(provider, "u1", "s1")
             .system_prompt("sys")
             .tool(Arc::new(delegate))
@@ -247,7 +246,7 @@ async fn check_result_answers_from_the_durable_view_after_a_rebuild() {
     assert_eq!(rebuilt_view.len(), 1);
     let task_id = rebuilt_view.keys().next().unwrap().clone();
 
-    let fresh_delegate = DelegateTool::with_builder(scout_roster(), Arc::new(StubBuilder));
+    let fresh_delegate = DelegateTool::new(scout_roster());
     let mut ctx = ToolContext::new("u1", "s1", "r9");
     ctx.insert(TasksSnapshot(Arc::new(rebuilt_view)));
 

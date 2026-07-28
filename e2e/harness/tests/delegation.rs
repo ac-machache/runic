@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use proptest::prelude::*;
 use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
+use runic::Llm;
+use runic::ability::ability;
+use runic::composer::Agent;
+use runic::subagent::{DelegateTool, Subagent};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 
@@ -126,30 +129,28 @@ toy_tool!(COkTool, "cok", Ok(ToolResult::ok("ok")));
 toy_tool!(CErrTool, "cerr", Ok(ToolResult::error("child tool error")));
 toy_tool!(CBoomTool, "cboom", panic!("child tool panic"));
 
-struct Builder;
-
-#[async_trait]
-impl SubagentBuilder for Builder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(ChildProvider {
-            seq: AtomicU64::new(0),
-        })
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".to_string()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(COkTool), Arc::new(CErrTool), Arc::new(CBoomTool)]
-    }
-}
 
 fn roster() -> Vec<Subagent> {
-    vec![
-        Subagent::new("worker", "a worker subagent")
-            .prompt("you are a worker")
-            .allowed_tools(["*"])
+    vec![Subagent::new(
+        "worker",
+        "a worker subagent",
+        Agent::new(
+            Llm::new(
+                Arc::new(ChildProvider {
+                    seq: AtomicU64::new(0),
+                }),
+                "child-model",
+            )
+            .instructions("you are a worker")
             .max_turns(4),
-    ]
+        )
+        .with(
+            ability("child-tools")
+                .tool(COkTool)
+                .tool(CErrTool)
+                .tool(CBoomTool),
+        ),
+    )]
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +205,7 @@ async fn run_delegations(steps: Vec<ParentStep>) -> Result<(), TestCaseError> {
         steps: Mutex::new(steps.into()),
         seq: AtomicU64::new(0),
     });
-    let delegate = DelegateTool::with_builder(roster(), Arc::new(Builder));
+    let delegate = DelegateTool::new(roster());
     let mut agent = Runner::builder(provider, "tenant", "session")
         .model("parent-model")
         .system_prompt("parent")

@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use runic::Llm;
 use runic::ability::ability;
 use runic::composer::{Agent, Composer, Runtime};
-use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
+use runic::subagent::Subagent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolContext, ToolResult};
@@ -331,21 +331,6 @@ impl Provider for ChildProvider {
     }
 }
 
-struct ChildBuilder;
-
-#[async_trait]
-impl SubagentBuilder for ChildBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(ChildProvider)
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".into()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![]
-    }
-}
-
 async fn skill_for(id: &str) -> Arc<SkillSet> {
     let dir = tempfile::tempdir().unwrap();
     let skill_dir = dir.path().join("skill");
@@ -359,9 +344,15 @@ async fn skill_for(id: &str) -> Arc<SkillSet> {
 }
 
 fn worker_def(id: &str) -> Subagent {
-    Subagent::new(format!("{id}-worker"), format!("worker for {id}"))
-        .max_turns(3)
-        .prompt("you are a worker")
+    Subagent::new(
+        format!("{id}-worker"),
+        format!("worker for {id}"),
+        Agent::new(
+            Llm::new(Arc::new(ChildProvider), "child-model")
+                .instructions("you are a worker")
+                .max_turns(3),
+        ),
+    )
 }
 
 fn build_live_gate_script(specs: &[GatedSpec]) -> Vec<CompletionResponse> {
@@ -428,8 +419,7 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    let composer = Composer::new(def, Runtime::new().subagent_builder(Arc::new(ChildBuilder)))
-        .activated(activated_ids);
+    let composer = Composer::new(def, Runtime::new()).activated(activated_ids);
 
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("go").await.unwrap();

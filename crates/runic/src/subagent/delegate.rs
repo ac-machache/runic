@@ -4,8 +4,6 @@
 //!
 //! Safeguards (all from ZeroClaw):
 //! - **depth limit** — a child at `max_depth` can't delegate further;
-//! - **no-escalation** — the [`SubagentBuilder`] scopes the child's tools to a
-//!   subset of the parent's (rejecting unknown names);
 //! - **spawn budget** — caps total + concurrent child runs per parent;
 //! - **cancellation cascade** — children carry a [`CancelToken`]; a background
 //!   task gets its own, cancellable via `cancel_task`.
@@ -19,9 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use runic_agent::{CancelToken, RunContext, Runner, RunnerBuilder, TasksSnapshot};
-use runic_provider::Provider;
-use runic_skills::SkillSet;
+use runic_agent::{CancelToken, RunContext, Runner, TasksSnapshot};
 use runic_state::{AgentEvent, Emitter, SubRun, SubSession};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use tracing::Instrument;
@@ -35,11 +31,6 @@ pub const DEFAULT_MAX_TOTAL_SPAWNS: u32 = 16;
 /// Default cap on concurrently-running children.
 pub const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
-/// Context handed to a [`SubagentBuilder`] — the child's depth (already
-/// incremented), the depth ceiling, the cancel token, and the parent run's
-/// open config map, propagated to the child so per-run values (tenant ids,
-/// etc.) reach the child's tools/hooks. Open by design: add whatever the app
-/// needs onto `config` (it already carries `user_id`/`org_id` when set).
 #[derive(Clone)]
 pub struct DelegationCtx {
     pub depth: u32,
@@ -52,103 +43,15 @@ pub struct DelegationCtx {
     pub child_session: Option<String>,
 }
 
-pub struct SubagentReq<'a> {
-    pub subagent: &'a Subagent,
-    pub dctx: &'a DelegationCtx,
-}
-
-#[async_trait]
-pub trait SubagentBuilder: Send + Sync {
-    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider>;
-
-    fn default_model(&self, req: &SubagentReq<'_>) -> String;
-
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        Vec::new()
-    }
-
-    fn skill_catalog(&self, _req: &SubagentReq<'_>) -> Option<Arc<SkillSet>> {
-        None
-    }
-
-    fn identity(&self, req: &SubagentReq<'_>) -> (String, String) {
-        (
-            req.dctx.tenant.clone(),
-            req.dctx
-                .child_session
-                .clone()
-                .unwrap_or_else(|| format!("{}:{}", req.dctx.session, req.subagent.name)),
-        )
-    }
-
-    fn decorate(&self, b: RunnerBuilder, _req: &SubagentReq<'_>) -> RunnerBuilder {
-        b
-    }
-}
-
-pub async fn assemble_subagent(builder: &dyn SubagentBuilder, req: &SubagentReq<'_>) -> Runner {
-    let (tenant, session) = builder.identity(req);
-    let pool = builder.tool_pool(req).await;
-
-    let mut skill_sets: Vec<Arc<SkillSet>> = Vec::new();
-    if !req.subagent.skills.is_empty()
-        && let Some(catalog) = builder.skill_catalog(req)
-    {
-        let scoped = catalog.scope_glob(&req.subagent.skills);
-        if !scoped.is_empty() {
-            skill_sets.push(Arc::new(scoped));
-        }
-    }
-    skill_sets.extend(req.subagent.own_skills.iter().cloned());
-    let scoped = if skill_sets.is_empty() {
-        None
-    } else {
-        let merged = Arc::new(SkillSet::merge(skill_sets));
-        (!merged.is_empty()).then_some(merged)
-    };
-
-    let mut prompt = req.subagent.system_prompt.clone();
-    if let Some(set) = &scoped {
-        prompt = format!("{prompt}\n\n{}", set.prompt_section());
-    }
-
-    let mut b = match &req.subagent.llm {
-        Some(llm) => {
-            let mut config = llm.config().clone();
-            if let Some(model) = &req.subagent.model {
-                config.model = model.clone();
-            }
-            Runner::builder(llm.provider(), tenant, session)
-                .config(config)
-                .system_prompt(prompt)
-        }
-        None => {
-            let provider = builder.provider(req).await;
-            let model = req
-                .subagent
-                .model
-                .clone()
-                .unwrap_or_else(|| builder.default_model(req));
-            Runner::builder(provider, tenant, session)
-                .model(model)
-                .system_prompt(prompt)
-        }
-    };
-    for t in req.subagent.scope_tools(&pool) {
-        b = b.tool(t);
-    }
-    if let Some(set) = &scoped
-        && let Some(tool) = set.view_tool()
-    {
-        b = b.tool(tool);
-    }
-    if let Some(max_turns) = req.subagent.max_turns {
-        b = b.max_turns(max_turns);
-    }
-    for hook in &req.subagent.hooks {
-        b = b.write_hook(hook.clone());
-    }
-    builder.decorate(b, req).build()
+async fn assemble_subagent(
+    subagent: &Subagent,
+    dctx: &DelegationCtx,
+) -> Result<Runner, crate::ComposeError> {
+    let session = dctx
+        .child_session
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", dctx.session, subagent.name));
+    subagent.agent.build(&dctx.tenant, &session).await
 }
 
 /// Total + concurrent spawn budget, shared across a parent's delegate calls.
@@ -231,25 +134,8 @@ const DEFAULT_TOOL_DESCRIPTION: &str = "Delegate a self-contained task to a suba
      several at once, or `background` for long tasks (poll with \
      check_result).";
 
-struct StaticBuilder {
-    provider: Arc<dyn Provider>,
-    model: String,
-}
-
-#[async_trait]
-impl SubagentBuilder for StaticBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        self.provider.clone()
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        self.model.clone()
-    }
-}
-
 pub struct DelegateTool {
     subagents: Vec<Subagent>,
-    builder: Arc<dyn SubagentBuilder>,
     depth: u32,
     max_depth: u32,
     budget: Arc<SpawnBudget>,
@@ -259,27 +145,9 @@ pub struct DelegateTool {
 }
 
 impl DelegateTool {
-    pub fn new(
-        subagents: impl IntoIterator<Item = Subagent>,
-        provider: Arc<dyn Provider>,
-        model: impl Into<String>,
-    ) -> Self {
-        Self::with_builder(
-            subagents,
-            Arc::new(StaticBuilder {
-                provider,
-                model: model.into(),
-            }),
-        )
-    }
-
-    pub fn with_builder(
-        subagents: impl IntoIterator<Item = Subagent>,
-        builder: Arc<dyn SubagentBuilder>,
-    ) -> Self {
+    pub fn new(subagents: impl IntoIterator<Item = Subagent>) -> Self {
         Self {
             subagents: subagents.into_iter().collect(),
-            builder,
             depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
             budget: SpawnBudget::new(DEFAULT_MAX_TOTAL_SPAWNS, DEFAULT_MAX_CONCURRENT),
@@ -380,7 +248,6 @@ impl DelegateTool {
         let dctx = self.child_ctx(self.cancel.clone(), ctx);
         let sub_run = begin_sub(ctx.sub_session(), agent).await;
         let outcome = traced_run_child(
-            &self.builder,
             &sub,
             &dctx,
             &prompt,
@@ -410,7 +277,6 @@ impl DelegateTool {
             let name = name.clone();
             let prompt = prompt.clone();
             let sub = self.find(&name).cloned();
-            let builder = self.builder.clone();
             let acquired = self.budget.acquire();
             let dctx = self.child_ctx(self.cancel.clone(), ctx);
             let external = ctx.emitter();
@@ -427,7 +293,6 @@ impl DelegateTool {
                 };
                 let sub_run = begin_sub(sub_session, &name).await;
                 let outcome = traced_run_child(
-                    &builder,
                     &sub,
                     &dctx,
                     &prompt,
@@ -495,7 +360,6 @@ impl DelegateTool {
             });
         }
 
-        let builder = self.builder.clone();
         let tasks = self.tasks.clone();
         let tid = task_id.clone();
         let (call_id, turn) = edge_keys(ctx);
@@ -503,7 +367,6 @@ impl DelegateTool {
         tokio::spawn(async move {
             let _guard = guard; // hold the concurrent slot until done
             let outcome = traced_run_child(
-                &builder,
                 &sub,
                 &dctx,
                 &prompt,
@@ -675,14 +538,21 @@ struct ChildOutcome {
 }
 
 async fn run_child(
-    builder: &Arc<dyn SubagentBuilder>,
     subagent: &Subagent,
     dctx: &DelegationCtx,
     prompt: &str,
     sub: Option<&dyn SubRun>,
 ) -> ChildOutcome {
-    let req = SubagentReq { subagent, dctx };
-    let mut child = assemble_subagent(builder.as_ref(), &req).await;
+    let mut child = match assemble_subagent(subagent, dctx).await {
+        Ok(child) => child,
+        Err(e) => {
+            return ChildOutcome {
+                result: Err(anyhow::anyhow!("{e}")),
+                child_session: sub.map(|s| s.session_id().to_string()),
+                persistence: None,
+            };
+        }
+    };
     let configured = child.model().to_string();
     let mut rc = RunContext::new()
         .with_cancel(dctx.cancel.clone())
@@ -723,7 +593,6 @@ async fn run_child(
 
 #[allow(clippy::too_many_arguments)]
 async fn traced_run_child(
-    builder: &Arc<dyn SubagentBuilder>,
     subagent: &Subagent,
     dctx: &DelegationCtx,
     prompt: &str,
@@ -759,7 +628,7 @@ async fn traced_run_child(
             sub_run.map(|s| s.session_id().to_string()),
         );
         let started = std::time::Instant::now();
-        let outcome = run_child(builder, subagent, dctx, prompt, sub_run).await;
+        let outcome = run_child(subagent, dctx, prompt, sub_run).await;
         emit_finished(external, run_id, turn, call_id, agent, &outcome, started);
 
         let current = tracing::Span::current();

@@ -28,6 +28,11 @@ impl Agent {
         self
     }
 
+    pub fn with_arc(mut self, ability: Arc<dyn Ability>) -> Self {
+        self.abilities.push(ability);
+        self
+    }
+
     pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
         self

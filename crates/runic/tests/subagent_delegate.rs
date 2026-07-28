@@ -1,12 +1,12 @@
-//! End-to-end delegate tests: a fake `SubagentBuilder` builds scripted child
-//! agents, exercising the four safeguards + the action surface.
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use runic::subagent::{DelegateTool, SpawnBudget, Subagent, SubagentBuilder, SubagentReq};
+use runic::Llm;
+use runic::ability::ability;
+use runic::composer::Agent;
+use runic::subagent::{DelegateTool, SpawnBudget, Subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -32,24 +32,14 @@ impl Provider for OneShot {
     }
 }
 
-/// Builds a child whose only reply is `done: <agent name>`.
-struct FakeBuilder;
-
-#[async_trait]
-impl SubagentBuilder for FakeBuilder {
-    async fn provider(&self, req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(OneShot(format!("done: {}", req.subagent.name)))
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "test".to_string()
-    }
+fn child(reply: &str) -> Agent {
+    Agent::new(Llm::new(Arc::new(OneShot(reply.into())), "test"))
 }
 
 fn roster() -> Vec<Subagent> {
     vec![
-        Subagent::new("reviewer", "reviews").prompt("Review things."),
-        Subagent::new("researcher", "researches").prompt("Research."),
+        Subagent::new("reviewer", "reviews", child("done: reviewer")),
+        Subagent::new("researcher", "researches", child("done: researcher")),
     ]
 }
 
@@ -59,7 +49,7 @@ fn ctx() -> ToolContext {
 
 #[tokio::test]
 async fn delegate_sync_returns_child_answer() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::new(roster());
     let r = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "look at this" }),
@@ -88,13 +78,13 @@ impl runic_hook::WriteHook for FlagHook {
 #[tokio::test]
 async fn subagent_hook_fires_on_the_child() {
     let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let roster = vec![
-        Subagent::new("reviewer", "reviews")
-            .prompt("Review.")
-            .hook(FlagHook(fired.clone())),
-    ];
-    let provider: Arc<dyn Provider> = Arc::new(OneShot("ok".into()));
-    let tool = DelegateTool::new(roster, provider, "m");
+    let roster = vec![Subagent::new(
+        "reviewer",
+        "reviews",
+        Agent::new(Llm::new(Arc::new(OneShot("ok".into())), "m").instructions("Review."))
+            .with(ability("flag").hook(FlagHook(fired.clone()))),
+    )];
+    let tool = DelegateTool::new(roster);
     tool.execute(
         serde_json::json!({ "agent": "reviewer", "prompt": "go" }),
         &ctx(),
@@ -109,17 +99,14 @@ async fn subagent_hook_fires_on_the_child() {
 
 #[tokio::test]
 async fn subagent_with_own_llm_uses_its_provider() {
-    let roster =
-        vec![
-            Subagent::new("specialist", "own brain")
-                .prompt("hi")
-                .llm(runic_agent::Llm::new(
-                    Arc::new(OneShot("from own llm".into())),
-                    "own-model",
-                )),
-        ];
-    let parent: Arc<dyn Provider> = Arc::new(OneShot("from parent".into()));
-    let tool = DelegateTool::new(roster, parent, "parent-model");
+    let roster = vec![Subagent::new(
+        "specialist",
+        "own brain",
+        Agent::new(
+            Llm::new(Arc::new(OneShot("from own llm".into())), "own-model").instructions("hi"),
+        ),
+    )];
+    let tool = DelegateTool::new(roster);
     let r = tool
         .execute(
             serde_json::json!({ "agent": "specialist", "prompt": "go" }),
@@ -131,24 +118,8 @@ async fn subagent_with_own_llm_uses_its_provider() {
 }
 
 #[tokio::test]
-async fn new_runs_children_without_a_builder_impl() {
-    let provider: Arc<dyn Provider> = Arc::new(OneShot("child says hi".into()));
-    let tool = DelegateTool::new(roster(), provider, "mistral-large-latest");
-    let r = tool
-        .execute(
-            serde_json::json!({ "agent": "reviewer", "prompt": "go" }),
-            &ctx(),
-        )
-        .await
-        .unwrap();
-    assert!(!r.is_error());
-    assert_eq!(r.text(), "child says hi");
-}
-
-#[tokio::test]
 async fn voice_knobs_render_section_and_rename_the_tool() {
-    let provider: Arc<dyn Provider> = Arc::new(OneShot("x".into()));
-    let tool = DelegateTool::new(roster(), provider, "m")
+    let tool = DelegateTool::new(roster())
         .tag("team")
         .intro("Hand self-contained work to your team:")
         .tool_name("dispatch")
@@ -167,8 +138,7 @@ async fn voice_knobs_render_section_and_rename_the_tool() {
 
 #[tokio::test]
 async fn default_intro_interpolates_a_renamed_tool() {
-    let provider: Arc<dyn Provider> = Arc::new(OneShot("x".into()));
-    let tool = DelegateTool::new(roster(), provider, "m").tool_name("dispatch");
+    let tool = DelegateTool::new(roster()).tool_name("dispatch");
     let section = tool.roster_section();
     assert!(section.starts_with("<subagents>"));
     assert!(section.contains("via the `dispatch` tool"));
@@ -177,7 +147,7 @@ async fn default_intro_interpolates_a_renamed_tool() {
 
 #[tokio::test]
 async fn unknown_agent_lists_roster() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::new(roster());
     let r = tool
         .execute(
             serde_json::json!({ "agent": "ghost", "prompt": "x" }),
@@ -191,9 +161,7 @@ async fn unknown_agent_lists_roster() {
 
 #[tokio::test]
 async fn depth_limit_refuses_delegation() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder))
-        .with_depth(3)
-        .with_max_depth(3);
+    let tool = DelegateTool::new(roster()).with_depth(3).with_max_depth(3);
     let r = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "x" }),
@@ -207,8 +175,7 @@ async fn depth_limit_refuses_delegation() {
 
 #[tokio::test]
 async fn spawn_budget_caps_total() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder))
-        .with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
+    let tool = DelegateTool::new(roster()).with_budget(SpawnBudget::new(1, 4)); // total lifetime cap = 1
     let first = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "x" }),
@@ -230,7 +197,7 @@ async fn spawn_budget_caps_total() {
 
 #[tokio::test]
 async fn parallel_runs_several_and_aggregates() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::new(roster());
     let r = tool
         .execute(
             serde_json::json!({ "parallel": ["reviewer", "researcher"], "prompt": "go" }),
@@ -245,7 +212,7 @@ async fn parallel_runs_several_and_aggregates() {
 
 #[tokio::test]
 async fn background_then_check_result() {
-    let tool = DelegateTool::with_builder(roster(), Arc::new(FakeBuilder));
+    let tool = DelegateTool::new(roster());
     let start = tool
         .execute(
             serde_json::json!({ "agent": "reviewer", "prompt": "x", "background": true }),

@@ -3,9 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::Llm;
-use runic::ability::{Ability, AbilityBundle, BuildCtx};
+use runic::ability::subagent;
 use runic::composer::Agent;
-use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -110,61 +109,10 @@ impl Tool for NamedTool {
     }
 }
 
-fn subagent_def(name: &str) -> Subagent {
-    Subagent::new(name, format!("{name} subagent"))
-        .allowed_tools(["*"])
-        .max_turns(3)
-        .prompt(format!("you are {name}"))
-}
-
-struct SubagentOwner {
-    def: Subagent,
-    tool_name: &'static str,
-    child_provider: Arc<ScriptedProvider>,
-}
-
-#[async_trait]
-impl SubagentBuilder for SubagentOwner {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        self.child_provider.clone()
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".into()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![Arc::new(NamedTool(self.tool_name))]
-    }
-}
-
-struct OwnedSubagentAbility(Arc<SubagentOwner>);
-
-#[async_trait]
-impl Ability for OwnedSubagentAbility {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        bundle.subagent_with(self.0.def.clone(), self.0.clone());
-        Ok(())
-    }
-}
-
 #[tokio::test]
-async fn each_ability_owned_subagent_only_sees_its_own_tools() {
+async fn each_subagent_only_sees_its_own_tools() {
     let child_a = ScriptedProvider::new(vec![text("child-a done")]);
     let child_b = ScriptedProvider::new(vec![text("child-b done")]);
-
-    let owner_a = Arc::new(SubagentOwner {
-        def: subagent_def("sub-a"),
-        tool_name: "only-a",
-        child_provider: child_a.clone(),
-    });
-    let owner_b = Arc::new(SubagentOwner {
-        def: subagent_def("sub-b"),
-        tool_name: "only-b",
-        child_provider: child_b.clone(),
-    });
 
     let main_provider = ScriptedProvider::new(vec![
         call(
@@ -184,8 +132,22 @@ async fn each_ability_owned_subagent_only_sees_its_own_tools() {
         .with(runic::ability::Tools(vec![Arc::new(NamedTool(
             "main-tool",
         ))]))
-        .with(OwnedSubagentAbility(owner_a))
-        .with(OwnedSubagentAbility(owner_b))
+        .with(
+            subagent("sub-a", "sub-a subagent")
+                .provider(child_a.clone())
+                .model("child-model")
+                .prompt("you are sub-a")
+                .max_turns(3)
+                .tool(NamedTool("only-a")),
+        )
+        .with(
+            subagent("sub-b", "sub-b subagent")
+                .provider(child_b.clone())
+                .model("child-model")
+                .prompt("you are sub-b")
+                .max_turns(3)
+                .tool(NamedTool("only-b")),
+        )
         .build("alice", "s1")
         .await
         .unwrap();
@@ -197,9 +159,6 @@ async fn each_ability_owned_subagent_only_sees_its_own_tools() {
     assert!(!main_tools.iter().any(|name| name == "only-a"));
     assert!(!main_tools.iter().any(|name| name == "only-b"));
 
-    let child_a_tools = child_a.last_request_tool_names();
-    assert_eq!(child_a_tools, vec!["only-a"]);
-
-    let child_b_tools = child_b.last_request_tool_names();
-    assert_eq!(child_b_tools, vec!["only-b"]);
+    assert_eq!(child_a.last_request_tool_names(), vec!["only-a"]);
+    assert_eq!(child_b.last_request_tool_names(), vec!["only-b"]);
 }

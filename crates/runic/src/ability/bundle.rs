@@ -1,8 +1,7 @@
-use crate::subagent::{RosterVoice, Subagent, SubagentBuilder};
+use crate::subagent::{RosterVoice, Subagent};
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::Layer;
@@ -16,7 +15,6 @@ pub struct AbilityBundle {
     pub skills: Vec<Arc<SkillSet>>,
     pub subagents: Vec<Subagent>,
     pub delegation_voice: RosterVoice,
-    pub subagent_builders: HashMap<String, Arc<dyn SubagentBuilder>>,
 }
 
 impl AbilityBundle {
@@ -41,11 +39,6 @@ impl AbilityBundle {
     }
 
     pub fn subagent(&mut self, def: Subagent) {
-        self.subagents.push(def);
-    }
-
-    pub fn subagent_with(&mut self, def: Subagent, builder: Arc<dyn SubagentBuilder>) {
-        self.subagent_builders.insert(def.name.clone(), builder);
         self.subagents.push(def);
     }
 }

@@ -1,41 +1,64 @@
 use std::sync::Arc;
 
-use crate::subagent::{Subagent, SubagentBuilder, SubagentReq};
 use async_trait::async_trait;
-use runic_agent::RunnerBuilder;
+use runic_agent::Llm;
 use runic_hook::WriteHook;
 use runic_provider::Provider;
 use runic_skills::SkillSet;
-use runic_tool::{Tool, ToolCatalog};
+use runic_tool::Tool;
 
 use super::builtin::{Hooks, Skills, Tools};
 use super::{Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx};
+use crate::composer::Agent;
 use crate::models;
+use crate::subagent::Subagent;
 
 pub fn subagent(name: impl Into<String>, description: impl Into<String>) -> SubagentDraft {
     SubagentDraft {
-        def: Subagent::new(name, description),
+        name: name.into(),
+        description: description.into(),
         activation: ActivationPolicy::Eager,
+        agent: None,
         abilities: Vec::new(),
         provider: None,
+        provider_name: None,
+        model: None,
+        prompt: String::new(),
+        max_turns: None,
     }
 }
 
 pub struct SubagentDraft {
-    def: Subagent,
+    name: String,
+    description: String,
     activation: ActivationPolicy,
+    agent: Option<Agent>,
     abilities: Vec<Arc<dyn Ability>>,
     provider: Option<Arc<dyn Provider>>,
+    provider_name: Option<String>,
+    model: Option<String>,
+    prompt: String,
+    max_turns: Option<u32>,
 }
 
 impl SubagentDraft {
+    pub fn agent(mut self, agent: Agent) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
     pub fn prompt(mut self, text: impl Into<String>) -> Self {
-        self.def = self.def.prompt(text);
+        let text = text.into();
+        if self.prompt.is_empty() {
+            self.prompt = text;
+        } else {
+            self.prompt = format!("{}\n\n{text}", self.prompt);
+        }
         self
     }
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
-        self.def = self.def.model(model);
+        self.model = Some(model.into());
         self
     }
 
@@ -44,8 +67,13 @@ impl SubagentDraft {
         self
     }
 
+    pub fn provider_named(mut self, name: impl Into<String>) -> Self {
+        self.provider_name = Some(name.into());
+        self
+    }
+
     pub fn max_turns(mut self, turns: u32) -> Self {
-        self.def.max_turns = Some(turns);
+        self.max_turns = Some(turns);
         self
     }
 
@@ -70,19 +98,43 @@ impl SubagentDraft {
     pub fn skills(self, set: Arc<SkillSet>) -> Self {
         self.with(Skills(set))
     }
+
+    fn build_agent(&self, ctx: &BuildCtx<'_>) -> anyhow::Result<Agent> {
+        if let Some(agent) = &self.agent {
+            return Ok(agent.clone());
+        }
+        let provider = match (&self.provider, &self.provider_name) {
+            (Some(explicit), _) => explicit.clone(),
+            (None, Some(name)) => models::build_provider(name)?,
+            (None, None) => ctx.provider.clone(),
+        };
+        let model = self.model.clone().unwrap_or_else(|| ctx.model.to_string());
+        let mut llm = Llm::new(provider, model);
+        if !self.prompt.is_empty() {
+            llm = llm.instructions(&self.prompt);
+        }
+        if let Some(turns) = self.max_turns {
+            llm = llm.max_turns(turns);
+        }
+        let mut agent = Agent::new(llm);
+        for ability in &self.abilities {
+            agent = agent.with_arc(ability.clone());
+        }
+        Ok(agent)
+    }
 }
 
 #[async_trait]
 impl Ability for SubagentDraft {
     fn name(&self) -> &str {
-        &self.def.name
+        &self.name
     }
 
     fn descriptor(&self) -> AbilityDescriptor {
         match self.activation {
             ActivationPolicy::Eager => AbilityDescriptor::eager(),
             ActivationPolicy::Deferred => {
-                AbilityDescriptor::deferred(self.def.name.clone(), self.def.description.clone())
+                AbilityDescriptor::deferred(self.name.clone(), self.description.clone())
             }
         }
     }
@@ -92,130 +144,12 @@ impl Ability for SubagentDraft {
         bundle: &mut AbilityBundle,
         ctx: &BuildCtx<'_>,
     ) -> anyhow::Result<()> {
-        let provider = match (&self.provider, &self.def.provider) {
-            (Some(explicit), _) => explicit.clone(),
-            (None, Some(name)) => models::build_provider(name)?,
-            (None, None) => ctx.provider.clone(),
-        };
-        let model = self
-            .def
-            .model
-            .clone()
-            .unwrap_or_else(|| ctx.model.to_string());
-        let child_ctx = BuildCtx {
-            tenant: ctx.tenant,
-            session: ctx.session,
-            provider: &provider,
-            model: &model,
-        };
-
-        let mut child = AbilityBundle::default();
-        for ability in &self.abilities {
-            if ability.descriptor().activation == ActivationPolicy::Deferred {
-                anyhow::bail!(
-                    "subagent `{}`: ability `{}` is deferred; abilities inside a subagent are always eager",
-                    self.def.name,
-                    ability.name()
-                );
-            }
-            ability
-                .contribute(&mut child, &child_ctx)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "subagent `{}`: ability `{}` failed: {e}",
-                        self.def.name,
-                        ability.name()
-                    )
-                })?;
-        }
-        if !child.subagents.is_empty() || !child.subagent_builders.is_empty() {
-            anyhow::bail!(
-                "subagent `{}`: nested subagents are not supported",
-                self.def.name
-            );
-        }
-
-        let owns_nothing = child.tools.is_empty()
-            && child.write_hooks.is_empty()
-            && child.skills.is_empty()
-            && child.prompt.is_empty()
-            && child.tool_catalog.is_none()
-            && self.provider.is_none()
-            && self.def.provider.is_none();
-        if owns_nothing {
-            bundle.subagent(self.def.clone());
-            return Ok(());
-        }
-
-        let mut def = self.def.clone();
-        if !child.tools.is_empty() {
-            def.allowed_tools = vec!["*".to_string()];
-        }
-
-        let skills = (!child.skills.is_empty())
-            .then(|| Arc::new(SkillSet::merge(child.skills.iter().cloned())));
-        if skills.is_some() {
-            def.skills = vec!["*".to_string()];
-        }
-
-        let fragments: Vec<String> = child.prompt.iter().map(|(_, text)| text.clone()).collect();
-        if !fragments.is_empty() {
-            let extra = fragments.join("\n\n");
-            def.system_prompt = if def.system_prompt.is_empty() {
-                extra
-            } else {
-                format!("{}\n\n{extra}", def.system_prompt)
-            };
-        }
-
-        let builder = ComposedSubagentBuilder {
-            provider,
-            model,
-            tools: child.tools,
-            skills,
-            hooks: child.write_hooks,
-            tool_catalog: child.tool_catalog,
-        };
-        bundle.subagent_with(def, Arc::new(builder));
+        let agent = self.build_agent(ctx)?;
+        bundle.subagent(Subagent::new(
+            self.name.clone(),
+            self.description.clone(),
+            agent,
+        ));
         Ok(())
-    }
-}
-
-struct ComposedSubagentBuilder {
-    provider: Arc<dyn Provider>,
-    model: String,
-    tools: Vec<Arc<dyn Tool>>,
-    skills: Option<Arc<SkillSet>>,
-    hooks: Vec<Arc<dyn WriteHook>>,
-    tool_catalog: Option<Arc<dyn ToolCatalog>>,
-}
-
-#[async_trait]
-impl SubagentBuilder for ComposedSubagentBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        self.provider.clone()
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        self.model.clone()
-    }
-
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        self.tools.clone()
-    }
-
-    fn skill_catalog(&self, _req: &SubagentReq<'_>) -> Option<Arc<SkillSet>> {
-        self.skills.clone()
-    }
-
-    fn decorate(&self, mut b: RunnerBuilder, _req: &SubagentReq<'_>) -> RunnerBuilder {
-        for hook in &self.hooks {
-            b = b.write_hook(hook.clone());
-        }
-        if let Some(catalog) = &self.tool_catalog {
-            b = b.tool_catalog(catalog.clone());
-        }
-        b
     }
 }

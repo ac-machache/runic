@@ -8,8 +8,10 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
+use runic::Llm;
 use runic::agent::Runner;
-use runic::subagent::{DelegateTool, Subagent, SubagentBuilder, SubagentReq};
+use runic::composer::Agent;
+use runic::subagent::{DelegateTool, Subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
 use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore};
@@ -69,21 +71,6 @@ fn delegate_background_response() -> CompletionResponse {
     }
 }
 
-struct StubBuilder;
-
-#[async_trait]
-impl SubagentBuilder for StubBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(ScriptedProvider {
-            responses: Mutex::new(vec![text_response("dug it up")].into()),
-        })
-    }
-
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        String::new()
-    }
-}
-
 struct DelegatingFactory;
 
 #[async_trait]
@@ -94,13 +81,22 @@ impl AgentFactory for DelegatingFactory {
                 vec![delegate_background_response(), text_response("spawned")].into(),
             ),
         });
-        let roster = vec![Subagent::new("scout", "research").prompt("dig")];
+        let roster = vec![Subagent::new(
+            "scout",
+            "research",
+            Agent::new(
+                Llm::new(
+                    Arc::new(ScriptedProvider {
+                        responses: Mutex::new(vec![text_response("dug it up")].into()),
+                    }),
+                    "child-model",
+                )
+                .instructions("dig"),
+            ),
+        )];
         Ok(Runner::builder(provider, tenant, session_id)
             .system_prompt("sys")
-            .tool(Arc::new(DelegateTool::with_builder(
-                roster,
-                Arc::new(StubBuilder),
-            )))
+            .tool(Arc::new(DelegateTool::new(roster)))
             .build())
     }
 }

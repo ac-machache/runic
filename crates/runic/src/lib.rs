@@ -1,7 +1,6 @@
 pub mod ability;
 mod artifact_resolver;
 mod artifact_spill;
-mod child;
 pub mod composer;
 mod context;
 pub mod deferred;
@@ -13,7 +12,6 @@ pub mod tools;
 pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
-pub use child::FoundrySubagentBuilder;
 pub use composer::{Agent, AgentOutput, ComposeError, Composer, Runtime, Session};
 pub use context::Context;
 pub use hooks::Compaction;

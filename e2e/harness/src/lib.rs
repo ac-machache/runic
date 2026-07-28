@@ -12,7 +12,6 @@ use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderEr
 use runic_serve::{AgentFactory, BoxedAgentFactory, single_agent};
 use runic_skills::SkillSet;
 use runic_state::AgentState;
-use runic::subagent::{SubagentBuilder, SubagentReq};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage, ToolCall};
 
@@ -61,7 +60,7 @@ impl AgentFactory for DummyFactory {
                     .skills(docs_skill().await)
                     .subagent(docs_worker()),
             );
-        let runner = Composer::new(def, Runtime::new().subagent_builder(Arc::new(ChildBuilder)))
+        let runner = Composer::new(def, Runtime::new())
             .build(tenant, session_id)
             .await?;
         Ok(runner)
@@ -83,6 +82,8 @@ async fn docs_skill() -> Arc<SkillSet> {
 fn docs_worker() -> runic::subagent::SubagentDraft {
     runic::subagent::subagent(DOCS_WORKER, "a gated harness worker")
         .prompt("you are a harness worker")
+        .provider(Arc::new(ChildProvider))
+        .model("child-model")
         .max_turns(3)
 }
 
@@ -98,20 +99,6 @@ impl Provider for ChildProvider {
     }
 }
 
-struct ChildBuilder;
-
-#[async_trait]
-impl SubagentBuilder for ChildBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        Arc::new(ChildProvider)
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".to_string()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![]
-    }
-}
 
 pub struct MarkerHook;
 

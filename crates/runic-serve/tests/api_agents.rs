@@ -10,8 +10,9 @@ use tower::ServiceExt;
 
 use runic::Llm;
 use runic::ability::ability;
+use runic::composer::Agent;
 use runic::composer::{Composer, Runtime};
-use runic::subagent::{Subagent, SubagentBuilder, SubagentReq};
+use runic::subagent::Subagent;
 use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::routes::agents::{
@@ -137,21 +138,6 @@ impl Tool for RefundTool {
     }
 }
 
-struct ChildBuilder;
-
-#[async_trait]
-impl SubagentBuilder for ChildBuilder {
-    async fn provider(&self, _req: &SubagentReq<'_>) -> Arc<dyn Provider> {
-        EchoProvider::new("child done")
-    }
-    fn default_model(&self, _req: &SubagentReq<'_>) -> String {
-        "child-model".into()
-    }
-    async fn tool_pool(&self, _req: &SubagentReq<'_>) -> Vec<Arc<dyn Tool>> {
-        vec![]
-    }
-}
-
 async fn billing_skills() -> Arc<runic::skills::SkillSet> {
     let dir = tempfile::tempdir().unwrap();
     let skill_dir = dir.path().join("dispute");
@@ -178,13 +164,17 @@ async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
                     .deferred()
                     .tool(RefundTool)
                     .skills(billing_skills().await)
-                    .subagent_def(
-                        Subagent::new("billing-worker", "handles billing disputes")
-                            .max_turns(3)
-                            .prompt("you are a billing worker"),
-                    ),
+                    .subagent_def(Subagent::new(
+                        "billing-worker",
+                        "handles billing disputes",
+                        Agent::new(
+                            Llm::new(EchoProvider::new("child done"), "child-model")
+                                .instructions("you are a billing worker")
+                                .max_turns(3),
+                        ),
+                    )),
             ),
-        Runtime::new().subagent_builder(Arc::new(ChildBuilder)),
+        Runtime::new(),
     )
 }
 

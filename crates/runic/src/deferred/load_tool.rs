@@ -98,18 +98,11 @@ impl Tool for LoadAbilityTool {
             output.push_str("\n\n");
         }
         if !entry.bundle.tools.is_empty() {
-            output.push_str("Unlocked tools (callable from your next turn):\n<functions>\n");
+            output.push_str("Unlocked tools (callable from your next turn):\n");
             for tool in &entry.bundle.tools {
                 let spec = tool.spec();
-                let _ = writeln!(
-                    output,
-                    "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
-                    spec.name,
-                    spec.description.replace('"', "\\\""),
-                    spec.parameters
-                );
+                let _ = writeln!(output, "- {}: {}", spec.name, spec.description);
             }
-            output.push_str("</functions>");
         }
         Ok(ToolResult::ok(output.trim_end().to_string()))
     }

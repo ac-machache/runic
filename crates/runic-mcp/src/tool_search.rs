@@ -76,7 +76,6 @@ impl ToolSearchTool {
         self.policy.as_ref().is_none_or(|p| p.is_tool_allowed(name))
     }
 
-    /// Append one tool's `<function>` line and record its activation.
     fn emit_and_activate(
         &self,
         out: &mut String,
@@ -85,17 +84,11 @@ impl ToolSearchTool {
         activation: &Activation<'_>,
     ) {
         activation.activate(prefixed);
-        let _ = writeln!(
-            out,
-            "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
-            spec.name,
-            spec.description.replace('"', "\\\""),
-            spec.parameters
-        );
+        let _ = writeln!(out, "- {}: {}", spec.name, spec.description);
     }
 
     fn select(&self, names: &[&str], activation: &Activation<'_>) -> ToolResult {
-        let mut out = String::from("<functions>\n");
+        let mut activated = String::new();
         let mut not_found = Vec::new();
         for name in names {
             if name.is_empty() {
@@ -106,15 +99,19 @@ impl ToolSearchTool {
                 continue;
             }
             match self.deferred.spec(name) {
-                Some(spec) => self.emit_and_activate(&mut out, &spec, name, activation),
+                Some(spec) => self.emit_and_activate(&mut activated, &spec, name, activation),
                 None => not_found.push(*name),
             }
         }
-        out.push_str("</functions>\n");
+        let mut out = String::new();
+        if !activated.is_empty() {
+            out.push_str("Activated tools (callable from your next turn):\n");
+            out.push_str(&activated);
+        }
         if !not_found.is_empty() {
             let _ = write!(out, "\nNot found: {}", not_found.join(", "));
         }
-        ToolResult::ok(out)
+        ToolResult::ok(out.trim_start().to_string())
     }
 
     fn keyword(&self, query: &str, max_results: usize, activation: &Activation<'_>) -> ToolResult {
@@ -130,7 +127,7 @@ impl ToolSearchTool {
             return ToolResult::ok("No matching deferred tools found.");
         }
 
-        let mut out = String::from("<functions>\n");
+        let mut out = String::from("Activated tools (callable from your next turn):\n");
         let mut returned = 0;
         for stub in results {
             if returned >= max_results {
@@ -142,7 +139,6 @@ impl ToolSearchTool {
             self.emit_and_activate(&mut out, &stub.spec(), stub.prefixed_name(), activation);
             returned += 1;
         }
-        out.push_str("</functions>\n");
         ToolResult::ok(out)
     }
 }
@@ -154,7 +150,7 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Fetch full schema definitions for deferred tools so they can be called. \
+        "Activate deferred tools so they become callable from your next turn. \
          Use \"select:name1,name2\" for exact tools, or keywords to search."
     }
 
@@ -327,8 +323,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!r.is_error());
-        assert!(r.text().contains("<function>"));
         assert!(r.text().contains("mcp__fs__read_file"));
+        assert!(r.text().contains("Read a file from disk"));
+        assert!(
+            !r.text().contains("\"parameters\""),
+            "the schema lands in the request's tools array on activation; \
+             repeating it in the result pays for it twice: {}",
+            r.text()
+        );
         assert_eq!(activated_keys(&mut pending), ["mcp__fs__read_file"]);
     }
 

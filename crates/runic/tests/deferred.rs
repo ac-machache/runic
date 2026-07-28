@@ -298,7 +298,12 @@ async fn loading_an_ability_unlocks_its_tools_and_persists_activation() {
         .find(|content| content.contains("Ability `billing` loaded"))
         .expect("load_ability result present");
     assert!(load_result.contains("billing rules"));
-    assert!(load_result.contains("\"name\": \"refund\""));
+    assert!(load_result.contains("refund"));
+    assert!(
+        !load_result.contains("\"parameters\""),
+        "an unlocked tool's schema reaches the model through the request's tools \
+         array from the next turn; repeating it here pays for it twice, forever: {load_result}"
+    );
     assert!(activated_ability_ids(agent.state().data()).contains(&"billing".to_string()));
 }
 

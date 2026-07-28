@@ -5,7 +5,6 @@ use syn::{Meta, parse_macro_input};
 struct AbilityAttrs {
     id: Option<String>,
     description: Option<String>,
-    name: Option<String>,
     deferred: bool,
     activation_span: Option<proc_macro2::Span>,
 }
@@ -27,7 +26,6 @@ impl syn::parse::Parse for AbilityAttrs {
         let mut attrs = AbilityAttrs {
             id: None,
             description: None,
-            name: None,
             deferred: false,
             activation_span: None,
         };
@@ -40,7 +38,7 @@ impl syn::parse::Parse for AbilityAttrs {
             let Meta::NameValue(nv) = &meta else {
                 return Err(syn::Error::new_spanned(
                     &meta,
-                    "expected `key = value`; ability takes activation, id, description, name",
+                    "expected `key = value`; ability takes activation, id, description",
                 ));
             };
             let key = nv
@@ -96,13 +94,20 @@ impl syn::parse::Parse for AbilityAttrs {
                     attrs.id = Some(s.value());
                 }
                 "description" => attrs.description = Some(s.value()),
-                "name" => attrs.name = Some(s.value()),
+                "name" => {
+                    return Err(syn::Error::new_spanned(
+                        &nv.path,
+                        "`name` is gone — use `id`, which is the same handle everywhere: the \
+                         string `load_ability` resolves, the key activation persists under, and \
+                         the label errors report",
+                    ));
+                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         &nv.path,
                         format!(
                             "unknown ability attribute `{other}`; expected activation, id, \
-                             description, name"
+                             description"
                         ),
                     ));
                 }
@@ -156,26 +161,31 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let name_method = match attrs.name.clone().or_else(|| attrs.id.clone()) {
-        Some(name) => quote! {
-            fn name(&self) -> &str { #name }
-        },
-        None => quote! {},
-    };
-
-    let descriptor_method = if attrs.deferred {
-        let id = attrs.id.clone().unwrap();
-        let description = attrs.description.unwrap();
-        quote! {
-            fn descriptor(&self) -> ::runic::ability::AbilityDescriptor {
-                ::runic::ability::AbilityDescriptor::deferred(#id, #description)
-            }
+    let (name_method, descriptor_method) = match &attrs.id {
+        Some(id) => {
+            let descriptor = if attrs.deferred {
+                let description = attrs.description.clone().unwrap();
+                quote!(::runic::ability::AbilityDescriptor::deferred(#id, #description))
+            } else {
+                quote!(::runic::ability::AbilityDescriptor {
+                    id: Some(#id.to_string()),
+                    description: None,
+                    activation: ::runic::ability::ActivationPolicy::Eager,
+                })
+            };
+            (
+                quote! { fn name(&self) -> &str { #id } },
+                quote! {
+                    fn descriptor(&self) -> ::runic::ability::AbilityDescriptor {
+                        #descriptor
+                    }
+                },
+            )
         }
-    } else {
-        quote! {}
+        None => (quote! {}, quote! {}),
     };
 
-    let seed = attrs.id.or(attrs.name).unwrap_or_else(|| ident.to_string());
+    let seed = attrs.id.unwrap_or_else(|| ident.to_string());
 
     let output = quote! {
         #input

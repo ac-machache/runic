@@ -98,7 +98,7 @@ impl Billing {
     }
 }
 
-#[ability(activation = eager, name = "logging")]
+#[ability(activation = eager, id = "logging")]
 struct Logging;
 
 impl Logging {
@@ -111,7 +111,7 @@ impl Logging {
     }
 }
 
-#[ability(activation = eager, name = "tenant-kit")]
+#[ability(activation = eager, id = "tenant-kit")]
 struct TenantKit;
 
 impl TenantKit {
@@ -153,6 +153,57 @@ fn a_bare_ability_keeps_the_trait_defaults() {
 fn activation_eager_can_be_stated_explicitly() {
     assert_eq!(Logging.descriptor().activation, ActivationPolicy::Eager);
     assert_eq!(Logging.name(), "logging");
+}
+
+#[test]
+fn an_eager_ability_reports_its_id_exactly_like_the_draft_does() {
+    assert_eq!(Logging.descriptor().id.as_deref(), Some("logging"));
+    assert_eq!(
+        ability("logging").descriptor().id,
+        Logging.descriptor().id,
+        "the macro and the builder must describe the same ability identically"
+    );
+}
+
+#[tokio::test]
+async fn two_eager_abilities_sharing_an_id_are_rejected() {
+    #[ability(activation = eager, id = "billing")]
+    struct One;
+
+    impl One {
+        async fn ability(
+            &self,
+            draft: AbilityDraft,
+            _ctx: &BuildCtx<'_>,
+        ) -> anyhow::Result<AbilityDraft> {
+            Ok(draft)
+        }
+    }
+
+    #[ability(activation = eager, id = "billing")]
+    struct Two;
+
+    impl Two {
+        async fn ability(
+            &self,
+            draft: AbilityDraft,
+            _ctx: &BuildCtx<'_>,
+        ) -> anyhow::Result<AbilityDraft> {
+            Ok(draft)
+        }
+    }
+
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let result = Agent::new(Llm::new(provider, "test-model"))
+        .with(One)
+        .with(Two)
+        .build("alice", "s1")
+        .await;
+
+    assert!(
+        result.is_err(),
+        "a dropped id used to let both build; duplicate ids must collide"
+    );
 }
 
 #[test]

@@ -822,6 +822,28 @@ impl Tool for DelegateTool {
                         .filter_map(|v| v.as_str().map(str::to_string))
                         .collect();
                     if !agents.is_empty() {
+                        let detached: Vec<&str> = agents
+                            .iter()
+                            .filter(|name| {
+                                self.find(name).is_some_and(|sub| {
+                                    sub.invocation == crate::subagent::Invocation::Background
+                                })
+                            })
+                            .map(String::as_str)
+                            .collect();
+                        if !detached.is_empty() {
+                            return Ok(ToolResult::error(format!(
+                                "a parallel batch blocks this turn until every member finishes, \
+                                 but {} is declared invocation=background and must never block. \
+                                 Call it on its own with background=true, and run the rest as a \
+                                 batch.",
+                                detached
+                                    .iter()
+                                    .map(|name| format!("`{name}`"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
                         return Ok(self.delegate_parallel(&agents, full, ctx).await);
                     }
                 }
@@ -831,15 +853,29 @@ impl Tool for DelegateTool {
                         "delegate requires `agent` (or `parallel`)",
                     ));
                 };
-                let background = args
+                let requested = args
                     .get("background")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                if background {
+                let policy = self
+                    .find(agent)
+                    .map(|sub| sub.invocation)
+                    .unwrap_or_default();
+                let background = policy.resolve(requested);
+                let mut result = if background {
                     self.delegate_background(agent, full, ctx).await
                 } else {
                     self.delegate_one(agent, full, ctx).await
+                };
+                if background != requested && !result.is_error() {
+                    result.push_notes(&[format!(
+                        "Note: `{agent}` is declared invocation={}, so this ran {} \
+                         regardless of the `background` argument.",
+                        policy.as_str(),
+                        if background { "detached" } else { "inline" }
+                    )]);
                 }
+                result
             }
             other => ToolResult::error(format!("unknown action '{other}'")),
         };

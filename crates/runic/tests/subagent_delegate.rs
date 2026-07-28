@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::ability;
 use runic::composer::Agent;
-use runic::subagent::{DelegateTool, SpawnBudget, Subagent};
+use runic::subagent::{DelegateTool, Invocation, SpawnBudget, Subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -247,4 +247,115 @@ async fn background_then_check_result() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(output.as_deref(), Some("done: reviewer"));
+}
+
+#[tokio::test]
+async fn a_background_only_subagent_detaches_even_when_the_model_asks_to_block() {
+    let roster = vec![
+        Subagent::new("slow", "takes ages", child("eventually")).invocation(Invocation::Background),
+    ];
+    let tool = DelegateTool::new(roster);
+
+    let r = tool
+        .execute(
+            serde_json::json!({ "agent": "slow", "prompt": "go", "background": false }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!r.is_error());
+    assert!(
+        r.text().contains("task_id="),
+        "it ran detached despite background:false — {}",
+        r.text()
+    );
+    assert!(
+        r.text().contains("invocation=background"),
+        "and the model is told why, in the same result: {}",
+        r.text()
+    );
+}
+
+#[tokio::test]
+async fn a_sync_only_subagent_blocks_even_when_the_model_asks_to_detach() {
+    let roster =
+        vec![Subagent::new("quick", "fast", child("done now")).invocation(Invocation::Sync)];
+    let tool = DelegateTool::new(roster);
+
+    let r = tool
+        .execute(
+            serde_json::json!({ "agent": "quick", "prompt": "go", "background": true }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert!(!r.is_error());
+    assert!(r.text().contains("done now"), "{}", r.text());
+    assert!(!r.text().contains("task_id="), "{}", r.text());
+}
+
+#[tokio::test]
+async fn invocation_any_leaves_the_choice_to_the_model_and_adds_no_note() {
+    let tool = DelegateTool::new(roster());
+    let r = tool
+        .execute(
+            serde_json::json!({ "agent": "reviewer", "prompt": "go", "background": false }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.text(), "done: reviewer");
+}
+
+#[test]
+fn the_roster_line_advertises_a_constrained_invocation() {
+    let sub = Subagent::new("slow", "takes ages", child("x")).invocation(Invocation::Background);
+    assert!(sub.roster_line().contains("runs in the background"));
+    assert!(
+        Subagent::new("plain", "normal", child("x"))
+            .roster_line()
+            .ends_with("normal")
+    );
+}
+
+#[tokio::test]
+async fn a_parallel_batch_is_rejected_when_a_member_is_background_only() {
+    let roster = vec![
+        Subagent::new("reviewer", "reviews", child("done: reviewer")),
+        Subagent::new("slow", "takes ages", child("eventually")).invocation(Invocation::Background),
+    ];
+    let tool = DelegateTool::new(roster);
+
+    let r = tool
+        .execute(
+            serde_json::json!({ "parallel": ["reviewer", "slow"], "prompt": "go" }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+
+    assert!(r.is_error(), "{}", r.text());
+    assert!(r.text().contains("`slow`"), "{}", r.text());
+    assert!(
+        r.text().contains("background=true"),
+        "the model is told how to fix it: {}",
+        r.text()
+    );
+}
+
+#[tokio::test]
+async fn a_parallel_batch_of_unconstrained_subagents_still_runs() {
+    let tool = DelegateTool::new(roster());
+    let r = tool
+        .execute(
+            serde_json::json!({ "parallel": ["reviewer", "researcher"], "prompt": "go" }),
+            &ctx(),
+        )
+        .await
+        .unwrap();
+    assert!(!r.is_error());
+    assert!(r.text().contains("done: reviewer"));
+    assert!(r.text().contains("done: researcher"));
 }

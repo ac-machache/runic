@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::{
-    Delegation, Skills, Tools, ask_user, basics, search_chats, weather, web_fetch,
-};
+use runic::ability::{Delegation, ability, ask_user, basics, search_chats, weather, web_fetch};
 use runic::composer::{Agent, Composer, Runtime};
 use runic::subagent::Subagent;
 use runic::{Compaction, Llm};
@@ -90,9 +88,7 @@ async fn composes_prompt_sections_in_order() {
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
 
     let agent = base(provider)
-        .with(Skills(Arc::new(
-            SkillSet::load_dir("", skill_dir.path()).await,
-        )))
+        .with(ability("skills").skills(Arc::new(SkillSet::load_dir("", skill_dir.path()).await)))
         .with(Delegation::new([Subagent::new(
             "researcher",
             "researches",
@@ -154,9 +150,7 @@ async fn registers_enabled_tool_surfaces() {
         .with(ask_user())
         .with(web_fetch())
         .with(weather())
-        .with(Skills(Arc::new(
-            SkillSet::load_dir("", skill_dir.path()).await,
-        )))
+        .with(ability("skills").skills(Arc::new(SkillSet::load_dir("", skill_dir.path()).await)))
         .with(Delegation::new([Subagent::new(
             "researcher",
             "researches",
@@ -419,7 +413,7 @@ async fn registers_custom_tools_and_output_schema() {
             .instructions("core instructions")
             .max_turns(2),
     )
-    .with(Tools(vec![Arc::new(EchoTool)]))
+    .with(ability("echo").tool(EchoTool))
     .output_schema(serde_json::json!({ "type": "object" }))
     .build("alice", "s1")
     .await

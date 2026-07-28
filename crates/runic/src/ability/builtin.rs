@@ -2,32 +2,13 @@ use std::sync::Arc;
 
 use crate::subagent::{RosterVoice, Subagent};
 use async_trait::async_trait;
-use runic_hook::WriteHook;
-use runic_skills::SkillSet;
 use runic_substrate::{SearchChatsTool, SessionStore};
-use runic_tool::Tool;
 
 use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, ability};
 use crate::tools::{
     AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
     WeatherTool, WebFetchTool, WebSearchTool,
 };
-
-pub struct Skills(pub Arc<SkillSet>);
-
-#[async_trait]
-impl Ability for Skills {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        if !self.0.is_empty() {
-            bundle.skill_set(self.0.clone());
-        }
-        Ok(())
-    }
-}
 
 pub struct Delegation {
     subagents: Vec<Subagent>,
@@ -115,36 +96,4 @@ pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> Abilit
     ability("composio")
         .describe("1000+ external app actions via Composio")
         .tool(ComposioTool::new(api_key, entity_id))
-}
-
-pub struct Hooks(pub Vec<Arc<dyn WriteHook>>);
-
-#[async_trait]
-impl Ability for Hooks {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        for hook in &self.0 {
-            bundle.write_hook(hook.clone());
-        }
-        Ok(())
-    }
-}
-
-pub struct Tools(pub Vec<Arc<dyn Tool>>);
-
-#[async_trait]
-impl Ability for Tools {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        for tool in &self.0 {
-            bundle.tool(tool.clone());
-        }
-        Ok(())
-    }
 }

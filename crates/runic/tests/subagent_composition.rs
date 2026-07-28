@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::Llm;
-use runic::ability::{ability, subagent};
+use runic::ability::ability;
 use runic::composer::Agent;
 use runic::subagent::Subagent;
+use runic::{Llm, agent};
 use runic_agent::RunContext;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -140,8 +140,34 @@ impl Tool for RecordingTool {
     }
 }
 
+#[agent(kind = subagent, name = "sub-a", description = "a expert")]
+struct SubA(Arc<ScriptedProvider>);
+
+impl SubA {
+    async fn agent(&self, llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), llm.config().model.clone())
+                .instructions("you are a")
+                .tool(NamedTool("only-a")),
+        ))
+    }
+}
+
+#[agent(kind = subagent, name = "sub-b", description = "b expert")]
+struct SubB(Arc<ScriptedProvider>);
+
+impl SubB {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "custom-child")
+                .instructions("you are b")
+                .tool(NamedTool("only-b")),
+        ))
+    }
+}
+
 #[tokio::test]
-async fn draft_owned_tools_are_isolated_and_models_resolve() {
+async fn subagent_tools_are_isolated_and_models_resolve() {
     let child_a = ScriptedProvider::new(vec![text("a done")]);
     let child_b = ScriptedProvider::new(vec![text("b done")]);
     let main_provider = ScriptedProvider::new(vec![
@@ -155,22 +181,9 @@ async fn draft_owned_tools_are_isolated_and_models_resolve() {
     ]);
 
     let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
-        .with(runic::ability::Tools(vec![Arc::new(NamedTool(
-            "main-tool",
-        ))]))
-        .with(
-            subagent("sub-a", "a expert")
-                .prompt("you are a")
-                .provider(child_a.clone())
-                .tool(NamedTool("only-a")),
-        )
-        .with(
-            subagent("sub-b", "b expert")
-                .prompt("you are b")
-                .provider(child_b.clone())
-                .model("custom-child")
-                .tool(NamedTool("only-b")),
-        )
+        .with(ability("main-kit").tool(NamedTool("main-tool")))
+        .with(SubA(child_a.clone()))
+        .with(SubB(child_b.clone()))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -223,8 +236,29 @@ impl WriteHook for InjectUserId {
     }
 }
 
+#[agent(kind = subagent, name = "crm-expert", description = "crm digger")]
+struct CrmExpert {
+    provider: Arc<ScriptedProvider>,
+    seen: Arc<Mutex<Option<serde_json::Value>>>,
+}
+
+impl CrmExpert {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::new(Llm::new(self.provider.clone(), "child-model").instructions("dig")).with(
+                ability("crm")
+                    .tool(RecordingTool {
+                        name: "mcp__crm__lookup",
+                        seen: self.seen.clone(),
+                    })
+                    .hook(InjectUserId),
+            ),
+        )
+    }
+}
+
 #[tokio::test]
-async fn a_consumer_hook_on_the_draft_reaches_the_childs_tool_calls() {
+async fn a_consumer_hook_on_the_subagent_reaches_the_childs_tool_calls() {
     let seen = Arc::new(Mutex::new(None));
     let child = ScriptedProvider::new(vec![
         call(
@@ -237,16 +271,10 @@ async fn a_consumer_hook_on_the_draft_reaches_the_childs_tool_calls() {
     let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
-        .with(
-            subagent("crm-expert", "crm digger")
-                .prompt("dig")
-                .provider(child.clone())
-                .tool(RecordingTool {
-                    name: "mcp__crm__lookup",
-                    seen: seen.clone(),
-                })
-                .hook(InjectUserId),
-        )
+        .with(CrmExpert {
+            provider: child.clone(),
+            seen: seen.clone(),
+        })
         .build("alice", "s1")
         .await
         .unwrap();
@@ -257,6 +285,33 @@ async fn a_consumer_hook_on_the_draft_reaches_the_childs_tool_calls() {
     let args = seen.lock().unwrap().clone().unwrap();
     assert_eq!(args["user_id"], serde_json::json!("u-42"));
     assert_eq!(args["query"], serde_json::json!("dupont"));
+}
+
+#[tokio::test]
+async fn a_consumer_hook_can_block_the_childs_tool_calls() {
+    let seen = Arc::new(Mutex::new(None));
+    let child = ScriptedProvider::new(vec![
+        call(
+            "t1",
+            "mcp__crm__lookup",
+            serde_json::json!({ "query": "dupont" }),
+        ),
+        text("child done"),
+    ]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
+
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
+        .with(CrmExpert {
+            provider: child.clone(),
+            seen: seen.clone(),
+        })
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    assert!(seen.lock().unwrap().is_none());
 }
 
 struct CtxProbe(Arc<Mutex<Option<String>>>);
@@ -273,6 +328,22 @@ impl runic::ability::Ability for CtxProbe {
     }
 }
 
+#[agent(kind = subagent, name = "expert", description = "digs")]
+struct Expert {
+    provider: Arc<ScriptedProvider>,
+    probe: Arc<Mutex<Option<String>>>,
+}
+
+impl Expert {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::new(Llm::new(self.provider.clone(), "child-override").instructions("dig"))
+                .with(CtxProbe(self.probe.clone()))
+                .with(ability("kit").tool(NamedTool("t"))),
+        )
+    }
+}
+
 #[tokio::test]
 async fn child_abilities_see_the_child_model_not_the_parents() {
     let seen_model = Arc::new(Mutex::new(None));
@@ -280,14 +351,10 @@ async fn child_abilities_see_the_child_model_not_the_parents() {
     let provider = ScriptedProvider::new(vec![delegate_to("expert"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(provider, "main-model"))
-        .with(
-            subagent("expert", "digs")
-                .prompt("dig")
-                .provider(child)
-                .model("child-override")
-                .with(CtxProbe(seen_model.clone()))
-                .tool(NamedTool("t")),
-        )
+        .with(Expert {
+            provider: child,
+            probe: seen_model.clone(),
+        })
         .build("alice", "s1")
         .await
         .unwrap();
@@ -307,39 +374,6 @@ async fn child_abilities_see_the_child_model_not_the_parents() {
 }
 
 #[tokio::test]
-async fn a_consumer_hook_can_block_the_childs_tool_calls() {
-    let seen = Arc::new(Mutex::new(None));
-    let child = ScriptedProvider::new(vec![
-        call(
-            "t1",
-            "mcp__crm__lookup",
-            serde_json::json!({ "query": "dupont" }),
-        ),
-        text("child done"),
-    ]);
-    let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
-
-    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
-        .with(
-            subagent("crm-expert", "crm digger")
-                .prompt("dig")
-                .provider(child.clone())
-                .tool(RecordingTool {
-                    name: "mcp__crm__lookup",
-                    seen: seen.clone(),
-                })
-                .hook(InjectUserId),
-        )
-        .build("alice", "s1")
-        .await
-        .unwrap();
-
-    agent.run("start").await.unwrap();
-
-    assert!(seen.lock().unwrap().is_none());
-}
-
-#[tokio::test]
 async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
     let mut child_reply = text("child done");
     child_reply.usage = TokenUsage {
@@ -351,12 +385,7 @@ async fn delegation_edges_land_in_the_parent_log_with_child_usage() {
     let main_provider = ScriptedProvider::new(vec![delegate_to("sub-a"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
-        .with(
-            subagent("sub-a", "a expert")
-                .prompt("you are a")
-                .provider(child.clone())
-                .tool(NamedTool("only-a")),
-        )
+        .with(SubA(child.clone()))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -424,18 +453,8 @@ async fn parallel_delegation_emits_an_edge_per_child() {
     ]);
 
     let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
-        .with(
-            subagent("sub-a", "a expert")
-                .prompt("you are a")
-                .provider(child_a.clone())
-                .tool(NamedTool("only-a")),
-        )
-        .with(
-            subagent("sub-b", "b expert")
-                .prompt("you are b")
-                .provider(child_b.clone())
-                .tool(NamedTool("only-b")),
-        )
+        .with(SubA(child_a.clone()))
+        .with(SubB(child_b.clone()))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -502,29 +521,65 @@ async fn parallel_delegation_emits_an_edge_per_child() {
     );
 }
 
-#[tokio::test]
-async fn nested_subagents_inside_a_draft_compose() {
-    let provider = ScriptedProvider::new(vec![]);
-    let inner = Subagent::new(
-        "inner",
-        "inner",
-        Agent::new(Llm::new(ScriptedProvider::new(vec![]), "inner-model").instructions("inner")),
-    );
-    Agent::new(Llm::new(provider, "main-model"))
-        .with(subagent("outer", "outer").with(ability("inner-owner").subagent_def(inner)))
-        .build("alice", "s1")
-        .await
-        .expect("a subagent is a full Agent, so it composes its own subagents");
+#[agent(kind = subagent, name = "outer", description = "outer")]
+struct Outer(Arc<ScriptedProvider>);
+
+impl Outer {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        let inner = Subagent::new(
+            "inner",
+            "inner expert",
+            Agent::new(Llm::new(ScriptedProvider::new(vec![]), "inner-model")),
+        );
+        Ok(
+            Agent::new(Llm::new(self.0.clone(), "outer-model").instructions("outer"))
+                .with(ability("inner-owner").subagent(inner))
+                .with(ability("gated").describe("gated stuff").deferred()),
+        )
+    }
 }
 
 #[tokio::test]
-async fn deferred_abilities_inside_a_draft_compose() {
-    let provider = ScriptedProvider::new(vec![]);
-    Agent::new(Llm::new(provider, "main-model"))
-        .with(subagent("outer", "outer").with(ability("gated").describe("gated stuff").deferred()))
+async fn a_subagent_composes_its_own_subagents_and_deferred_abilities() {
+    let child = ScriptedProvider::new(vec![text("outer done")]);
+    let main_provider = ScriptedProvider::new(vec![delegate_to("outer"), text("done")]);
+
+    let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
+        .with(Outer(child.clone()))
         .build("alice", "s1")
         .await
-        .expect("a subagent's abilities go through the real Composer, deferred included");
+        .unwrap();
+
+    agent.run("start").await.unwrap();
+
+    let request = child.last_request();
+    let system = request.system.clone().unwrap_or_default();
+    assert!(
+        system.contains("- inner: inner expert"),
+        "the child runs its own delegate roster: {system}"
+    );
+    assert!(
+        system.contains("gated stuff"),
+        "and its own deferred catalog: {system}"
+    );
+
+    let tools: Vec<String> = request.tools.iter().map(|tool| tool.name.clone()).collect();
+    assert!(tools.iter().any(|name| name == "delegate"), "{tools:?}");
+    assert!(tools.iter().any(|name| name == "load_ability"), "{tools:?}");
+}
+
+#[agent(kind = subagent, name = "writer", description = "writes")]
+struct Writer(Arc<ScriptedProvider>);
+
+impl Writer {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "child-model")
+                .instructions("you are the writer")
+                .tool(NamedTool("pen")),
+        )
+        .with(ability("style").prompt("EXTRA-SECTION")))
+    }
 }
 
 #[tokio::test]
@@ -533,13 +588,7 @@ async fn ability_prompts_reach_the_child_system_prompt() {
     let main_provider = ScriptedProvider::new(vec![delegate_to("writer"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(main_provider, "main-model"))
-        .with(
-            subagent("writer", "writes")
-                .prompt("you are the writer")
-                .provider(child.clone())
-                .with(ability("style").prompt("EXTRA-SECTION"))
-                .tool(NamedTool("pen")),
-        )
+        .with(Writer(child.clone()))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -551,19 +600,29 @@ async fn ability_prompts_reach_the_child_system_prompt() {
     assert!(system.contains("EXTRA-SECTION"));
 }
 
+#[agent(kind = subagent, name = "analyst", description = "analyzes")]
+struct Analyst(Arc<ScriptedProvider>);
+
+impl Analyst {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "child-model")
+                .instructions("analyze")
+                .tool(NamedTool("cube")),
+        ))
+    }
+}
+
 #[tokio::test]
-async fn grouped_ability_can_own_a_draft() {
+async fn a_grouped_ability_can_own_a_subagent() {
     let child = ScriptedProvider::new(vec![text("done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("analyst"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
         .with(
-            ability("commerce").describe("commerce pack").subagent(
-                subagent("analyst", "analyzes")
-                    .prompt("analyze")
-                    .provider(child.clone())
-                    .tool(NamedTool("cube")),
-            ),
+            ability("commerce")
+                .describe("commerce pack")
+                .with(Analyst(child.clone())),
         )
         .build("alice", "s1")
         .await
@@ -580,23 +639,4 @@ async fn grouped_ability_can_own_a_draft() {
             .collect::<Vec<_>>(),
         vec!["cube"]
     );
-}
-
-#[tokio::test]
-async fn grouped_deferred_draft_is_rejected() {
-    let provider = ScriptedProvider::new(vec![]);
-    let Err(err) = Agent::new(Llm::new(provider, "main-model"))
-        .with(
-            ability("commerce").describe("commerce pack").subagent(
-                subagent("analyst", "analyzes")
-                    .deferred()
-                    .tool(NamedTool("cube")),
-            ),
-        )
-        .build("alice", "s1")
-        .await
-    else {
-        panic!("a deferred draft nested in an ability must not compose");
-    };
-    assert!(format!("{err:#}").contains("outer ability controls activation"));
 }

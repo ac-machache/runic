@@ -2,9 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::Llm;
-use runic::ability::subagent;
+use runic::ability::ability;
 use runic::composer::Agent;
+use runic::{Llm, agent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -109,6 +109,34 @@ impl Tool for NamedTool {
     }
 }
 
+#[agent(kind = subagent, name = "sub-a", description = "sub-a subagent")]
+struct SubA(Arc<ScriptedProvider>);
+
+impl SubA {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "child-model")
+                .instructions("you are sub-a")
+                .max_turns(3)
+                .tool(NamedTool("only-a")),
+        ))
+    }
+}
+
+#[agent(kind = subagent, name = "sub-b", description = "sub-b subagent")]
+struct SubB(Arc<ScriptedProvider>);
+
+impl SubB {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "child-model")
+                .instructions("you are sub-b")
+                .max_turns(3)
+                .tool(NamedTool("only-b")),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn each_subagent_only_sees_its_own_tools() {
     let child_a = ScriptedProvider::new(vec![text("child-a done")]);
@@ -129,25 +157,9 @@ async fn each_subagent_only_sees_its_own_tools() {
     ]);
 
     let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
-        .with(runic::ability::Tools(vec![Arc::new(NamedTool(
-            "main-tool",
-        ))]))
-        .with(
-            subagent("sub-a", "sub-a subagent")
-                .provider(child_a.clone())
-                .model("child-model")
-                .prompt("you are sub-a")
-                .max_turns(3)
-                .tool(NamedTool("only-a")),
-        )
-        .with(
-            subagent("sub-b", "sub-b subagent")
-                .provider(child_b.clone())
-                .model("child-model")
-                .prompt("you are sub-b")
-                .max_turns(3)
-                .tool(NamedTool("only-b")),
-        )
+        .with(ability("main-kit").tool(NamedTool("main-tool")))
+        .with(SubA(child_a.clone()))
+        .with(SubB(child_b.clone()))
         .build("alice", "s1")
         .await
         .unwrap();

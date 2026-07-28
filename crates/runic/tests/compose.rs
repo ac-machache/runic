@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::{
-    Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, Hooks, Skills, Tools,
+    Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, ability,
 };
 use runic::composer::{Agent, ComposeError};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
@@ -106,7 +106,7 @@ async fn crm_catalog() -> Arc<SkillSet> {
 async fn composes_the_prompt_from_instructions_and_abilities() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider, "test-model").instructions("core instructions"))
-        .with(Skills(crm_catalog().await))
+        .with(ability("crm").skills(crm_catalog().await))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -138,7 +138,7 @@ async fn a_hooks_ability_registers_custom_write_hooks() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let fired = Arc::new(Mutex::new(false));
     let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
-        .with(Hooks(vec![Arc::new(Marker(fired.clone()))]))
+        .with(ability("marker").hook(Marker(fired.clone())))
         .build("alice", "s1")
         .await
         .unwrap();
@@ -153,7 +153,7 @@ async fn a_tools_ability_registers_runnable_tools() {
     let provider = ScriptedProvider::new(vec![call("ping"), text("done")]);
     let pings = Arc::new(Mutex::new(0));
     let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
-        .with(Tools(vec![Arc::new(Ping(pings.clone()))]))
+        .with(ability("ping").tool(Ping(pings.clone())))
         .build("alice", "s1")
         .await
         .unwrap();

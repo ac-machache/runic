@@ -70,9 +70,13 @@ struct AddArgs {
 }
 
 /// Add two integers and return the sum.
-#[tool]
-async fn add_numbers(args: AddArgs) -> anyhow::Result<ToolResult> {
-    Ok(ToolResult::ok((args.a + args.b).to_string()))
+#[tool(args = AddArgs)]
+struct AddNumbers;
+
+impl AddNumbers {
+    async fn tool(&self, args: AddArgs, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok((args.a + args.b).to_string()))
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -81,15 +85,43 @@ struct WhoArgs {
 }
 
 /// Greet the current user by id.
-#[tool(parallelizable)]
-async fn greet_user(args: WhoArgs, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-    Ok(ToolResult::ok(format!("{} {}", args.greeting, ctx.user_id)))
+#[tool(args = WhoArgs, execution = parallel)]
+struct GreetUser;
+
+impl GreetUser {
+    async fn tool(&self, args: WhoArgs, ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok(format!("{} {}", args.greeting, ctx.user_id)))
+    }
 }
 
 /// Report readiness.
 #[tool]
-async fn ping() -> anyhow::Result<ToolResult> {
-    Ok(ToolResult::ok("pong"))
+struct Ping;
+
+impl Ping {
+    async fn tool(&self, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("pong"))
+    }
+}
+
+/// Look a row up in the tenant's catalog.
+#[tool(args = LookupArgs)]
+struct Lookup {
+    rows: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct LookupArgs {
+    index: usize,
+}
+
+impl Lookup {
+    async fn tool(&self, args: LookupArgs, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        match self.rows.lock().unwrap().get(args.index) {
+            Some(row) => Ok(ToolResult::ok(row.clone())),
+            None => Ok(ToolResult::error(format!("no row {}", args.index))),
+        }
+    }
 }
 
 #[test]
@@ -111,9 +143,33 @@ fn the_macro_derives_name_description_and_schema() {
 }
 
 #[test]
-fn the_parallelizable_attribute_is_honored() {
+fn the_execution_attribute_is_honored() {
     assert!(GreetUser.parallelizable());
     assert!(!Ping.parallelizable());
+    assert!(!RenamedTool.parallelizable());
+}
+
+/// This doc comment must lose to the attribute.
+#[tool(
+    name = "mcp__coral__list_tasks",
+    description = "lists tasks in the coral workspace",
+    execution = serial
+)]
+struct RenamedTool;
+
+impl RenamedTool {
+    async fn tool(&self, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok("listed"))
+    }
+}
+
+#[test]
+fn attributes_override_the_type_name_and_the_doc_comment() {
+    assert_eq!(RenamedTool.name(), "mcp__coral__list_tasks");
+    assert_eq!(
+        RenamedTool.description(),
+        "lists tasks in the coral workspace"
+    );
 }
 
 #[tokio::test]
@@ -160,6 +216,35 @@ async fn invalid_arguments_come_back_as_an_in_band_tool_error() {
             .text()
             .contains("invalid arguments for `add_numbers`")
     );
+}
+
+#[tokio::test]
+async fn a_tool_can_hold_state_across_calls() {
+    let rows = Arc::new(Mutex::new(vec!["alpha".to_string(), "beta".to_string()]));
+    let tool = Lookup { rows: rows.clone() };
+    let ctx = ToolContext::new("alice", "s1", "r1");
+
+    assert_eq!(tool.name(), "lookup");
+    assert_eq!(tool.description(), "Look a row up in the tenant's catalog.");
+
+    let hit = tool
+        .execute(serde_json::json!({ "index": 1 }), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(hit.text(), "beta");
+
+    rows.lock().unwrap().push("gamma".into());
+    let fresh = tool
+        .execute(serde_json::json!({ "index": 2 }), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(fresh.text(), "gamma");
+
+    let miss = tool
+        .execute(serde_json::json!({ "index": 9 }), &ctx)
+        .await
+        .unwrap();
+    assert!(miss.is_error());
 }
 
 #[tokio::test]

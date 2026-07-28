@@ -164,7 +164,7 @@ async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
                     .deferred()
                     .tool(RefundTool)
                     .skills(billing_skills().await)
-                    .subagent_def(Subagent::new(
+                    .subagent(Subagent::new(
                         "billing-worker",
                         "handles billing disputes",
                         Agent::new(

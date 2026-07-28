@@ -2,10 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::Llm;
-use runic::ability::subagent;
 use runic::composer::Agent;
 use runic::mcp::{self, McpClient, McpConnection, McpError, Transport};
+use runic::{Llm, agent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -142,18 +141,25 @@ async fn deferred_mount_gives_the_parent_search_not_tools() {
     );
 }
 
+#[agent(kind = subagent, name = "crm-expert", description = "digs crm")]
+struct CrmExpert(Arc<ScriptedProvider>);
+
+impl CrmExpert {
+    async fn agent(&self, llm: Llm) -> anyhow::Result<Agent> {
+        Ok(
+            Agent::new(Llm::new(self.0.clone(), llm.config().model.clone()).instructions("dig"))
+                .with(mcp::direct(fake_connection().await)),
+        )
+    }
+}
+
 #[tokio::test]
 async fn direct_mount_gives_a_subagent_the_real_tools() {
     let child = ScriptedProvider::new(vec![text("child done")]);
     let main_provider = ScriptedProvider::new(vec![delegate_to("crm-expert"), text("done")]);
 
     let mut agent = Agent::new(Llm::new(main_provider.clone(), "main-model"))
-        .with(
-            subagent("crm-expert", "digs crm")
-                .prompt("dig")
-                .provider(child.clone())
-                .with(mcp::direct(fake_connection().await)),
-        )
+        .with(CrmExpert(child.clone()))
         .build("alice", "s1")
         .await
         .unwrap();

@@ -6,7 +6,6 @@ use runic_hook::WriteHook;
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
 
-use super::subagent::SubagentDraft;
 use super::{Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, Layer};
 
 pub fn ability(id: impl Into<String>) -> AbilityDraft {
@@ -83,18 +82,18 @@ impl AbilityDraft {
         self
     }
 
-    pub fn subagent(mut self, draft: SubagentDraft) -> Self {
-        self.nested.push(Arc::new(draft));
-        self
-    }
-
-    pub fn subagent_def(mut self, subagent: Subagent) -> Self {
+    pub fn subagent(mut self, subagent: Subagent) -> Self {
         self.subagents.push(subagent);
         self
     }
 
     pub fn subagents(mut self, subagents: impl IntoIterator<Item = Subagent>) -> Self {
         self.subagents.extend(subagents);
+        self
+    }
+
+    pub fn with(mut self, ability: impl Ability + 'static) -> Self {
+        self.nested.push(Arc::new(ability));
         self
     }
 
@@ -139,13 +138,6 @@ impl Ability for AbilityDraft {
             bundle.subagent(def.clone());
         }
         for nested in &self.nested {
-            if nested.descriptor().activation == ActivationPolicy::Deferred {
-                anyhow::bail!(
-                    "ability `{}`: nested subagent `{}` must not be deferred — the outer ability controls activation",
-                    self.id,
-                    nested.name()
-                );
-            }
             nested.contribute(bundle, ctx).await?;
         }
         if let Some(catalog) = &self.tool_catalog {

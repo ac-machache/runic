@@ -88,35 +88,89 @@ impl Tool for EchoArgs {
 }
 
 #[hook(kind = write, at = before_tool, name = "inject-user-id", priority = 7)]
-async fn inject_user_id(_state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
-    if let serde_json::Value::Object(map) = &mut call.input {
-        map.insert("user_id".into(), serde_json::json!("u-1"));
+struct InjectUserId {
+    user_id: String,
+}
+
+impl InjectUserId {
+    async fn hook(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        if let serde_json::Value::Object(map) = &mut call.input {
+            map.insert("user_id".into(), serde_json::json!(self.user_id));
+        }
+        HookOutcome::Continue
     }
-    HookOutcome::Continue
 }
 
 #[hook(kind = read, at = before_model)]
-async fn observe_model(_state: &AgentState) -> HookSignal {
-    HookSignal::Continue
+struct ObserveModel;
+
+impl ObserveModel {
+    async fn hook(&self, _state: &AgentState) -> HookSignal {
+        HookSignal::Continue
+    }
+}
+
+#[hook(kind = write, at = before_model, name = "summarize")]
+struct Summarize {
+    llm: Llm,
+    seen: Arc<Mutex<Option<String>>>,
+}
+
+impl Summarize {
+    async fn hook(&self, _state: &mut AgentState) -> HookOutcome {
+        match self.llm.run("summarize the thread").await {
+            Ok(output) => {
+                *self.seen.lock().unwrap() = Some(output.text);
+                HookOutcome::Continue
+            }
+            Err(error) => HookOutcome::Cancel(error.to_string()),
+        }
+    }
 }
 
 #[test]
 fn the_generated_impl_carries_name_priority_and_a_single_point() {
-    assert_eq!(WriteHook::name(&InjectUserId), "inject-user-id");
-    assert_eq!(WriteHook::priority(&InjectUserId), 7);
-    assert_eq!(
-        WriteHook::points(&InjectUserId),
-        &[HookLifecycle::BeforeTool]
-    );
+    let hook = InjectUserId {
+        user_id: "u-1".into(),
+    };
+    assert_eq!(WriteHook::name(&hook), "inject-user-id");
+    assert_eq!(WriteHook::priority(&hook), 7);
+    assert_eq!(WriteHook::points(&hook), &[HookLifecycle::BeforeTool]);
 }
 
 #[test]
-fn defaults_fall_back_to_the_fn_name_and_zero_priority() {
-    assert_eq!(ReadHook::name(&ObserveModel), "observe_model");
+fn defaults_fall_back_to_the_type_name_and_zero_priority() {
+    assert_eq!(ReadHook::name(&ObserveModel), "ObserveModel");
     assert_eq!(ReadHook::priority(&ObserveModel), 0);
     assert_eq!(
         ReadHook::points(&ObserveModel),
         &[HookLifecycle::BeforeModel]
+    );
+}
+
+#[tokio::test]
+async fn a_hook_can_hold_an_llm_and_call_it_mid_run() {
+    let summarizer = Llm::new(
+        ScriptedProvider::new(vec![text("the thread is about testing")]),
+        "summary-model",
+    );
+    let seen = Arc::new(Mutex::new(None));
+    let provider = ScriptedProvider::new(vec![text("done")]);
+
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .with(ability("summary").hook(Summarize {
+            llm: summarizer,
+            seen: seen.clone(),
+        }))
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    assert_eq!(
+        seen.lock().unwrap().as_deref(),
+        Some("the thread is about testing")
     );
 }
 
@@ -126,7 +180,9 @@ async fn a_macro_written_hook_actually_fires_in_the_loop() {
         ScriptedProvider::new(vec![call("echo_args", serde_json::json!({})), text("done")]);
 
     let mut agent = Agent::new(Llm::new(provider, "test-model"))
-        .with(ability("echo").tool(EchoArgs).hook(InjectUserId))
+        .with(ability("echo").tool(EchoArgs).hook(InjectUserId {
+            user_id: "u-1".into(),
+        }))
         .build("alice", "s1")
         .await
         .unwrap();

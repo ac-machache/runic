@@ -2,9 +2,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::{ability, subagent};
+use runic::ability::ability;
 use runic::tool::{Tool, ToolContext, ToolResult};
-use runic::{Agent, Llm};
+use runic::{Agent, Llm, agent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_substrate::{
     ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
@@ -184,17 +184,22 @@ fn delegate_to(agent: &str) -> CompletionResponse {
     )
 }
 
+#[agent(kind = subagent, name = "researcher", description = "digs")]
+struct Researcher(Arc<ScriptedProvider>);
+
+impl Researcher {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(Llm::new(self.0.clone(), "child-model")))
+    }
+}
+
 #[tokio::test]
 async fn session_persists_a_delegated_run_to_its_own_child_session() {
     let parent = ScriptedProvider::new(vec![delegate_to("researcher"), text("parent done")]);
     let child = ScriptedProvider::new(vec![text("child found it")]);
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
 
-    let agent = Agent::new(Llm::new(parent, "main-model")).with(
-        subagent("researcher", "digs")
-            .provider(child)
-            .model("child-model"),
-    );
+    let agent = Agent::new(Llm::new(parent, "main-model")).with(Researcher(child));
 
     let out = agent
         .session(store.clone(), "tenant", "t1")

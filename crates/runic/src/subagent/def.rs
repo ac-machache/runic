@@ -1,10 +1,37 @@
 use crate::composer::Agent;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Invocation {
+    #[default]
+    Any,
+    Sync,
+    Background,
+}
+
+impl Invocation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Invocation::Any => "any",
+            Invocation::Sync => "sync",
+            Invocation::Background => "background",
+        }
+    }
+
+    pub fn resolve(self, requested_background: bool) -> bool {
+        match self {
+            Invocation::Any => requested_background,
+            Invocation::Sync => false,
+            Invocation::Background => true,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Subagent {
     pub name: String,
     pub description: String,
     pub agent: Agent,
+    pub invocation: Invocation,
 }
 
 impl std::fmt::Debug for Subagent {
@@ -12,6 +39,7 @@ impl std::fmt::Debug for Subagent {
         f.debug_struct("Subagent")
             .field("name", &self.name)
             .field("description", &self.description)
+            .field("invocation", &self.invocation)
             .finish_non_exhaustive()
     }
 }
@@ -22,11 +50,24 @@ impl Subagent {
             name: name.into(),
             description: description.into(),
             agent,
+            invocation: Invocation::Any,
         }
     }
 
+    pub fn invocation(mut self, invocation: Invocation) -> Self {
+        self.invocation = invocation;
+        self
+    }
+
     pub fn roster_line(&self) -> String {
-        format!("- {}: {}", self.name, self.description)
+        match self.invocation {
+            Invocation::Any => format!("- {}: {}", self.name, self.description),
+            Invocation::Sync => format!("- {}: {} (runs inline)", self.name, self.description),
+            Invocation::Background => format!(
+                "- {}: {} (runs in the background — returns a task_id, poll with check_result)",
+                self.name, self.description
+            ),
+        }
     }
 }
 

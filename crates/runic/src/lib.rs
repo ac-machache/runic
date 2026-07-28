@@ -22,7 +22,7 @@ pub fn llm(spec: &str) -> Result<Llm, ComposeError> {
     Ok(Llm::new(provider, model))
 }
 pub use output::StructuredOutput;
-pub use runic_macros::{hook, tool};
+pub use runic_macros::{ability, agent, hook, tool};
 
 #[doc(hidden)]
 pub mod __private {

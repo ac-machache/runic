@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::Llm;
-use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, Tools};
+use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, ability};
 use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
 use runic::subagent::Subagent;
@@ -357,17 +357,17 @@ async fn a_second_load_of_the_same_ability_bounces() {
 async fn a_user_tool_named_load_ability_is_rejected_when_deferred_abilities_exist() {
     let calls = Arc::new(Mutex::new(0));
     let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
-        .with(Tools(vec![Arc::new(CountingTool {
+        .with(ability("bad-kit").tool(CountingTool {
             name: "load_ability",
             calls,
-        })]))
+        }))
         .with(DeferredAbility::new("billing", "invoices"))
         .build("alice", "s1")
         .await;
 
     match result {
         Err(ComposeError::ReservedToolName { ability }) => {
-            assert!(ability.ends_with("::Tools"))
+            assert_eq!(ability, "bad-kit")
         }
         Err(other) => panic!("expected reserved-name error, got {other}"),
         Ok(_) => panic!("a user load_ability tool must be rejected"),
@@ -379,10 +379,10 @@ async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
     let eager_calls = Arc::new(Mutex::new(0));
     let deferred_calls = Arc::new(Mutex::new(0));
     let result = Agent::new(Llm::new(ScriptedProvider::new(vec![]), "test-model"))
-        .with(Tools(vec![Arc::new(CountingTool {
+        .with(ability("eager-kit").tool(CountingTool {
             name: "refund",
             calls: eager_calls,
-        })]))
+        }))
         .with(
             DeferredAbility::new("billing", "invoices").tool(Arc::new(CountingTool {
                 name: "refund",
@@ -398,7 +398,7 @@ async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
             second_ability,
             tool,
         }) => {
-            assert!(first_ability.ends_with("::Tools"));
+            assert_eq!(first_ability, "eager-kit");
             assert_eq!(second_ability, "billing");
             assert_eq!(tool, "refund");
         }
@@ -577,7 +577,7 @@ async fn deferred_skills_are_gated_until_load_then_viewable_in_the_same_run() {
         text("done"),
     ]);
     let mut agent = Agent::new(Llm::new(provider, "test-model"))
-        .with(runic::ability::Skills(docs))
+        .with(ability("docs").skills(docs))
         .with(DeferredAbility::new("crm-pack", "crm workflows").skill(crm))
         .build("alice", "s1")
         .await

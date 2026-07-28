@@ -15,6 +15,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }
 futures = { workspace = true }
+runic = { workspace = true }
 runic-agent = { path = "../runic-agent" }
 runic-state = { path = "../runic-state" }
 runic-tool = { path = "../runic-tool" }

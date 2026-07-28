@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::ability::ability;
 use runic::tool::{Tool, ToolContext, ToolResult};
-use runic::{Agent, Llm, agent};
+use runic::{Agent, Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_substrate::{
     ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
@@ -184,7 +184,7 @@ fn delegate_to(agent: &str) -> CompletionResponse {
     )
 }
 
-#[agent(kind = subagent, name = "researcher", description = "digs")]
+#[subagent(name = "researcher", description = "digs")]
 struct Researcher(Arc<ScriptedProvider>);
 
 impl Researcher {

@@ -66,19 +66,33 @@ impl ServeConfig {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         artifact_store: Arc<dyn ArtifactStore>,
-        agents: HashMap<String, BoxedAgentFactory>,
     ) -> Self {
         Self {
             session_store,
             artifact_store,
             transcriber: None,
-            agents,
+            agents: HashMap::new(),
             limits: RunLimits::default(),
             workers: None,
             broker: None,
             nudge: None,
             identity: None,
         }
+    }
+
+    /// Register a `#[agent]` type. The name comes off the definition, so it
+    /// cannot drift from the one the client sends.
+    pub fn agent(mut self, def: impl runic::AgentDef + 'static) -> Self {
+        let factory = crate::factory::DefFactory::new(def);
+        self.agents
+            .insert(factory.name().to_string(), Arc::new(factory));
+        self
+    }
+
+    /// Register a hand-written [`AgentFactory`] under an explicit name.
+    pub fn factory(mut self, name: impl Into<String>, factory: BoxedAgentFactory) -> Self {
+        self.agents.insert(name.into(), factory);
+        self
     }
 
     pub fn transcriber(mut self, transcriber: Option<Arc<dyn SpeechToText>>) -> Self {

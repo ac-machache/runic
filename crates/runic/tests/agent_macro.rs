@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use runic::ability::ability;
 use runic::composer::Agent;
 use runic::subagent::Invocation;
-use runic::{Llm, agent};
+use runic::{AgentDef, Llm, agent, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -89,8 +89,7 @@ impl Tool for SearchTool {
     }
 }
 
-#[agent(
-    kind = subagent,
+#[subagent(
     name = "researcher",
     description = "digs through docs",
     model = "ministral-3b-latest",
@@ -109,7 +108,7 @@ impl Researcher {
     }
 }
 
-#[agent(kind = subagent, name = "inheritor", description = "uses the parent model")]
+#[subagent(name = "inheritor", description = "uses the parent model")]
 struct Inheritor;
 
 impl Inheritor {
@@ -118,26 +117,55 @@ impl Inheritor {
     }
 }
 
-#[agent(kind = agent)]
-struct Root;
+#[agent(name = "root", description = "the agent a host serves")]
+struct Root(Arc<ScriptedProvider>);
 
 impl Root {
-    async fn agent(&self, llm: Llm) -> anyhow::Result<Agent> {
-        Ok(Agent::new(llm.instructions("You are root.")))
+    async fn agent(&self) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.0.clone(), "main-model").instructions("You are root."),
+        ))
     }
 }
 
 #[tokio::test]
-async fn kind_agent_leaves_the_type_untouched() {
+async fn agent_names_and_describes_itself_for_a_host() {
     let provider = ScriptedProvider::new(vec![text("root done")]);
-    let mut runner = Root
-        .agent(Llm::new(provider, "main-model"))
+    let root = Root(provider);
+
+    assert_eq!(AgentDef::name(&root), "root");
+    assert_eq!(root.description(), Some("the agent a host serves"));
+
+    let mut runner = root
+        .build_agent()
         .await
         .unwrap()
         .build("alice", "s1")
         .await
         .unwrap();
 
+    runner.run("go").await.unwrap();
+    assert_eq!(
+        runner.state().last_assistant_text().as_deref(),
+        Some("root done")
+    );
+}
+
+#[tokio::test]
+async fn a_host_can_hold_an_agent_def_as_a_trait_object() {
+    let provider = ScriptedProvider::new(vec![text("root done")]);
+    let defs: Vec<Arc<dyn AgentDef>> = vec![Arc::new(Root(provider))];
+
+    let by_name: Vec<&str> = defs.iter().map(|def| def.name()).collect();
+    assert_eq!(by_name, vec!["root"]);
+
+    let mut runner = defs[0]
+        .build_agent()
+        .await
+        .unwrap()
+        .build("alice", "s1")
+        .await
+        .unwrap();
     runner.run("go").await.unwrap();
     assert_eq!(
         runner.state().last_assistant_text().as_deref(),

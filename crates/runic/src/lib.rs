@@ -12,7 +12,7 @@ pub mod tools;
 pub use ability::{Ability, AbilityBundle, ability};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
-pub use composer::{Agent, AgentOutput, ComposeError, Composer, Runtime, Session};
+pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Runtime, Session};
 pub use context::Context;
 pub use hooks::Compaction;
 pub use runic_agent::{Llm, LlmOutput};
@@ -22,7 +22,7 @@ pub fn llm(spec: &str) -> Result<Llm, ComposeError> {
     Ok(Llm::new(provider, model))
 }
 pub use output::StructuredOutput;
-pub use runic_macros::{ability, agent, hook, tool};
+pub use runic_macros::{ability, agent, hook, subagent, tool};
 
 #[doc(hidden)]
 pub mod __private {

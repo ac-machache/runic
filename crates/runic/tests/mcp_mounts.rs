@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::composer::Agent;
 use runic::mcp::{self, McpClient, McpConnection, McpError, Transport};
-use runic::{Llm, agent};
+use runic::{Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
@@ -141,7 +141,7 @@ async fn deferred_mount_gives_the_parent_search_not_tools() {
     );
 }
 
-#[agent(kind = subagent, name = "crm-expert", description = "digs crm")]
+#[subagent(name = "crm-expert", description = "digs crm")]
 struct CrmExpert(Arc<ScriptedProvider>);
 
 impl CrmExpert {

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::ability::ability;
 use runic::composer::Agent;
-use runic::{Llm, agent};
+use runic::{Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -109,7 +109,7 @@ impl Tool for NamedTool {
     }
 }
 
-#[agent(kind = subagent, name = "sub-a", description = "sub-a subagent")]
+#[subagent(name = "sub-a", description = "sub-a subagent")]
 struct SubA(Arc<ScriptedProvider>);
 
 impl SubA {
@@ -123,7 +123,7 @@ impl SubA {
     }
 }
 
-#[agent(kind = subagent, name = "sub-b", description = "sub-b subagent")]
+#[subagent(name = "sub-b", description = "sub-b subagent")]
 struct SubB(Arc<ScriptedProvider>);
 
 impl SubB {

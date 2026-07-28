@@ -2,6 +2,7 @@ mod ability;
 mod agent;
 mod hook;
 mod shared;
+mod subagent;
 mod tool;
 
 use proc_macro::TokenStream;
@@ -24,4 +25,9 @@ pub fn ability(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn agent(attr: TokenStream, item: TokenStream) -> TokenStream {
     agent::expand(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn subagent(attr: TokenStream, item: TokenStream) -> TokenStream {
+    subagent::expand(attr, item)
 }

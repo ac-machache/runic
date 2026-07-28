@@ -41,3 +41,34 @@ pub trait AgentFactory: Send + Sync {
 }
 
 pub type BoxedAgentFactory = Arc<dyn AgentFactory>;
+
+/// Hosts a [`runic::AgentDef`] — the `#[agent]` form — as an [`AgentFactory`].
+/// Hand-write `AgentFactory` instead when you need `overview`, `stateless`, or
+/// `build_run_context`.
+pub struct DefFactory(Arc<dyn runic::AgentDef>);
+
+impl DefFactory {
+    pub fn new(def: impl runic::AgentDef + 'static) -> Self {
+        Self(Arc::new(def))
+    }
+
+    pub fn name(&self) -> &str {
+        self.0.name()
+    }
+}
+
+#[async_trait]
+impl AgentFactory for DefFactory {
+    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
+        Ok(self
+            .0
+            .build_agent()
+            .await?
+            .build(tenant, session_id)
+            .await?)
+    }
+
+    fn describe(&self) -> Option<&str> {
+        self.0.description()
+    }
+}

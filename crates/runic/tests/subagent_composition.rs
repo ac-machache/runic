@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use runic::ability::ability;
 use runic::composer::Agent;
 use runic::subagent::Subagent;
-use runic::{Llm, agent};
+use runic::{Llm, subagent};
 use runic_agent::RunContext;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -140,7 +140,7 @@ impl Tool for RecordingTool {
     }
 }
 
-#[agent(kind = subagent, name = "sub-a", description = "a expert")]
+#[subagent(name = "sub-a", description = "a expert")]
 struct SubA(Arc<ScriptedProvider>);
 
 impl SubA {
@@ -153,7 +153,7 @@ impl SubA {
     }
 }
 
-#[agent(kind = subagent, name = "sub-b", description = "b expert")]
+#[subagent(name = "sub-b", description = "b expert")]
 struct SubB(Arc<ScriptedProvider>);
 
 impl SubB {
@@ -236,7 +236,7 @@ impl WriteHook for InjectUserId {
     }
 }
 
-#[agent(kind = subagent, name = "crm-expert", description = "crm digger")]
+#[subagent(name = "crm-expert", description = "crm digger")]
 struct CrmExpert {
     provider: Arc<ScriptedProvider>,
     seen: Arc<Mutex<Option<serde_json::Value>>>,
@@ -328,7 +328,7 @@ impl runic::ability::Ability for CtxProbe {
     }
 }
 
-#[agent(kind = subagent, name = "expert", description = "digs")]
+#[subagent(name = "expert", description = "digs")]
 struct Expert {
     provider: Arc<ScriptedProvider>,
     probe: Arc<Mutex<Option<String>>>,
@@ -521,7 +521,7 @@ async fn parallel_delegation_emits_an_edge_per_child() {
     );
 }
 
-#[agent(kind = subagent, name = "outer", description = "outer")]
+#[subagent(name = "outer", description = "outer")]
 struct Outer(Arc<ScriptedProvider>);
 
 impl Outer {
@@ -568,7 +568,7 @@ async fn a_subagent_composes_its_own_subagents_and_deferred_abilities() {
     assert!(tools.iter().any(|name| name == "load_ability"), "{tools:?}");
 }
 
-#[agent(kind = subagent, name = "writer", description = "writes")]
+#[subagent(name = "writer", description = "writes")]
 struct Writer(Arc<ScriptedProvider>);
 
 impl Writer {
@@ -600,7 +600,7 @@ async fn ability_prompts_reach_the_child_system_prompt() {
     assert!(system.contains("EXTRA-SECTION"));
 }
 
-#[agent(kind = subagent, name = "analyst", description = "analyzes")]
+#[subagent(name = "analyst", description = "analyzes")]
 struct Analyst(Arc<ScriptedProvider>);
 
 impl Analyst {

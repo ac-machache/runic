@@ -8,11 +8,11 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic::Llm;
 use runic::ability::ability;
 use runic::composer::Agent;
 use runic::composer::{Composer, Runtime};
 use runic::subagent::Subagent;
+use runic::{Llm, agent};
 use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::routes::agents::{
@@ -525,16 +525,12 @@ async fn run_start_event_records_the_agent() {
 #[tokio::test]
 async fn serve_config_builder_defaults_the_optional_infra() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let config = ServeConfig::new(
-        store,
-        Arc::new(MemoryArtifactStore::new()),
-        runic_serve::single_agent(
-            "coral",
-            Arc::new(EchoFactory {
-                provider: EchoProvider::new("hi"),
-                description: "support",
-            }),
-        ),
+    let config = ServeConfig::new(store, Arc::new(MemoryArtifactStore::new())).factory(
+        "coral",
+        Arc::new(EchoFactory {
+            provider: EchoProvider::new("hi"),
+            description: "support",
+        }),
     );
     assert!(config.transcriber.is_none());
     assert!(config.workers.is_none());
@@ -631,4 +627,63 @@ async fn overview_of_an_unknown_agent_is_404() {
     let f = fixture();
     let resp = f.app.oneshot(get_agent("ghost")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[agent(name = "support", description = "customer support")]
+struct Support {
+    provider: Arc<EchoProvider>,
+}
+
+impl Support {
+    async fn agent(&self) -> anyhow::Result<Agent> {
+        Ok(Agent::new(
+            Llm::new(self.provider.clone(), "test-model").instructions("you are support"),
+        )
+        .with(ability("kit").tool(RefundTool)))
+    }
+}
+
+#[tokio::test]
+async fn an_agent_macro_type_is_served_under_the_name_it_declares() {
+    let config = ServeConfig::new(
+        Arc::new(MemorySessionStore::new()) as Arc<dyn SessionStore>,
+        Arc::new(MemoryArtifactStore::new()),
+    )
+    .agent(Support {
+        provider: EchoProvider::new("supported"),
+    });
+    let app = router(config);
+
+    let resp = app
+        .clone()
+        .oneshot(wait_request("t1", Some("support"), "hi"))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the name came off the AgentDef, not a hand-typed registry key"
+    );
+
+    let listed = body_json(
+        app.oneshot(
+            Request::builder()
+                .uri("/agents")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    let support = listed["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "support")
+        .expect("registered under its declared name");
+    assert_eq!(
+        support["description"], "customer support",
+        "and describe() came off the attribute too"
+    );
 }

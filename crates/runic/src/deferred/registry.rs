@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use runic_tool::{Tool, ToolCatalog};
 
-use crate::ability::AbilityBundle;
+use crate::ability::Ability;
 
 pub const ABILITY_ACTIVATED_PREFIX: &str = "abilities/activated/";
 
@@ -21,7 +21,7 @@ pub fn activated_ability_ids(data: &serde_json::Map<String, serde_json::Value>) 
 pub(crate) struct DeferredEntry {
     pub(crate) id: String,
     pub(crate) description: String,
-    pub(crate) bundle: AbilityBundle,
+    pub(crate) parts: Ability,
 }
 
 #[derive(Default)]
@@ -59,7 +59,7 @@ impl ToolCatalog for AbilityRegistry {
     fn resolve(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.entries
             .iter()
-            .flat_map(|entry| entry.bundle.tools.iter())
+            .flat_map(|entry| entry.parts.tools.iter())
             .find(|tool| tool.name() == name)
             .cloned()
     }

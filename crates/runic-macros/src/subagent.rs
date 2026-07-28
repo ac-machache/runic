@@ -133,23 +133,22 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         #input
 
         #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::ability::Ability for #ident #ty_generics #where_clause {
+        impl #impl_generics ::runic::ability::ToAbility for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #name
             }
 
-            async fn contribute(
+            async fn to_ability(
                 &self,
-                bundle: &mut ::runic::ability::AbilityBundle,
+                base: ::runic::ability::Ability,
                 ctx: &::runic::ability::BuildCtx<'_>,
-            ) -> ::runic::__private::anyhow::Result<()> {
+            ) -> ::runic::__private::anyhow::Result<::runic::ability::Ability> {
                 let llm = ::runic::Llm::new(ctx.provider.clone(), #model_expr);
                 let agent = self.agent(llm).await?;
-                bundle.subagent(
+                Ok(base.subagent(
                     ::runic::subagent::Subagent::new(#name, #description, agent)
                         .invocation(#invocation_expr),
-                );
-                Ok(())
+                ))
             }
         }
     };

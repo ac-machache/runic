@@ -3,12 +3,12 @@ use std::sync::Arc;
 use runic_agent::Llm;
 use runic_substrate::ArtifactStore;
 
-use crate::ability::Ability;
+use crate::ability::ToAbility;
 
 #[derive(Clone)]
 pub struct Agent {
     pub(crate) llm: Llm,
-    pub(crate) abilities: Vec<Arc<dyn Ability>>,
+    pub(crate) abilities: Vec<Arc<dyn ToAbility>>,
     pub(crate) output_schema: Option<serde_json::Value>,
     pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
@@ -23,12 +23,12 @@ impl Agent {
         }
     }
 
-    pub fn with(mut self, ability: impl Ability + 'static) -> Self {
+    pub fn with(mut self, ability: impl ToAbility + 'static) -> Self {
         self.abilities.push(Arc::new(ability));
         self
     }
 
-    pub fn with_arc(mut self, ability: Arc<dyn Ability>) -> Self {
+    pub fn with_arc(mut self, ability: Arc<dyn ToAbility>) -> Self {
         self.abilities.push(ability);
         self
     }

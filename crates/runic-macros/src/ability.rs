@@ -150,9 +150,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         other => {
             return syn::Error::new_spanned(
                 other,
-                "#[ability] goes on the type that owns `async fn ability(&self, draft: \
-                 AbilityDraft, ctx: &BuildCtx<'_>) -> anyhow::Result<AbilityDraft>`, not on \
-                 the impl block",
+                "#[ability] goes on the type that owns `async fn ability(&self, base: Ability, \
+                 ctx: &BuildCtx<'_>) -> anyhow::Result<Ability>`, not on the impl block",
             )
             .to_compile_error()
             .into();
@@ -185,23 +184,20 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => (quote! {}, quote! {}),
     };
 
-    let seed = attrs.id.unwrap_or_else(|| ident.to_string());
-
     let output = quote! {
         #input
 
         #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::ability::Ability for #ident #ty_generics #where_clause {
+        impl #impl_generics ::runic::ability::ToAbility for #ident #ty_generics #where_clause {
             #name_method
             #descriptor_method
 
-            async fn contribute(
+            async fn to_ability(
                 &self,
-                bundle: &mut ::runic::ability::AbilityBundle,
+                base: ::runic::ability::Ability,
                 ctx: &::runic::ability::BuildCtx<'_>,
-            ) -> ::runic::__private::anyhow::Result<()> {
-                let draft = self.ability(::runic::ability::ability(#seed), ctx).await?;
-                ::runic::ability::Ability::contribute(&draft, bundle, ctx).await
+            ) -> ::runic::__private::anyhow::Result<::runic::ability::Ability> {
+                self.ability(base, ctx).await
             }
         }
     };

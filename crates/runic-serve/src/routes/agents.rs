@@ -116,7 +116,7 @@ fn fallback_overview(name: &str, agent: &runic_agent::Runner) -> AgentOverview {
 }
 
 /// `GET /agents/{name}` — structural view of a named agent: abilities and the
-/// tools/skills/subagents/hooks each contributes. Builds a throwaway instance
+/// tools/skills/subagents/hooks each to_abilitys. Builds a throwaway instance
 /// from the factory; nothing persisted, no pool entry. Ability-grouped when
 /// the factory implements [`crate::AgentFactory::overview`]; otherwise a
 /// single ungrouped bucket built from the agent's flat tool/hook list.

@@ -9,7 +9,7 @@ mod models;
 pub mod output;
 pub mod tools;
 
-pub use ability::{Ability, AbilityBundle, ability};
+pub use ability::{Ability, ToAbility};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
 pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Runtime, Session};

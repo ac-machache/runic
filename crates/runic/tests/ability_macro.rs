@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::{Ability, AbilityDraft, ActivationPolicy, BuildCtx};
+use runic::ability::{Ability, ActivationPolicy, BuildCtx, ToAbility, ability};
 use runic::composer::Agent;
 use runic::{Llm, ability};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -70,12 +70,8 @@ impl Tool for RefundTool {
 struct Bare;
 
 impl Bare {
-    async fn ability(
-        &self,
-        draft: AbilityDraft,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<AbilityDraft> {
-        Ok(draft)
+    async fn ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        Ok(base)
     }
 }
 
@@ -89,12 +85,8 @@ impl Billing {
         format!("Billing rules ({} tools).", self.tool_count)
     }
 
-    async fn ability(
-        &self,
-        draft: AbilityDraft,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<AbilityDraft> {
-        Ok(draft.prompt(self.banner()).tool(RefundTool))
+    async fn ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        Ok(base.prompt(self.banner()).tool(RefundTool))
     }
 }
 
@@ -102,12 +94,8 @@ impl Billing {
 struct Logging;
 
 impl Logging {
-    async fn ability(
-        &self,
-        draft: AbilityDraft,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<AbilityDraft> {
-        Ok(draft)
+    async fn ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        Ok(base)
     }
 }
 
@@ -115,12 +103,8 @@ impl Logging {
 struct TenantKit;
 
 impl TenantKit {
-    async fn ability(
-        &self,
-        draft: AbilityDraft,
-        ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<AbilityDraft> {
-        Ok(draft
+    async fn ability(&self, base: Ability, ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        Ok(base
             .prompt(format!("Tenant: {}.", ctx.tenant))
             .with(ability("nested").prompt("NESTED-SECTION")))
     }
@@ -156,7 +140,7 @@ fn activation_eager_can_be_stated_explicitly() {
 }
 
 #[test]
-fn an_eager_ability_reports_its_id_exactly_like_the_draft_does() {
+fn an_eager_ability_reports_its_id_exactly_like_the_builder_does() {
     assert_eq!(Logging.descriptor().id.as_deref(), Some("logging"));
     assert_eq!(
         ability("logging").descriptor().id,
@@ -171,12 +155,8 @@ async fn two_eager_abilities_sharing_an_id_are_rejected() {
     struct One;
 
     impl One {
-        async fn ability(
-            &self,
-            draft: AbilityDraft,
-            _ctx: &BuildCtx<'_>,
-        ) -> anyhow::Result<AbilityDraft> {
-            Ok(draft)
+        async fn ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+            Ok(base)
         }
     }
 
@@ -184,12 +164,8 @@ async fn two_eager_abilities_sharing_an_id_are_rejected() {
     struct Two;
 
     impl Two {
-        async fn ability(
-            &self,
-            draft: AbilityDraft,
-            _ctx: &BuildCtx<'_>,
-        ) -> anyhow::Result<AbilityDraft> {
-            Ok(draft)
+        async fn ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+            Ok(base)
         }
     }
 
@@ -215,7 +191,7 @@ fn the_impl_block_is_left_untouched() {
 }
 
 #[tokio::test]
-async fn the_draft_body_sees_ctx_and_can_nest_abilities() {
+async fn the_body_sees_ctx_and_can_nest_abilities() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider, "test-model").instructions("core"))
         .with(TenantKit)

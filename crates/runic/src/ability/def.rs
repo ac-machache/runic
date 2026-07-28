@@ -3,10 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic_provider::Provider;
 
-use super::AbilityBundle;
+use super::Ability;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActivationPolicy {
+    #[default]
     Eager,
     Deferred,
 }
@@ -43,19 +44,17 @@ pub struct BuildCtx<'a> {
     pub model: &'a str,
 }
 
+/// Adds to an [`Ability`]. `#[ability]` writes this impl; the composer hands
+/// you a base already carrying your identity.
 #[async_trait]
-pub trait Ability: Send + Sync {
+pub trait ToAbility: Send + Sync {
     fn name(&self) -> &str {
         std::any::type_name::<Self>()
     }
 
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        context: &BuildCtx<'_>,
-    ) -> anyhow::Result<()>;
-
     fn descriptor(&self) -> AbilityDescriptor {
         AbilityDescriptor::eager()
     }
+
+    async fn to_ability(&self, base: Ability, ctx: &BuildCtx<'_>) -> anyhow::Result<Ability>;
 }

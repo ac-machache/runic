@@ -4,7 +4,7 @@ use crate::subagent::{RosterVoice, Subagent};
 use async_trait::async_trait;
 use runic_substrate::{SearchChatsTool, SessionStore};
 
-use super::{Ability, AbilityBundle, AbilityDraft, BuildCtx, ability};
+use super::{Ability, BuildCtx, ToAbility, ability};
 use crate::tools::{
     AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
     WeatherTool, WebFetchTool, WebSearchTool,
@@ -45,54 +45,48 @@ impl Delegation {
 }
 
 #[async_trait]
-impl Ability for Delegation {
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        for subagent in &self.subagents {
-            bundle.subagent(subagent.clone());
-        }
-        bundle.delegation_voice.merge_first_wins(&self.voice);
-        Ok(())
+impl ToAbility for Delegation {
+    async fn to_ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        let mut base = base.subagents(self.subagents.iter().cloned());
+        base.voice(&self.voice);
+        Ok(base)
     }
 }
 
-pub fn search_chats(store: Arc<dyn SessionStore>) -> AbilityDraft {
+pub fn search_chats(store: Arc<dyn SessionStore>) -> Ability {
     ability("search-chats")
         .describe("search this tenant's other conversations")
         .tool(SearchChatsTool::new(store))
 }
 
-pub fn basics() -> AbilityDraft {
+pub fn basics() -> Ability {
     ability("basics").tool(CalculatorTool).tool(SystemTimeTool)
 }
 
-pub fn ask_user() -> AbilityDraft {
+pub fn ask_user() -> Ability {
     ability("ask-user").tool(AskUserTool)
 }
 
-pub fn web_fetch() -> AbilityDraft {
+pub fn web_fetch() -> Ability {
     ability("web-fetch")
         .describe("fetch a URL (SSRF-guarded)")
         .tool(WebFetchTool::new())
 }
 
-pub fn web_search(provider: Arc<dyn SearchProvider>) -> AbilityDraft {
+pub fn web_search(provider: Arc<dyn SearchProvider>) -> Ability {
     ability("web-search")
         .describe("search the web")
         .tool(WebSearchTool::new(provider))
 }
 
-pub fn weather() -> AbilityDraft {
+pub fn weather() -> Ability {
     ability("weather")
         .describe("current + historical weather, keyless")
         .tool(WeatherTool::new())
         .tool(WeatherHistoryTool::new())
 }
 
-pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> AbilityDraft {
+pub fn composio(api_key: impl Into<String>, entity_id: Option<String>) -> Ability {
     ability("composio")
         .describe("1000+ external app actions via Composio")
         .tool(ComposioTool::new(api_key, entity_id))

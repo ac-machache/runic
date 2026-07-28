@@ -317,14 +317,14 @@ async fn a_consumer_hook_can_block_the_childs_tool_calls() {
 struct CtxProbe(Arc<Mutex<Option<String>>>);
 
 #[async_trait]
-impl runic::ability::Ability for CtxProbe {
-    async fn contribute(
+impl runic::ability::ToAbility for CtxProbe {
+    async fn to_ability(
         &self,
-        _bundle: &mut runic::ability::AbilityBundle,
+        base: runic::ability::Ability,
         ctx: &runic::ability::BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<runic::ability::Ability> {
         *self.0.lock().unwrap() = Some(ctx.model.to_string());
-        Ok(())
+        Ok(base)
     }
 }
 

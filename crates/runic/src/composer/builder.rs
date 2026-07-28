@@ -9,7 +9,7 @@ use std::{
 use super::scope::PendingHooks;
 use super::view::{AbilityView, SkillInfo, SubagentInfo};
 use super::{Agent, ComposeError, Composition, Runtime};
-use crate::ability::{Ability, AbilityBundle, ActivationPolicy, BuildCtx, Layer};
+use crate::ability::{Ability, ActivationPolicy, BuildCtx, Layer, ToAbility};
 use crate::artifact_resolver::ArtifactResolver;
 use crate::deferred::{
     AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
@@ -39,7 +39,7 @@ fn validate_ability_id(id: &str) -> bool {
         })
 }
 
-fn validate_ability_descriptors(abilities: &[Arc<dyn Ability>]) -> Result<(), ComposeError> {
+fn validate_ability_descriptors(abilities: &[Arc<dyn ToAbility>]) -> Result<(), ComposeError> {
     let mut to_track_ids: HashMap<String, String> = HashMap::new();
     for ability in abilities {
         let ability_description = ability.descriptor();
@@ -149,15 +149,20 @@ impl Composer {
         for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
-            let mut bundle = AbilityBundle::default();
-            ability
-                .contribute(&mut bundle, &ctx)
+            let mut parts = ability
+                .to_ability(Ability::new(ability_name.clone()), &ctx)
+                .await
+                .map_err(|source| ComposeError::Ability {
+                    ability: ability_name.clone(),
+                    source,
+                })?
+                .resolve(&ctx)
                 .await
                 .map_err(|source| ComposeError::Ability {
                     ability: ability_name.clone(),
                     source,
                 })?;
-            let ability_hooks = std::mem::take(&mut bundle.write_hooks);
+            let ability_hooks = std::mem::take(&mut parts.hooks);
             for hook in &ability_hooks {
                 if let Some(point) = hook.points().iter().find_map(run_boundary_point) {
                     return Err(ComposeError::AbilityLifecycleHook {
@@ -176,7 +181,7 @@ impl Composer {
             let mut owned_tools = HashSet::new();
             let mut owned_skills = HashSet::new();
             let mut owned_subagents = HashSet::new();
-            for tool in &bundle.tools {
+            for tool in &parts.tools {
                 let tool_name = tool.name().to_string();
                 owned_tools.insert(tool_name.clone());
                 if reserve_loader_name && tool_name == LOAD_ABILITY_TOOL_NAME {
@@ -204,7 +209,7 @@ impl Composer {
                     eager_owners.insert(tool_name, ability_name.clone());
                 }
             }
-            for set in &bundle.skills {
+            for set in &parts.skills {
                 for skill_id in set.ids() {
                     if let Some(first_ability) = skill_owner_names.get(&skill_id) {
                         return Err(ComposeError::DuplicateSkillId {
@@ -220,7 +225,7 @@ impl Composer {
                     }
                 }
             }
-            for def in &bundle.subagents {
+            for def in &parts.subagents {
                 if let Some(first_ability) = subagent_owner_names.get(&def.name) {
                     return Err(ComposeError::DuplicateSubagentName {
                         first_ability: first_ability.clone(),
@@ -248,9 +253,9 @@ impl Composer {
                 Some(id) => registry.entries.push(DeferredEntry {
                     id,
                     description: descriptor.description.unwrap_or_default(),
-                    bundle,
+                    parts,
                 }),
-                None => composition.merge(bundle),
+                None => composition.merge(parts),
             }
         }
 
@@ -260,7 +265,7 @@ impl Composer {
         let deferred_skills: Vec<Arc<SkillSet>> = registry
             .entries
             .iter()
-            .flat_map(|entry| entry.bundle.skills.iter().cloned())
+            .flat_map(|entry| entry.parts.skills.iter().cloned())
             .collect();
         if !composition.skills.is_empty() || !deferred_skills.is_empty() {
             let visible = SkillSet::merge(composition.skills.iter().cloned());
@@ -287,7 +292,7 @@ impl Composer {
         let deferred_defs: Vec<Subagent> = registry
             .entries
             .iter()
-            .flat_map(|entry| entry.bundle.subagents.iter().cloned())
+            .flat_map(|entry| entry.parts.subagents.iter().cloned())
             .collect();
         if !composition.subagents.is_empty() || !deferred_defs.is_empty() {
             if !composition.subagents.is_empty() {
@@ -400,9 +405,14 @@ impl Composer {
         for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
-            let mut bundle = AbilityBundle::default();
-            ability
-                .contribute(&mut bundle, &ctx)
+            let parts = ability
+                .to_ability(Ability::new(ability_name.clone()), &ctx)
+                .await
+                .map_err(|source| ComposeError::Ability {
+                    ability: ability_name.clone(),
+                    source,
+                })?
+                .resolve(&ctx)
                 .await
                 .map_err(|source| ComposeError::Ability {
                     ability: ability_name.clone(),
@@ -415,7 +425,7 @@ impl Composer {
                     .as_deref()
                     .is_some_and(|id| self.activated.contains(id)),
             };
-            let skills: Vec<SkillInfo> = bundle
+            let skills: Vec<SkillInfo> = parts
                 .skills
                 .iter()
                 .flat_map(|set| {
@@ -427,7 +437,7 @@ impl Composer {
                     })
                 })
                 .collect();
-            let subagents: Vec<SubagentInfo> = bundle
+            let subagents: Vec<SubagentInfo> = parts
                 .subagents
                 .iter()
                 .map(|def| SubagentInfo {
@@ -435,8 +445,8 @@ impl Composer {
                     description: def.description.clone(),
                 })
                 .collect();
-            let hooks: Vec<String> = bundle
-                .write_hooks
+            let hooks: Vec<String> = parts
+                .hooks
                 .iter()
                 .map(|hook| hook.name().to_string())
                 .collect();
@@ -446,8 +456,8 @@ impl Composer {
                 description: descriptor.description,
                 deferred: descriptor.activation == ActivationPolicy::Deferred,
                 activated,
-                prompt: bundle.prompt,
-                tools: bundle.tools.iter().map(|tool| tool.spec()).collect(),
+                prompt: parts.prompt,
+                tools: parts.tools.iter().map(|tool| tool.spec()).collect(),
                 skills,
                 subagents,
                 hooks,

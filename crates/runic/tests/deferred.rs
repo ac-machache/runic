@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::Llm;
-use runic::ability::{Ability, AbilityBundle, AbilityDescriptor, BuildCtx, Layer, ability};
+use runic::ability::{Ability, AbilityDescriptor, BuildCtx, ToAbility, ability};
 use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
 use runic::subagent::Subagent;
@@ -159,7 +159,7 @@ impl DeferredAbility {
 }
 
 #[async_trait]
-impl Ability for DeferredAbility {
+impl ToAbility for DeferredAbility {
     fn name(&self) -> &str {
         self.id
     }
@@ -168,27 +168,18 @@ impl Ability for DeferredAbility {
         AbilityDescriptor::deferred(self.id, self.description)
     }
 
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
+    async fn to_ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        let mut base = base
+            .tools(self.tools.iter().cloned())
+            .hooks(self.hooks.iter().cloned())
+            .subagents(self.subagents.iter().cloned());
         if !self.prompt.is_empty() {
-            bundle.prompt(Layer::Stable, self.prompt);
-        }
-        for tool in &self.tools {
-            bundle.tool(tool.clone());
-        }
-        for hook in &self.hooks {
-            bundle.write_hook(hook.clone());
+            base = base.prompt(self.prompt);
         }
         for set in &self.skills {
-            bundle.skill_set(set.clone());
+            base = base.skills(set.clone());
         }
-        for def in &self.subagents {
-            bundle.subagent(def.clone());
-        }
-        Ok(())
+        Ok(base)
     }
 }
 

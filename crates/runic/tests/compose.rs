@@ -3,9 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::Llm;
-use runic::ability::{
-    Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, ability,
-};
+use runic::ability::{Ability, AbilityDescriptor, ActivationPolicy, BuildCtx, ToAbility, ability};
 use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -217,17 +215,13 @@ async fn a_tools_ability_registers_runnable_tools() {
 struct FailingAbility;
 
 #[async_trait]
-impl Ability for FailingAbility {
+impl ToAbility for FailingAbility {
     fn name(&self) -> &str {
         "failing-test-ability"
     }
 
-    async fn contribute(
-        &self,
-        bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
-        bundle.prompt(runic::ability::Layer::Stable, "partial contribution");
+    async fn to_ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
+        let _ = base.prompt("partial contribution");
         anyhow::bail!("setup exploded")
     }
 }
@@ -235,14 +229,10 @@ impl Ability for FailingAbility {
 struct CountingAbility(Arc<Mutex<u32>>);
 
 #[async_trait]
-impl Ability for CountingAbility {
-    async fn contribute(
-        &self,
-        _bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
+impl ToAbility for CountingAbility {
+    async fn to_ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
         *self.0.lock().unwrap() += 1;
-        Ok(())
+        Ok(base)
     }
 }
 
@@ -288,7 +278,7 @@ struct DescribedAbility {
 }
 
 #[async_trait]
-impl Ability for DescribedAbility {
+impl ToAbility for DescribedAbility {
     fn name(&self) -> &str {
         self.name
     }
@@ -297,13 +287,9 @@ impl Ability for DescribedAbility {
         self.descriptor.clone()
     }
 
-    async fn contribute(
-        &self,
-        _bundle: &mut AbilityBundle,
-        _ctx: &BuildCtx<'_>,
-    ) -> anyhow::Result<()> {
+    async fn to_ability(&self, base: Ability, _ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {
         *self.calls.lock().unwrap() += 1;
-        Ok(())
+        Ok(base)
     }
 }
 
@@ -390,7 +376,7 @@ async fn ability_ids_accept_allowed_punctuation_and_the_64_byte_boundary() {
 }
 
 #[tokio::test]
-async fn duplicate_explicit_ids_fail_before_any_ability_contributes() {
+async fn duplicate_explicit_ids_fail_before_any_ability_to_abilitys() {
     let calls = Arc::new(Mutex::new(0));
     let eager = AbilityDescriptor {
         id: Some("shared-id".into()),

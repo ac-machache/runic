@@ -69,7 +69,7 @@ impl Tool for LoadAbilityTool {
             )));
         };
 
-        let tool_names: Vec<&str> = entry.bundle.tools.iter().map(|tool| tool.name()).collect();
+        let tool_names: Vec<&str> = entry.parts.tools.iter().map(|tool| tool.name()).collect();
         ctx.update(ability_activated_key(id), serde_json::Value::Bool(true));
         for name in &tool_names {
             ctx.update(activated_key(name), serde_json::Value::Bool(true));
@@ -77,19 +77,19 @@ impl Tool for LoadAbilityTool {
         self.loaded.mark(id);
 
         let mut output = format!("Ability `{id}` loaded.\n\n");
-        for (_, text) in &entry.bundle.prompt {
+        for (_, text) in &entry.parts.prompt {
             output.push_str(text);
             output.push_str("\n\n");
         }
-        if !entry.bundle.skills.is_empty() {
+        if !entry.parts.skills.is_empty() {
             output.push_str("Unlocked skills (view with the `skill_view` tool):\n");
-            output.push_str(&SkillSet::merge(entry.bundle.skills.iter().cloned()).prompt_section());
+            output.push_str(&SkillSet::merge(entry.parts.skills.iter().cloned()).prompt_section());
             output.push_str("\n\n");
         }
-        if !entry.bundle.subagents.is_empty() {
+        if !entry.parts.subagents.is_empty() {
             output.push_str("Unlocked subagents (dispatch with the `delegate` tool):\n");
             let lines: Vec<String> = entry
-                .bundle
+                .parts
                 .subagents
                 .iter()
                 .map(crate::subagent::Subagent::roster_line)
@@ -97,9 +97,9 @@ impl Tool for LoadAbilityTool {
             output.push_str(&lines.join("\n"));
             output.push_str("\n\n");
         }
-        if !entry.bundle.tools.is_empty() {
+        if !entry.parts.tools.is_empty() {
             output.push_str("Unlocked tools (callable from your next turn):\n");
-            for tool in &entry.bundle.tools {
+            for tool in &entry.parts.tools {
                 let spec = tool.spec();
                 let _ = writeln!(output, "- {}: {}", spec.name, spec.description);
             }

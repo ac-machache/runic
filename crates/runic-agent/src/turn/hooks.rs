@@ -112,8 +112,12 @@ impl Runner {
         run_id: &str,
         point: Point,
     ) -> Result<(), AgentError> {
-        for h in self.write_hooks.clone() {
+        for scoped in self.write_hooks.clone() {
+            let h = &scoped.hook;
             if !h.points().contains(&point.lifecycle()) {
+                continue;
+            }
+            if !scoped.fires_this_turn() {
                 continue;
             }
             let outcome = match point {

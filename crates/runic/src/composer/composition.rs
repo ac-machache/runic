@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::subagent::{RosterVoice, Subagent};
-use runic_hook::WriteHook;
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
 
@@ -11,7 +10,6 @@ use crate::ability::AbilityBundle;
 pub struct Composition {
     pub(super) prompt: crate::context::Context,
     pub(super) tools: Vec<Arc<dyn Tool>>,
-    pub(super) write_hooks: Vec<Arc<dyn WriteHook>>,
     pub(super) tool_catalogs: Vec<Arc<dyn ToolCatalog>>,
     pub(super) skills: Vec<Arc<SkillSet>>,
     pub(super) subagents: Vec<Subagent>,
@@ -24,7 +22,6 @@ impl Composition {
             self.prompt.fragment(layer, text);
         }
         self.tools.extend(bundle.tools);
-        self.write_hooks.extend(bundle.write_hooks);
         if let Some(catalog) = bundle.tool_catalog {
             self.tool_catalogs.push(catalog);
         }

@@ -100,8 +100,12 @@ impl Runner {
             };
 
             let mut substituted: Option<(ToolResult, ToolStatus)> = None;
-            for h in self.write_hooks.clone() {
+            for scoped in self.write_hooks.clone() {
+                let h = &scoped.hook;
                 if !h.points().contains(&HookLifecycle::BeforeTool) {
+                    continue;
+                }
+                if !scoped.fires_for(&call) {
                     continue;
                 }
                 let outcome = h.before_tool(&mut self.state, &mut call).await;
@@ -306,8 +310,12 @@ impl Runner {
             // The tool already ran, so there's no call to make in-band: both
             // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
             // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
-            for h in self.write_hooks.clone() {
+            for scoped in self.write_hooks.clone() {
+                let h = &scoped.hook;
                 if !h.points().contains(&HookLifecycle::AfterTool) {
+                    continue;
+                }
+                if !scoped.fires_for(call) {
                     continue;
                 }
                 let outcome = h.after_tool(&mut self.state, call, &result).await;

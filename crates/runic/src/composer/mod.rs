@@ -3,6 +3,7 @@ mod builder;
 mod composition;
 mod error;
 mod runtime;
+mod scope;
 mod session;
 mod view;
 

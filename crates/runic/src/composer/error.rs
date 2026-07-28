@@ -41,6 +41,14 @@ pub enum ComposeError {
         second_ability: String,
         name: String,
     },
+    #[error(
+        "hook `{hook}` on ability `{ability}` declares `{point}`, which is not an ability-scoped moment — an ability's hook is live only while that ability is in play, and the run boundary is outside every ability. Narrow `points()` to the model and tool points, or move the hook to `Runtime::hook` to make it agent-wide"
+    )]
+    AbilityLifecycleHook {
+        ability: String,
+        hook: String,
+        point: &'static str,
+    },
     #[error("model spec `{spec}` is not `provider:model`")]
     InvalidModelSpec { spec: String },
     #[error(

@@ -99,9 +99,9 @@ impl WriteHook for MarkerHook {
         "marker"
     }
     fn points(&self) -> &'static [HookLifecycle] {
-        &[HookLifecycle::AfterAgent]
+        &[HookLifecycle::BeforeModel]
     }
-    async fn after_agent(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
         *self.0.lock().unwrap() = true;
         HookOutcome::Continue
     }

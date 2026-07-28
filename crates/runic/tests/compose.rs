@@ -6,7 +6,7 @@ use runic::Llm;
 use runic::ability::{
     Ability, AbilityBundle, AbilityDescriptor, ActivationPolicy, BuildCtx, ability,
 };
-use runic::composer::{Agent, ComposeError};
+use runic::composer::{Agent, ComposeError, Composer, Runtime};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -134,18 +134,69 @@ impl WriteHook for Marker {
 }
 
 #[tokio::test]
-async fn a_hooks_ability_registers_custom_write_hooks() {
+async fn a_run_boundary_hook_on_an_ability_is_rejected_at_build() {
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let result = Agent::new(Llm::new(provider, "test-model").instructions("go"))
+        .with(ability("marker").hook(Marker(Arc::new(Mutex::new(false)))))
+        .build("alice", "s1")
+        .await;
+
+    match result {
+        Err(ComposeError::AbilityLifecycleHook {
+            ability,
+            hook,
+            point,
+        }) => {
+            assert_eq!(ability, "marker");
+            assert_eq!(hook, "marker");
+            assert_eq!(point, "after_agent");
+        }
+        Err(other) => panic!("expected a run-boundary rejection, got {other}"),
+        Ok(_) => panic!("an ability must not carry a run-boundary hook"),
+    }
+}
+
+#[tokio::test]
+async fn the_same_hook_is_legal_on_the_runtime() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let fired = Arc::new(Mutex::new(false));
-    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
-        .with(ability("marker").hook(Marker(fired.clone())))
-        .build("alice", "s1")
-        .await
-        .unwrap();
+    let mut agent = Composer::new(
+        Agent::new(Llm::new(provider, "test-model").instructions("go")),
+        Runtime::new().hook(Marker(fired.clone())),
+    )
+    .build("alice", "s1")
+    .await
+    .unwrap();
 
     agent.run("hi").await.unwrap();
 
-    assert!(*fired.lock().unwrap(), "custom write hook must fire");
+    assert!(
+        *fired.lock().unwrap(),
+        "the run boundary belongs to the agent, so Runtime::hook still reaches it"
+    );
+}
+
+#[tokio::test]
+async fn an_un_narrowed_hook_on_an_ability_is_rejected() {
+    struct EveryPoint;
+
+    #[async_trait]
+    impl WriteHook for EveryPoint {
+        fn name(&self) -> &str {
+            "every-point"
+        }
+    }
+
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let result = Agent::new(Llm::new(provider, "test-model").instructions("go"))
+        .with(ability("sloppy").hook(EveryPoint))
+        .build("alice", "s1")
+        .await;
+
+    assert!(
+        matches!(result, Err(ComposeError::AbilityLifecycleHook { .. })),
+        "points() defaults to ALL_POINTS, so an un-narrowed ability hook must not build"
+    );
 }
 
 #[tokio::test]

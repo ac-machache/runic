@@ -101,9 +101,9 @@ impl WriteHook for MarkerHook {
         "marker"
     }
     fn points(&self) -> &'static [HookLifecycle] {
-        &[HookLifecycle::AfterAgent]
+        &[HookLifecycle::BeforeModel]
     }
-    async fn after_agent(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
         *self.0.lock().unwrap() = true;
         HookOutcome::Continue
     }
@@ -408,7 +408,7 @@ async fn a_deferred_tool_colliding_with_an_eager_tool_is_rejected() {
 }
 
 #[tokio::test]
-async fn deferred_ability_hooks_are_always_active_regardless_of_load() {
+async fn a_deferred_abilitys_model_hook_stays_dormant_until_it_is_loaded() {
     let fired = Arc::new(Mutex::new(false));
     let provider = ScriptedProvider::new(vec![text("done")]);
     let mut agent = Agent::new(Llm::new(provider, "test-model"))
@@ -420,9 +420,29 @@ async fn deferred_ability_hooks_are_always_active_regardless_of_load() {
     agent.run("go").await.unwrap();
 
     assert!(
+        !*fired.lock().unwrap(),
+        "the ability was never loaded, so nothing it carries is in play"
+    );
+}
+
+#[tokio::test]
+async fn loading_the_ability_brings_its_model_hook_into_play() {
+    let fired = Arc::new(Mutex::new(false));
+    let provider = ScriptedProvider::new(vec![
+        call("c1", "load_ability", serde_json::json!({ "id": "billing" })),
+        text("done"),
+    ]);
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .with(DeferredAbility::new("billing", "invoices").hook(Arc::new(MarkerHook(fired.clone()))))
+        .build("alice", "s1")
+        .await
+        .unwrap();
+
+    agent.run("go").await.unwrap();
+
+    assert!(
         *fired.lock().unwrap(),
-        "a deferred ability's hook enforces regardless of whether the model has loaded it — \
-         deferred only hides tools/prompt, it never disables enforcement"
+        "the turn after load_ability is inside the ability's lifetime"
     );
 }
 

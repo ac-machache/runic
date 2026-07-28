@@ -69,7 +69,11 @@ impl runic_hook::WriteHook for FlagHook {
         "flag"
     }
 
-    async fn before_agent(&self, _state: &mut runic_state::AgentState) -> runic_hook::HookOutcome {
+    fn points(&self) -> &'static [runic_hook::HookLifecycle] {
+        &[runic_hook::HookLifecycle::BeforeModel]
+    }
+
+    async fn before_model(&self, _state: &mut runic_state::AgentState) -> runic_hook::HookOutcome {
         self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         runic_hook::HookOutcome::Noop
     }

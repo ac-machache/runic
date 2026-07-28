@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use runic_hook::{ReadHook, WriteHook};
+use runic_hook::{HookScope, ReadHook, ScopedHook, WriteHook};
 use runic_provider::{CompletionRequest, Provider, ProviderError};
 use runic_state::{AgentState, Emitter, SubSession};
 use runic_tool::{
@@ -269,7 +269,7 @@ pub struct Runner {
     pub(crate) media_resolver: Option<Arc<dyn MediaResolver>>,
     pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
     pub(crate) read_hooks: Vec<Arc<dyn ReadHook>>,
-    pub(crate) write_hooks: Vec<Arc<dyn WriteHook>>,
+    pub(crate) write_hooks: Vec<ScopedHook>,
     pub(crate) state: AgentState,
     pub(crate) config: AgentConfig,
     pub(crate) guard: loop_guard::LoopGuard,
@@ -305,7 +305,7 @@ impl Runner {
     pub fn write_hook_names(&self) -> Vec<String> {
         self.write_hooks
             .iter()
-            .map(|hook| hook.name().to_string())
+            .map(|scoped| scoped.hook.name().to_string())
             .collect()
     }
 
@@ -367,7 +367,7 @@ pub struct RunnerBuilder {
     system_prompt: String,
     tools: Vec<Arc<dyn Tool>>,
     read_hooks: Vec<Arc<dyn ReadHook>>,
-    write_hooks: Vec<Arc<dyn WriteHook>>,
+    write_hooks: Vec<ScopedHook>,
     fallbacks: Vec<FallbackProvider>,
     media_resolver: Option<Arc<dyn MediaResolver>>,
     catalog: Option<Arc<dyn ToolCatalog>>,
@@ -484,9 +484,19 @@ impl RunnerBuilder {
         self
     }
 
-    /// Register a read-edit hook.
+    /// Register a read-edit hook that fires at every point it declares.
     pub fn write_hook(mut self, hook: Arc<dyn WriteHook>) -> Self {
-        self.write_hooks.push(hook);
+        self.write_hooks.push(ScopedHook::global(hook));
+        self
+    }
+
+    /// Register a read-edit hook that fires only while its scope is in play.
+    pub fn scoped_write_hook(
+        mut self,
+        hook: Arc<dyn WriteHook>,
+        scope: Arc<dyn HookScope>,
+    ) -> Self {
+        self.write_hooks.push(ScopedHook::scoped(hook, scope));
         self
     }
 
@@ -500,7 +510,7 @@ impl RunnerBuilder {
             .map(|t| (t.name().to_string(), t))
             .collect();
         self.read_hooks.sort_by_key(|h| h.priority());
-        self.write_hooks.sort_by_key(|h| h.priority());
+        self.write_hooks.sort_by_key(|h| h.order());
         Runner {
             provider: self.provider,
             fallbacks: self.fallbacks,

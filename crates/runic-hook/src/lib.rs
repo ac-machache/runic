@@ -123,6 +123,56 @@ pub trait WriteHook: Send + Sync {
     }
 }
 
+/// What keeps a hook's owner "in play". The loop asks before every fire; the
+/// composer decides what owning means.
+pub trait HookScope: Send + Sync {
+    fn owner(&self) -> &str;
+
+    /// Is the owner live for this turn? Governs the model points.
+    fn active(&self) -> bool;
+
+    /// Does the owner own this call's subject? Governs the tool points.
+    fn owns_call(&self, call: &ToolCall) -> bool;
+}
+
+#[derive(Clone)]
+pub struct ScopedHook {
+    pub hook: std::sync::Arc<dyn WriteHook>,
+    pub scope: Option<std::sync::Arc<dyn HookScope>>,
+}
+
+impl ScopedHook {
+    pub fn global(hook: std::sync::Arc<dyn WriteHook>) -> Self {
+        Self { hook, scope: None }
+    }
+
+    pub fn scoped(
+        hook: std::sync::Arc<dyn WriteHook>,
+        scope: std::sync::Arc<dyn HookScope>,
+    ) -> Self {
+        Self {
+            hook,
+            scope: Some(scope),
+        }
+    }
+
+    pub fn fires_this_turn(&self) -> bool {
+        self.scope.as_ref().is_none_or(|scope| scope.active())
+    }
+
+    pub fn fires_for(&self, call: &ToolCall) -> bool {
+        self.scope
+            .as_ref()
+            .is_none_or(|scope| scope.owns_call(call))
+    }
+
+    /// Global hooks outrank scoped ones whatever their priority, so an ability
+    /// can never pre-empt agent-wide policy.
+    pub fn order(&self) -> (bool, i32) {
+        (self.scope.is_some(), self.hook.priority())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

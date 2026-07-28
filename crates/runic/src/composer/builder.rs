@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use super::scope::PendingHooks;
 use super::view::{AbilityView, SkillInfo, SubagentInfo};
 use super::{Agent, ComposeError, Composition, Runtime};
 use crate::ability::{Ability, AbilityBundle, ActivationPolicy, BuildCtx, Layer};
@@ -14,6 +15,14 @@ use crate::deferred::{
     AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
     LoadedAbilities, delegate_subjects, skill_subjects,
 };
+
+fn run_boundary_point(point: &runic_hook::HookLifecycle) -> Option<&'static str> {
+    match point {
+        runic_hook::HookLifecycle::BeforeAgent => Some("before_agent"),
+        runic_hook::HookLifecycle::AfterAgent => Some("after_agent"),
+        _ => None,
+    }
+}
 
 fn validate_ability_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -136,6 +145,7 @@ impl Composer {
         let mut subagent_owner_names: HashMap<String, String> = HashMap::new();
         let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
         let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
+        let mut pending_hooks: Vec<PendingHooks> = Vec::new();
         for ability in &self.agent.abilities {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
@@ -147,17 +157,28 @@ impl Composer {
                     ability: ability_name.clone(),
                     source,
                 })?;
-            composition
-                .write_hooks
-                .extend(std::mem::take(&mut bundle.write_hooks));
+            let ability_hooks = std::mem::take(&mut bundle.write_hooks);
+            for hook in &ability_hooks {
+                if let Some(point) = hook.points().iter().find_map(run_boundary_point) {
+                    return Err(ComposeError::AbilityLifecycleHook {
+                        ability: ability_name,
+                        hook: hook.name().to_string(),
+                        point,
+                    });
+                }
+            }
             let deferred_id = match descriptor.activation {
                 ActivationPolicy::Deferred => descriptor
                     .id
                     .filter(|id| !self.activated.contains(id.as_str())),
                 ActivationPolicy::Eager => None,
             };
+            let mut owned_tools = HashSet::new();
+            let mut owned_skills = HashSet::new();
+            let mut owned_subagents = HashSet::new();
             for tool in &bundle.tools {
                 let tool_name = tool.name().to_string();
+                owned_tools.insert(tool_name.clone());
                 if reserve_loader_name && tool_name == LOAD_ABILITY_TOOL_NAME {
                     return Err(ComposeError::ReservedToolName {
                         ability: ability_name,
@@ -193,6 +214,7 @@ impl Composer {
                         });
                     }
                     skill_owner_names.insert(skill_id.clone(), ability_name.clone());
+                    owned_skills.insert(skill_id.clone());
                     if let Some(id) = &deferred_id {
                         deferred_skill_owners.insert(skill_id, id.clone());
                     }
@@ -207,9 +229,20 @@ impl Composer {
                     });
                 }
                 subagent_owner_names.insert(def.name.clone(), ability_name.clone());
+                owned_subagents.insert(def.name.clone());
                 if let Some(id) = &deferred_id {
                     deferred_subagent_owners.insert(def.name.clone(), id.clone());
                 }
+            }
+            if !ability_hooks.is_empty() {
+                pending_hooks.push(PendingHooks {
+                    ability: ability_name.clone(),
+                    deferred_id: deferred_id.clone(),
+                    hooks: ability_hooks,
+                    tools: owned_tools,
+                    subagents: owned_subagents,
+                    skills: owned_skills,
+                });
             }
             match deferred_id {
                 Some(id) => registry.entries.push(DeferredEntry {
@@ -220,6 +253,9 @@ impl Composer {
                 None => composition.merge(bundle),
             }
         }
+
+        let mut skill_tool_name: Option<String> = None;
+        let mut delegate_tool_name: Option<String> = None;
 
         let deferred_skills: Vec<Arc<SkillSet>> = registry
             .entries
@@ -237,6 +273,7 @@ impl Composer {
                 composition.skills.iter().cloned().chain(deferred_skills),
             ));
             if let Some(view) = full.view_tool() {
+                skill_tool_name = Some(view.name().to_string());
                 composition.tools.push(Arc::new(GatedTool::new(
                     view,
                     loaded.clone(),
@@ -270,6 +307,7 @@ impl Composer {
             let delegate: Arc<dyn Tool> = Arc::new(
                 DelegateTool::new(full_roster).voice(composition.delegation_voice.clone()),
             );
+            delegate_tool_name = Some(delegate.name().to_string());
             composition.tools.push(Arc::new(GatedTool::new(
                 delegate,
                 loaded.clone(),
@@ -286,9 +324,10 @@ impl Composer {
                     .fragment(Layer::Stable, registry.catalog_section());
             }
             let registry = Arc::new(registry);
-            composition
-                .tools
-                .push(Arc::new(LoadAbilityTool::new(registry.clone(), loaded)));
+            composition.tools.push(Arc::new(LoadAbilityTool::new(
+                registry.clone(),
+                loaded.clone(),
+            )));
             composition.tool_catalogs.push(registry);
         }
 
@@ -309,11 +348,18 @@ impl Composer {
         for tool in tools {
             agent_builder = agent_builder.tool(tool);
         }
-        for hook in composition.write_hooks {
-            agent_builder = agent_builder.write_hook(hook);
-        }
         for hook in &self.runtime.hooks {
             agent_builder = agent_builder.write_hook(hook.clone());
+        }
+        for pending in pending_hooks {
+            let (hooks, scope) = pending.into_scope(
+                &loaded,
+                delegate_tool_name.as_deref(),
+                skill_tool_name.as_deref(),
+            );
+            for hook in hooks {
+                agent_builder = agent_builder.scoped_write_hook(hook, scope.clone());
+            }
         }
         if let Some(store) = &self.runtime.artifact_store {
             agent_builder = agent_builder

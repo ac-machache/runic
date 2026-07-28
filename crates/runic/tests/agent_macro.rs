@@ -108,6 +108,19 @@ impl Researcher {
     }
 }
 
+#[subagent(
+    name = "drifted",
+    description = "declares one model, builds another",
+    model = "ministral-3b-latest"
+)]
+struct Drifted(Arc<ScriptedProvider>);
+
+impl Drifted {
+    async fn agent(&self, _llm: Llm) -> anyhow::Result<Agent> {
+        Ok(Agent::new(Llm::new(self.0.clone(), "mistral-large-latest")))
+    }
+}
+
 #[subagent(name = "inheritor", description = "uses the parent model")]
 struct Inheritor;
 
@@ -250,6 +263,34 @@ async fn a_subagent_without_a_model_attribute_inherits_the_parents() {
         vec!["parent-model", "parent-model", "parent-model"],
         "with no model attribute the child inherits the parent provider and model"
     );
+}
+
+#[tokio::test]
+async fn a_declared_model_the_body_ignores_fails_the_build() {
+    let provider = ScriptedProvider::new(vec![text("never runs")]);
+    let result = Agent::new(Llm::new(provider.clone(), "main-model"))
+        .with(Drifted(provider))
+        .build("alice", "s1")
+        .await;
+
+    let Err(error) = result else {
+        panic!("the attribute and the body disagree about the model");
+    };
+    let text = error.to_string();
+    assert!(text.contains("ministral-3b-latest"), "{text}");
+    assert!(text.contains("mistral-large-latest"), "{text}");
+}
+
+#[tokio::test]
+async fn a_declared_model_the_body_honours_builds_fine() {
+    let child = ScriptedProvider::new(vec![text("child found it")]);
+    let parent = ScriptedProvider::new(vec![text("parent done")]);
+
+    Agent::new(Llm::new(parent, "main-model"))
+        .with(Researcher { provider: child })
+        .build("alice", "s1")
+        .await
+        .expect("declared and actual agree");
 }
 
 #[test]

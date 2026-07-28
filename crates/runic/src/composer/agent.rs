@@ -23,6 +23,10 @@ impl Agent {
         }
     }
 
+    pub fn model(&self) -> &str {
+        &self.llm.config().model
+    }
+
     pub fn with(mut self, ability: impl ToAbility + 'static) -> Self {
         self.abilities.push(Arc::new(ability));
         self

@@ -123,6 +123,21 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         None => quote!(ctx.model),
     };
 
+    // Only a declared model can be contradicted; an inherited one is whatever
+    // the parent had, so there is nothing to disagree with.
+    let model_check = match &model {
+        Some(model) => quote! {
+            if agent.model() != #model {
+                return Err(::runic::__private::anyhow::Error::msg(format!(
+                    "subagent `{}` declares model = `{}`, but agent() returned one built on \
+                     `{}`. Use the `llm` you were handed, or drop the model attribute.",
+                    #name, #model, agent.model()
+                )));
+            }
+        },
+        None => quote! {},
+    };
+
     let invocation_expr = match invocation.as_deref() {
         Some("sync") => quote!(::runic::subagent::Invocation::Sync),
         Some("background") => quote!(::runic::subagent::Invocation::Background),
@@ -145,6 +160,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             ) -> ::runic::__private::anyhow::Result<::runic::ability::Ability> {
                 let llm = ::runic::Llm::new(ctx.provider.clone(), #model_expr);
                 let agent = self.agent(llm).await?;
+                #model_check
                 Ok(base.subagent(
                     ::runic::subagent::Subagent::new(#name, #description, agent)
                         .invocation(#invocation_expr),

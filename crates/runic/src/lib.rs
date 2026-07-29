@@ -26,7 +26,7 @@ pub use runic_macros::{ability, agent, hook, subagent, tool};
 #[doc(hidden)]
 pub mod __private {
     pub use anyhow;
-    pub use async_trait::async_trait;
+    pub use async_trait;
     pub use serde_json;
 }
 

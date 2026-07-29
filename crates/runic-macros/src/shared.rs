@@ -1,7 +1,63 @@
-pub(crate) fn runic_root() -> proc_macro2::TokenStream {
-    match std::env::var("CARGO_CRATE_NAME").as_deref() {
-        Ok("runic") => quote::quote!(crate),
-        _ => quote::quote!(::runic),
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+
+fn resolve(krate: &str) -> Option<TokenStream> {
+    if std::env::var("CARGO_CRATE_NAME").as_deref() == Ok(&krate.replace('-', "_")) {
+        return Some(quote!(crate));
+    }
+    match proc_macro_crate::crate_name(krate) {
+        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
+            let ident = format_ident!("{name}");
+            Some(quote!(::#ident))
+        }
+        Ok(proc_macro_crate::FoundCrate::Itself) => {
+            let ident = format_ident!("{}", krate.replace('-', "_"));
+            Some(quote!(::#ident))
+        }
+        Err(_) => None,
+    }
+}
+
+pub(crate) fn runic_root() -> TokenStream {
+    resolve("runic").unwrap_or_else(|| quote!(::runic))
+}
+
+/// Where a leaf crate's items live: the leaf itself when it is a direct
+/// dependency, otherwise through the umbrella's re-export of it.
+fn leaf(krate: &str, module: TokenStream) -> TokenStream {
+    match resolve(krate) {
+        Some(path) => path,
+        None => {
+            let umbrella = runic_root();
+            quote!(#umbrella::#module)
+        }
+    }
+}
+
+pub(crate) fn tool_path() -> TokenStream {
+    leaf("runic-tool", quote!(tool))
+}
+
+pub(crate) fn hook_path() -> TokenStream {
+    leaf("runic-hook", quote!(hook))
+}
+
+pub(crate) fn state_path() -> TokenStream {
+    leaf("runic-state", quote!(state))
+}
+
+pub(crate) fn types_path() -> TokenStream {
+    leaf("runic-types", quote!(types))
+}
+
+pub(crate) fn dep_path(krate: &str) -> TokenStream {
+    match resolve(krate) {
+        Some(path) => path,
+        None => {
+            let umbrella = runic_root();
+            let ident = format_ident!("{}", krate.replace('-', "_"));
+            quote!(#umbrella::__private::#ident)
+        }
     }
 }
 

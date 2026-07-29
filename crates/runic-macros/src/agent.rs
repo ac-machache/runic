@@ -103,7 +103,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output = quote! {
         #input
 
-        #[#runic::__private::async_trait]
+        #[#runic::__private::async_trait::async_trait]
         impl #impl_generics #runic::AgentDef for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #name

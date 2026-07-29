@@ -41,6 +41,10 @@ fn validate_ability_id(id: &str) -> bool {
 
 fn validate_ability_descriptors(abilities: &[Arc<dyn ToAbility>]) -> Result<(), ComposeError> {
     let mut to_track_ids: HashMap<String, String> = HashMap::new();
+    to_track_ids.insert(
+        super::agent::AGENT_BUNDLE_ID.to_string(),
+        super::agent::AGENT_BUNDLE_ID.to_string(),
+    );
     for ability in abilities {
         let ability_description = ability.descriptor();
         let ability_name = ability.name();
@@ -146,7 +150,19 @@ impl Composer {
         let mut deferred_skill_owners: HashMap<String, String> = HashMap::new();
         let mut deferred_subagent_owners: HashMap<String, String> = HashMap::new();
         let mut pending_hooks: Vec<PendingHooks> = Vec::new();
-        for ability in &self.agent.abilities {
+        let mut agent_hooks: Vec<Arc<dyn runic_hook::WriteHook>> = Vec::new();
+        let mut bundles: Vec<(bool, Arc<dyn ToAbility>)> = Vec::new();
+        if !self.agent.base.carries_nothing() {
+            bundles.push((true, Arc::new(self.agent.base.clone())));
+        }
+        bundles.extend(
+            self.agent
+                .abilities
+                .iter()
+                .map(|ability| (false, ability.clone())),
+        );
+        for (is_agent_bundle, ability) in &bundles {
+            let is_agent_bundle = *is_agent_bundle;
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
             let mut parts = ability
@@ -163,13 +179,15 @@ impl Composer {
                     source,
                 })?;
             let ability_hooks = std::mem::take(&mut parts.hooks);
-            for hook in &ability_hooks {
-                if let Some(point) = hook.points().iter().find_map(run_boundary_point) {
-                    return Err(ComposeError::AbilityLifecycleHook {
-                        ability: ability_name,
-                        hook: hook.name().to_string(),
-                        point,
-                    });
+            if !is_agent_bundle {
+                for hook in &ability_hooks {
+                    if let Some(point) = hook.points().iter().find_map(run_boundary_point) {
+                        return Err(ComposeError::AbilityLifecycleHook {
+                            ability: ability_name,
+                            hook: hook.name().to_string(),
+                            point,
+                        });
+                    }
                 }
             }
             let deferred_id = match descriptor.activation {
@@ -239,7 +257,9 @@ impl Composer {
                     deferred_subagent_owners.insert(def.name.clone(), id.clone());
                 }
             }
-            if !ability_hooks.is_empty() {
+            if is_agent_bundle {
+                agent_hooks.extend(ability_hooks);
+            } else if !ability_hooks.is_empty() {
                 pending_hooks.push(PendingHooks {
                     ability: ability_name.clone(),
                     deferred_id: deferred_id.clone(),
@@ -353,8 +373,8 @@ impl Composer {
         for tool in tools {
             agent_builder = agent_builder.tool(tool);
         }
-        for hook in &self.runtime.hooks {
-            agent_builder = agent_builder.write_hook(hook.clone());
+        for hook in agent_hooks {
+            agent_builder = agent_builder.write_hook(hook);
         }
         for pending in pending_hooks {
             let (hooks, scope) = pending.into_scope(
@@ -402,7 +422,12 @@ impl Composer {
             model: &model,
         };
         let mut views = Vec::new();
-        for ability in &self.agent.abilities {
+        let mut bundles: Vec<Arc<dyn ToAbility>> = Vec::new();
+        if !self.agent.base.carries_nothing() {
+            bundles.push(Arc::new(self.agent.base.clone()));
+        }
+        bundles.extend(self.agent.abilities.iter().cloned());
+        for ability in &bundles {
             let ability_name = ability.name().to_string();
             let descriptor = ability.descriptor();
             let parts = ability

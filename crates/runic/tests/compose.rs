@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::{Ability, AbilityDescriptor, ActivationPolicy, BuildCtx, ToAbility, ability};
-use runic::composer::{Agent, ComposeError, Composer, Runtime};
+use runic::composer::{Agent, ComposeError};
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -155,22 +155,20 @@ async fn a_run_boundary_hook_on_an_ability_is_rejected_at_build() {
 }
 
 #[tokio::test]
-async fn the_same_hook_is_legal_on_the_runtime() {
+async fn the_same_hook_is_legal_on_the_agent() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let fired = Arc::new(Mutex::new(false));
-    let mut agent = Composer::new(
-        Agent::new(Llm::new(provider, "test-model").instructions("go")),
-        Runtime::new().hook(Marker(fired.clone())),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+    let mut agent = Agent::new(Llm::new(provider, "test-model").instructions("go"))
+        .hook(Marker(fired.clone()))
+        .build("alice", "s1")
+        .await
+        .unwrap();
 
     agent.run("hi").await.unwrap();
 
     assert!(
         *fired.lock().unwrap(),
-        "the run boundary belongs to the agent, so Runtime::hook still reaches it"
+        "the run boundary belongs to the agent, so Agent::hook reaches it"
     );
 }
 

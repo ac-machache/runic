@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::ability::{Delegation, ability, ask_user, basics, search_chats, weather, web_fetch};
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::Agent;
 use runic::subagent::Subagent;
 use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -218,17 +218,15 @@ async fn omits_optional_prompt_sections_and_tools_when_empty() {
 #[tokio::test]
 async fn compaction_folds_history_before_the_model_call() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = Composer::new(
-        base(provider.clone()),
-        Runtime::new().hook(
+    let mut agent = base(provider.clone())
+        .hook(
             Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2),
-        ),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
     let old = [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -284,18 +282,16 @@ async fn compaction_folds_history_before_the_model_call() {
 #[tokio::test]
 async fn summary_guidance_override_reaches_the_summarizer() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = Composer::new(
-        base(provider.clone()),
-        Runtime::new().hook(
+    let mut agent = base(provider.clone())
+        .hook(
             Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2)
                 .summary_guidance("custom summary instructions"),
-        ),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
     for msg in [
         runic_types::Message::user("x".repeat(40)),
         runic_types::Message::assistant("y".repeat(40)),
@@ -320,17 +316,15 @@ async fn summary_guidance_override_reaches_the_summarizer() {
 #[tokio::test]
 async fn compaction_sweeps_notified_keys_of_departed_tasks() {
     let provider = Arc::new(RecordingProvider::default());
-    let mut agent = Composer::new(
-        base(provider.clone()),
-        Runtime::new().hook(
+    let mut agent = base(provider.clone())
+        .hook(
             Compaction::new(Llm::new(provider.clone(), "model-a"))
                 .max_context_tokens(12)
                 .keep_recent(2),
-        ),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+        )
+        .build("alice", "s1")
+        .await
+        .unwrap();
 
     let state = agent.state_mut();
     state.emit(runic_state::AgentEvent::TaskSpawned {

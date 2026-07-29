@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::ability;
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::Agent;
 use runic::subagent::Subagent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -151,18 +151,16 @@ async fn a_runtime_hook_sees_every_call() {
         text("done"),
     ]);
 
-    let mut agent = Composer::new(
-        Agent::new(Llm::new(provider, "test-model"))
-            .with(ability("pack-a").tool(Noop("alpha")))
-            .with(ability("pack-b").tool(Noop("beta"))),
-        Runtime::new().hook(Witness {
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .with(ability("pack-a").tool(Noop("alpha")))
+        .with(ability("pack-b").tool(Noop("beta")))
+        .hook(Witness {
             label: "global",
             seen: seen.clone(),
-        }),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+        })
+        .build("alice", "s1")
+        .await
+        .unwrap();
 
     agent.run("go").await.unwrap();
 
@@ -275,34 +273,31 @@ impl WriteHook for Order {
 }
 
 #[tokio::test]
-async fn a_runtime_hook_runs_before_an_ability_hook_whatever_the_priorities() {
+async fn an_agent_hook_runs_before_an_ability_hook_whatever_the_priorities() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = ScriptedProvider::new(vec![
         call("c1", "alpha", serde_json::json!({})),
         text("done"),
     ]);
 
-    let mut agent = Composer::new(
-        Agent::new(Llm::new(provider, "test-model")).with(
-            ability("pack-a").tool(Noop("alpha")).hook(Order {
-                label: "ability",
-                seen: seen.clone(),
-            }),
-        ),
-        Runtime::new().hook(Order {
-            label: "runtime",
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .with(ability("pack-a").tool(Noop("alpha")).hook(Order {
+            label: "ability",
             seen: seen.clone(),
-        }),
-    )
-    .build("alice", "s1")
-    .await
-    .unwrap();
+        }))
+        .hook(Order {
+            label: "agent",
+            seen: seen.clone(),
+        })
+        .build("alice", "s1")
+        .await
+        .unwrap();
 
     agent.run("go").await.unwrap();
 
     assert_eq!(
         *seen.lock().unwrap(),
-        vec!["runtime", "ability"],
+        vec!["agent", "ability"],
         "the ability hook asked for priority -100 and still lost — global policy cannot be pre-empted"
     );
 }

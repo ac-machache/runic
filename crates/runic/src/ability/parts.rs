@@ -104,6 +104,16 @@ impl Ability {
         self.delegation_voice.merge_first_wins(voice);
     }
 
+    pub(crate) fn carries_nothing(&self) -> bool {
+        self.prompt.is_empty()
+            && self.tools.is_empty()
+            && self.hooks.is_empty()
+            && self.skills.is_empty()
+            && self.subagents.is_empty()
+            && self.nested.is_empty()
+            && self.tool_catalog.is_none()
+    }
+
     /// Fold in everything `with()` attached, however deep. A body that returns
     /// an ability carrying nested ones never has to replay them itself.
     pub(crate) async fn resolve(mut self, ctx: &BuildCtx<'_>) -> anyhow::Result<Ability> {

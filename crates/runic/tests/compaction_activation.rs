@@ -176,12 +176,12 @@ async fn run_survival_case(ability_count: usize) -> Result<(), TestCaseError> {
     }
 
     let composer = Composer::new(
-        def,
-        Runtime::new().hook(
+        def.hook(
             Compaction::new(Llm::new(provider, "test-model"))
                 .max_context_tokens(2000)
                 .keep_recent(3),
         ),
+        Runtime::new(),
     );
     let mut agent = composer.build("tenant", "session").await.unwrap();
 
@@ -283,12 +283,12 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
     );
 
     let composer = Composer::new(
-        def,
-        Runtime::new().hook(
+        def.hook(
             Compaction::new(Llm::new(provider, "test-model"))
                 .max_context_tokens(2000)
                 .keep_recent(3),
         ),
+        Runtime::new(),
     );
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("load billing").await.unwrap();

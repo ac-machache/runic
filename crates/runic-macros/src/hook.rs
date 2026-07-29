@@ -6,7 +6,7 @@ use crate::shared::runic_root;
 
 struct HookAttrs {
     kind: HookKind,
-    at: HookPoint,
+    at: HookPoints,
     name: Option<String>,
     priority: Option<i32>,
 }
@@ -17,7 +17,7 @@ enum HookKind {
     Write,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum HookPoint {
     BeforeAgent,
     BeforeModel,
@@ -28,48 +28,81 @@ enum HookPoint {
 }
 
 impl HookPoint {
-    fn parse(name: &str, span: proc_macro2::Span) -> syn::Result<Self> {
-        Ok(match name {
-            "before_agent" => Self::BeforeAgent,
-            "before_model" => Self::BeforeModel,
-            "before_tool" => Self::BeforeTool,
-            "after_tool" => Self::AfterTool,
-            "after_model" => Self::AfterModel,
-            "after_agent" => Self::AfterAgent,
-            other => {
-                return Err(syn::Error::new(
-                    span,
-                    format!(
-                        "unknown hook point `{other}`; expected one of before_agent, \
-                         before_model, before_tool, after_tool, after_model, after_agent"
-                    ),
-                ));
-            }
-        })
-    }
+    const ALL: [Self; 6] = [
+        Self::BeforeAgent,
+        Self::BeforeModel,
+        Self::BeforeTool,
+        Self::AfterTool,
+        Self::AfterModel,
+        Self::AfterAgent,
+    ];
 
-    fn method(self) -> proc_macro2::Ident {
-        let name = match self {
+    fn snake(self) -> &'static str {
+        match self {
             Self::BeforeAgent => "before_agent",
             Self::BeforeModel => "before_model",
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
             Self::AfterModel => "after_model",
             Self::AfterAgent => "after_agent",
-        };
-        format_ident!("{}", name)
+        }
+    }
+
+    fn parse(name: &str, span: proc_macro2::Span) -> syn::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|point| point.snake() == name)
+            .ok_or_else(|| {
+                let known = Self::ALL.map(Self::snake).join(", ");
+                syn::Error::new(
+                    span,
+                    format!("unknown hook point `{name}`; expected one of {known}"),
+                )
+            })
+    }
+
+    fn method(self) -> proc_macro2::Ident {
+        format_ident!("{}", self.snake())
     }
 
     fn variant(self) -> proc_macro2::Ident {
-        let name = match self {
-            Self::BeforeAgent => "BeforeAgent",
-            Self::BeforeModel => "BeforeModel",
-            Self::BeforeTool => "BeforeTool",
-            Self::AfterTool => "AfterTool",
-            Self::AfterModel => "AfterModel",
-            Self::AfterAgent => "AfterAgent",
-        };
-        format_ident!("{}", name)
+        let pascal: String = self
+            .snake()
+            .split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+        format_ident!("{}", pascal)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct HookPoints([bool; 6]);
+
+impl HookPoints {
+    fn insert(&mut self, point: HookPoint) {
+        let slot = HookPoint::ALL.iter().position(|p| *p == point).unwrap();
+        self.0[slot] = true;
+    }
+
+    fn is_empty(self) -> bool {
+        self.0.iter().all(|set| !set)
+    }
+
+    fn len(self) -> usize {
+        self.0.iter().filter(|set| **set).count()
+    }
+
+    fn iter(self) -> impl Iterator<Item = HookPoint> {
+        HookPoint::ALL
+            .into_iter()
+            .enumerate()
+            .filter_map(move |(index, point)| self.0[index].then_some(point))
     }
 }
 
@@ -115,13 +148,27 @@ impl syn::parse::Parse for HookAttrs {
                     });
                 }
                 "at" => {
-                    let syn::Expr::Path(p) = &nv.value else {
-                        return Err(syn::Error::new_spanned(&nv.value, "expected a hook point"));
+                    let listed = match &nv.value {
+                        syn::Expr::Array(array) => array.elems.iter().collect::<Vec<_>>(),
+                        single => vec![single],
                     };
-                    let ident = p.path.get_ident().ok_or_else(|| {
-                        syn::Error::new_spanned(&nv.value, "expected a hook point")
-                    })?;
-                    at = Some(HookPoint::parse(&ident.to_string(), ident.span())?);
+                    let mut points = HookPoints::default();
+                    for expr in listed {
+                        let syn::Expr::Path(path) = expr else {
+                            return Err(syn::Error::new_spanned(expr, "expected a hook point"));
+                        };
+                        let ident = path.path.get_ident().ok_or_else(|| {
+                            syn::Error::new_spanned(expr, "expected a hook point")
+                        })?;
+                        points.insert(HookPoint::parse(&ident.to_string(), ident.span())?);
+                    }
+                    if points.is_empty() {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "`at` needs at least one hook point",
+                        ));
+                    }
+                    at = Some(points);
                 }
                 "name" => {
                     let syn::Expr::Lit(syn::ExprLit {
@@ -193,8 +240,6 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let hook_name = attrs.name.unwrap_or_else(|| ident.to_string());
     let priority = attrs.priority.unwrap_or(0);
-    let method = attrs.at.method();
-    let variant = attrs.at.variant();
 
     let (trait_path, outcome) = match attrs.kind {
         HookKind::Read => (
@@ -212,25 +257,41 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         HookKind::Write => quote!(&mut #runic::state::AgentState),
     };
 
-    let (params, forward) = match (attrs.at, attrs.kind) {
-        (HookPoint::BeforeTool, HookKind::Read) => (
-            quote!(state: #state_ty, call: &#runic::types::ToolCall),
-            quote!(self.hook(state, call)),
-        ),
-        (HookPoint::BeforeTool, HookKind::Write) => (
-            quote!(state: #state_ty, call: &mut #runic::types::ToolCall),
-            quote!(self.hook(state, call)),
-        ),
-        (HookPoint::AfterTool, _) => (
-            quote!(
-                state: #state_ty,
-                call: &#runic::types::ToolCall,
-                result: &#runic::tool::ToolResult
+    let variants = attrs.at.iter().map(HookPoint::variant);
+    let one_point = attrs.at.len() == 1;
+
+    let methods = attrs.at.iter().map(|point| {
+        let method = point.method();
+        let body = if one_point {
+            format_ident!("hook")
+        } else {
+            point.method()
+        };
+        let (params, forward) = match (point, attrs.kind) {
+            (HookPoint::BeforeTool, HookKind::Read) => (
+                quote!(state: #state_ty, call: &#runic::types::ToolCall),
+                quote!(self.#body(state, call)),
             ),
-            quote!(self.hook(state, call, result)),
-        ),
-        _ => (quote!(state: #state_ty), quote!(self.hook(state))),
-    };
+            (HookPoint::BeforeTool, HookKind::Write) => (
+                quote!(state: #state_ty, call: &mut #runic::types::ToolCall),
+                quote!(self.#body(state, call)),
+            ),
+            (HookPoint::AfterTool, _) => (
+                quote!(
+                    state: #state_ty,
+                    call: &#runic::types::ToolCall,
+                    result: &#runic::tool::ToolResult
+                ),
+                quote!(self.#body(state, call, result)),
+            ),
+            _ => (quote!(state: #state_ty), quote!(self.#body(state))),
+        };
+        quote! {
+            async fn #method(&self, #params) -> #outcome {
+                #forward.await
+            }
+        }
+    });
 
     let output = quote! {
         #input
@@ -246,12 +307,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
 
             fn points(&self) -> &'static [#runic::hook::HookLifecycle] {
-                &[#runic::hook::HookLifecycle::#variant]
+                &[#(#runic::hook::HookLifecycle::#variants),*]
             }
 
-            async fn #method(&self, #params) -> #outcome {
-                #forward.await
-            }
+            #(#methods)*
         }
     };
     output.into()

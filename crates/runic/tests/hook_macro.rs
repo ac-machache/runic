@@ -209,3 +209,54 @@ async fn a_macro_written_hook_actually_fires_in_the_loop() {
         "the macro-written before_tool hook injected into the live call: {echoed}"
     );
 }
+
+#[hook(kind = write, name = "two-points", at = [before_agent, before_tool])]
+#[derive(Default, Clone)]
+struct TwoPoints {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl TwoPoints {
+    async fn before_agent(&self, _state: &mut AgentState) -> HookOutcome {
+        self.seen.lock().unwrap().push("agent".into());
+        HookOutcome::Noop
+    }
+
+    async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("tool:{}", call.name));
+        HookOutcome::Continue
+    }
+}
+
+#[test]
+fn a_multi_point_hook_declares_every_point_it_listed() {
+    let points = TwoPoints::default().points();
+    assert_eq!(
+        points,
+        &[HookLifecycle::BeforeAgent, HookLifecycle::BeforeTool]
+    );
+}
+
+#[tokio::test]
+async fn both_points_of_a_multi_point_hook_fire() {
+    let provider =
+        ScriptedProvider::new(vec![call("echo_args", serde_json::json!({})), text("done")]);
+    let hook = TwoPoints::default();
+
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .tool(EchoArgs)
+        .hook(hook.clone())
+        .build("alice", "s1")
+        .await
+        .unwrap();
+    agent.run("go").await.unwrap();
+
+    assert_eq!(
+        *hook.seen.lock().unwrap(),
+        vec!["agent".to_string(), "tool:echo_args".to_string()],
+        "the macro must route each declared point to its own body method"
+    );
+}

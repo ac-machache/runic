@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
-use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
+use runic_hook::HookOutcome;
+use runic_macros::hook;
 use runic_state::AgentState;
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
@@ -15,6 +15,7 @@ struct Counts {
     thread_total: u64,
 }
 
+#[hook(kind = write, name = "tool-call-limit", at = [before_agent, before_tool])]
 pub struct ToolCallLimit {
     per_run: HashMap<String, u32>,
     per_thread: HashMap<String, u32>,
@@ -70,17 +71,6 @@ impl ToolCallLimit {
     pub fn total_per_thread(mut self, max_calls: u32) -> Self {
         self.total_per_thread = Some(max_calls);
         self
-    }
-}
-
-#[async_trait]
-impl WriteHook for ToolCallLimit {
-    fn name(&self) -> &str {
-        "tool-call-limit"
-    }
-
-    fn points(&self) -> &'static [HookLifecycle] {
-        &[HookLifecycle::BeforeAgent, HookLifecycle::BeforeTool]
     }
 
     async fn before_agent(&self, state: &mut AgentState) -> HookOutcome {

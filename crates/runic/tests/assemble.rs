@@ -176,7 +176,7 @@ async fn registers_enabled_tool_surfaces() {
         "web_fetch",
         "weather",
         "weather_history",
-        "ask_user",
+        "Questionnaire",
         "skill_view",
         "delegate",
         "search_chats",
@@ -188,6 +188,7 @@ async fn registers_enabled_tool_surfaces() {
     }
     for absent in [
         "escalate_to_human",
+        "ask_user",
         "read_file",
         "write_file",
         "edit_file",

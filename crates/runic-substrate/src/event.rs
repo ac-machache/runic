@@ -143,7 +143,7 @@ pub enum SessionEvent {
     ToolDeferred {
         run_id: String,
         call_id: String,
-        channel: String,
+        tool: String,
         payload: serde_json::Value,
         at: DateTime<Utc>,
     },
@@ -367,13 +367,13 @@ impl SessionEvent {
             SessionEvent::ToolDeferred {
                 run_id,
                 call_id,
-                channel,
+                tool,
                 payload,
                 at,
             } => AgentEvent::ToolDeferred {
                 run_id: run_id.clone(),
                 call_id: call_id.clone(),
-                channel: channel.clone(),
+                tool: tool.clone(),
                 payload: payload.clone(),
                 at: *at,
             },
@@ -451,13 +451,13 @@ pub fn project(event: &AgentEvent) -> Option<SessionEvent> {
         AgentEvent::ToolDeferred {
             run_id,
             call_id,
-            channel,
+            tool,
             payload,
             at,
         } => SessionEvent::ToolDeferred {
             run_id: run_id.clone(),
             call_id: call_id.clone(),
-            channel: channel.clone(),
+            tool: tool.clone(),
             payload: payload.clone(),
             at: *at,
         },

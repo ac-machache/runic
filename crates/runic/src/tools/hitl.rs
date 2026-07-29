@@ -1,135 +1,145 @@
-//! `ask_user` + `escalate_to_human` — human-in-the-loop tools. Both defer:
-//! the run suspends durably and resumes when a human delivers the answer.
+use runic_macros::tool;
+use runic_tool::{ToolContext, ToolResult};
+use serde::{Deserialize, Serialize};
 
-use async_trait::async_trait;
-
-use runic_tool::{Tool, ToolContext, ToolResult};
-
-pub struct AskUserTool;
-
-#[async_trait]
-impl Tool for AskUserTool {
-    fn name(&self) -> &str {
-        "ask_user"
-    }
-    fn description(&self) -> &str {
-        "Ask the human a question and wait for their answer. Use when you need \
-         a decision, clarification, or information only the user can provide. \
-         The run pauses until the answer arrives, then continues with it as the \
-         tool result."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "question": { "type": "string", "description": "The question to put to the user." },
-                "context": { "type": "string", "description": "Optional background to help them answer." }
-            },
-            "required": ["question"]
-        })
-    }
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolResult> {
-        let Some(question) = args.get("question").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("ask_user requires `question`"));
-        };
-        let mut payload = serde_json::json!({ "question": question });
-        if let Some(context) = args.get("context").and_then(|v| v.as_str()) {
-            payload["context"] = context.into();
-        }
-        Ok(ToolResult::defer("human_ask", payload))
-    }
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+pub struct Question {
+    #[schemars(description = "The question to put to the user.")]
+    question: String,
+    #[schemars(
+        description = "The choices to offer, e.g. [\"formal\", \"concise\", \"professional\"]."
+    )]
+    options: Vec<String>,
+    #[serde(default)]
+    #[schemars(description = "Let the user pick more than one option.")]
+    multi_select: bool,
+    #[serde(default)]
+    #[schemars(description = "Accept an answer that is not one of the options.")]
+    allow_other: bool,
 }
 
-pub struct EscalateToHumanTool;
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct QuestionnaireArgs {
+    #[schemars(description = "One or more questions to put to the user in a single prompt.")]
+    questions: Vec<Question>,
+    #[serde(default)]
+    #[schemars(
+        with = "String",
+        description = "Optional background to help them answer."
+    )]
+    context: Option<String>,
+}
 
-#[async_trait]
-impl Tool for EscalateToHumanTool {
-    fn name(&self) -> &str {
-        "escalate_to_human"
-    }
-    fn description(&self) -> &str {
-        "Escalate to a human operator when the task is beyond your authority or \
-         you are stuck. The run pauses until a human takes the hand-off; their \
-         response comes back as the tool result."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "reason": { "type": "string", "description": "Why this needs a human." },
-                "detail": { "type": "string", "description": "Optional supporting detail." }
-            },
-            "required": ["reason"]
-        })
-    }
-    async fn execute(
+#[tool(
+    name = "Questionnaire",
+    args = QuestionnaireArgs,
+    description = "Use this when you have more then when option for the user to choose from, \
+                   instead of giving him a whole text you use this to ask the user about the \
+                   options, only when the answer can be one of them of give free field"
+)]
+pub struct QuestionnaireTool;
+
+impl QuestionnaireTool {
+    async fn tool(
         &self,
-        args: serde_json::Value,
+        args: QuestionnaireArgs,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let Some(reason) = args.get("reason").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("escalate_to_human requires `reason`"));
-        };
-        let mut payload = serde_json::json!({ "reason": reason });
-        if let Some(detail) = args.get("detail").and_then(|v| v.as_str()) {
-            payload["detail"] = detail.into();
+        if args.questions.is_empty() {
+            return Ok(ToolResult::error(
+                "Questionnaire needs at least one question; to ask for free text, answer directly instead",
+            ));
         }
-        Ok(ToolResult::defer("human_escalation", payload))
+        if let Some(bare) = args.questions.iter().find(|q| q.options.is_empty()) {
+            return Ok(ToolResult::error(format!(
+                "question `{}` has no options; a Questionnaire always offers choices",
+                bare.question
+            )));
+        }
+        let mut payload = serde_json::json!({ "questions": args.questions });
+        if let Some(context) = args.context {
+            payload["context"] = context.into();
+        }
+        Ok(ToolResult::defer(payload))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runic_tool::Tool;
     use serde_json::json;
 
     #[tokio::test]
-    async fn ask_user_defers_with_the_question() {
+    async fn several_questions_each_carry_their_own_options() {
         let ctx = ToolContext::new("u", "s", "r");
-        let r = AskUserTool
-            .execute(json!({ "question": "proceed?", "context": "bg" }), &ctx)
+        let r = QuestionnaireTool
+            .execute(
+                json!({
+                    "questions": [
+                        { "question": "Tone?", "options": ["formal", "casual"] },
+                        {
+                            "question": "Length?",
+                            "options": ["concise", "detailed"],
+                            "multi_select": true,
+                            "allow_other": true
+                        }
+                    ],
+                    "context": "drafting an email"
+                }),
+                &ctx,
+            )
             .await
             .unwrap();
-        let runic_tool::ToolResult::Deferred { channel, payload } = r else {
-            panic!("ask_user defers, got {r:?}");
+
+        let runic_tool::ToolResult::Deferred { payload } = r else {
+            panic!("questionnaire defers, got {r:?}");
         };
-        assert_eq!(channel, "human_ask");
-        assert_eq!(payload["question"], "proceed?");
-        assert_eq!(payload["context"], "bg");
+        let questions = payload["questions"].as_array().unwrap();
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0]["question"], "Tone?");
+        assert_eq!(questions[0]["options"][0], "formal");
+        assert_eq!(questions[0]["multi_select"], false);
+        assert_eq!(questions[1]["multi_select"], true);
+        assert_eq!(questions[1]["allow_other"], true);
+        assert_eq!(payload["context"], "drafting an email");
     }
 
     #[tokio::test]
-    async fn ask_user_without_question_errors_in_band() {
+    async fn a_question_without_options_errors_in_band() {
         let ctx = ToolContext::new("u", "s", "r");
-        let r = AskUserTool.execute(json!({}), &ctx).await.unwrap();
-        assert!(r.is_error());
+        let r = QuestionnaireTool
+            .execute(
+                json!({ "questions": [{ "question": "anything?", "options": [] }] }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(r.is_error(), "a questionnaire always offers choices");
         assert!(!matches!(r, runic_tool::ToolResult::Deferred { .. }));
     }
 
     #[tokio::test]
-    async fn escalate_defers_with_reason() {
+    async fn no_questions_errors_in_band() {
         let ctx = ToolContext::new("u", "s", "r");
-        let r = EscalateToHumanTool
-            .execute(json!({ "reason": "need approval", "detail": "d" }), &ctx)
+        let r = QuestionnaireTool
+            .execute(json!({ "questions": [] }), &ctx)
             .await
             .unwrap();
-        let runic_tool::ToolResult::Deferred { channel, payload } = r else {
-            panic!("escalate defers, got {r:?}");
-        };
-        assert_eq!(channel, "human_escalation");
-        assert_eq!(payload["reason"], "need approval");
-        assert_eq!(payload["detail"], "d");
-    }
-
-    #[tokio::test]
-    async fn escalate_without_reason_errors_in_band() {
-        let ctx = ToolContext::new("u", "s", "r");
-        let r = EscalateToHumanTool.execute(json!({}), &ctx).await.unwrap();
         assert!(r.is_error());
         assert!(!matches!(r, runic_tool::ToolResult::Deferred { .. }));
+    }
+
+    #[test]
+    fn the_nested_question_type_is_inlined_in_the_schema() {
+        let schema = QuestionnaireTool.parameters_schema();
+        assert!(
+            schema.get("$defs").is_none(),
+            "providers do not resolve $ref: {schema}"
+        );
+        assert_eq!(
+            schema["properties"]["questions"]["items"]["properties"]["options"]["type"],
+            "array"
+        );
     }
 }

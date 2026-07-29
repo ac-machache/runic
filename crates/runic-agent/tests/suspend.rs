@@ -82,7 +82,6 @@ impl Tool for AskTool {
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
         Ok(ToolResult::defer(
-            "human_ask",
             serde_json::json!({ "question": "proceed?" }),
         ))
     }
@@ -217,16 +216,16 @@ async fn suspended_run_records_the_exact_deferral_payload() {
             AgentEvent::ToolDeferred {
                 run_id,
                 call_id,
-                channel,
+                tool,
                 payload,
                 ..
-            } => Some((run_id, call_id, channel, payload)),
+            } => Some((run_id, call_id, tool, payload)),
             _ => None,
         })
         .expect("deferral is durable");
     assert_eq!(deferred.0, "r1");
     assert_eq!(deferred.1, "c1");
-    assert_eq!(deferred.2, "human_ask");
+    assert_eq!(deferred.2, "ask");
     assert_eq!(deferred.3["question"], "proceed?");
 }
 

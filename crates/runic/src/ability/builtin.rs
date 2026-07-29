@@ -6,8 +6,8 @@ use runic_substrate::{SearchChatsTool, SessionStore};
 
 use super::{Ability, BuildCtx, ToAbility, ability};
 use crate::tools::{
-    AskUserTool, CalculatorTool, ComposioTool, SearchProvider, SystemTimeTool, WeatherHistoryTool,
-    WeatherTool, WebFetchTool, WebSearchTool,
+    CalculatorTool, ComposioTool, QuestionnaireTool, SearchProvider, SystemTimeTool,
+    WeatherHistoryTool, WeatherTool, WebFetchTool, WebSearchTool,
 };
 
 pub struct Delegation {
@@ -64,7 +64,7 @@ pub fn basics() -> Ability {
 }
 
 pub fn ask_user() -> Ability {
-    ability("ask-user").tool(AskUserTool)
+    ability("ask-user").tool(QuestionnaireTool)
 }
 
 pub fn web_fetch() -> Ability {

@@ -49,7 +49,7 @@ pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 pub(crate) struct PendingDeferral {
     pub(crate) call_id: String,
-    pub(crate) channel: String,
+    pub(crate) tool: String,
     pub(crate) payload: serde_json::Value,
 }
 

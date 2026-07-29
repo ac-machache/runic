@@ -96,10 +96,7 @@ impl Tool for ParkTool {
     }
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
         let question = args["question"].as_str().unwrap_or("proceed?");
-        Ok(ToolResult::defer(
-            "human_ask",
-            json!({ "question": question }),
-        ))
+        Ok(ToolResult::defer(json!({ "question": question })))
     }
 }
 
@@ -253,7 +250,7 @@ impl Tool for DeferTool {
         json!({ "type": "object" })
     }
     async fn execute(&self, args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::defer("human_ask", args))
+        Ok(ToolResult::defer(args))
     }
 }
 
@@ -907,7 +904,10 @@ async fn wait_run_with_deferred_tool_pauses_the_run_and_replays_the_deferral() {
         .find(|e| e["type"] == "tool_deferred")
         .expect("replay exposes deferred tool event");
     assert_eq!(deferred["call_id"], "defer-1");
-    assert_eq!(deferred["channel"], "human_ask");
+    assert_eq!(
+        deferred["tool"], "defer_to_human",
+        "the frontend keys off the same tool name every other tool event carries"
+    );
     assert_eq!(deferred["payload"]["question"], "continue?");
 }
 
@@ -1201,7 +1201,7 @@ async fn seed_paused_deferred_run(
             &runic_substrate::SessionEvent::ToolDeferred {
                 run_id: run_id.to_string(),
                 call_id: call_id.to_string(),
-                channel: "human_ask".to_string(),
+                tool: "ask_user".to_string(),
                 payload: json!({ "question": "proceed?" }),
                 at: chrono::Utc::now(),
             },

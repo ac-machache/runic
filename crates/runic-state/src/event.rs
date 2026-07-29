@@ -127,7 +127,7 @@ pub enum AgentEvent {
     ToolDeferred {
         run_id: String,
         call_id: String,
-        channel: String,
+        tool: String,
         payload: serde_json::Value,
         at: DateTime<Utc>,
     },

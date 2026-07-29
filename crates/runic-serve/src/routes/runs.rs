@@ -177,7 +177,24 @@ async fn normalize_message(
 /// Body for `POST .../asks/:ask_id` — the operator's answer to an `ask_user`.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AnswerRequest {
-    pub answer: String,
+    #[serde(deserialize_with = "answer_payload")]
+    pub answer: serde_json::Value,
+}
+
+fn answer_payload<'de, D>(deserializer: D) -> Result<serde_json::Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(_)
+        | serde_json::Value::Object(_)
+        | serde_json::Value::Array(_) => Ok(value),
+        other => Err(serde::de::Error::custom(format!(
+            "answer must be text or a structured answer, got {other}"
+        ))),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1356,14 +1373,17 @@ async fn resolve_answer(
     tenant: String,
     thread_id: String,
     ask_id: String,
-    answer: String,
+    answer: serde_json::Value,
 ) -> Result<StatusCode, ServeError> {
     let events = state.session_store.read(&tenant, &thread_id).await?;
 
-    let Some(run_id) = events.iter().rev().find_map(|e| match &e.event {
+    let Some((run_id, tool_name)) = events.iter().rev().find_map(|e| match &e.event {
         SessionEvent::ToolDeferred {
-            call_id, run_id, ..
-        } if *call_id == ask_id => Some(run_id.clone()),
+            call_id,
+            run_id,
+            tool,
+            ..
+        } if *call_id == ask_id => Some((run_id.clone(), tool.clone())),
         _ => None,
     }) else {
         return Err(ServeError::BadRequest(format!(
@@ -1371,24 +1391,24 @@ async fn resolve_answer(
         )));
     };
 
-    let Some(tool_name) = events.iter().find_map(|e| match &e.event {
+    let paired = events.iter().any(|e| match &e.event {
         SessionEvent::Message {
             run_id: msg_run,
             msg,
             ..
         } if *msg_run == run_id => match &msg.content {
-            MessageContent::Blocks(blocks) => blocks.iter().find_map(|b| match b {
-                ContentBlock::ToolUse { id, name, .. } if *id == ask_id => Some(name.clone()),
-                _ => None,
-            }),
-            _ => None,
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if *id == ask_id)),
+            _ => false,
         },
-        _ => None,
-    }) else {
+        _ => false,
+    });
+    if !paired {
         return Err(ServeError::BadRequest(format!(
             "deferred call '{ask_id}' has no matching tool_use in run '{run_id}'"
         )));
-    };
+    }
 
     let event = SessionEvent::Message {
         run_id: run_id.clone(),

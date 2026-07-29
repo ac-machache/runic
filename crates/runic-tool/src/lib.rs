@@ -33,7 +33,6 @@ pub enum ToolResult {
         message: String,
     },
     Deferred {
-        channel: String,
         payload: serde_json::Value,
     },
 }
@@ -53,11 +52,8 @@ impl ToolResult {
         }
     }
 
-    pub fn defer(channel: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self::Deferred {
-            channel: channel.into(),
-            payload,
-        }
+    pub fn defer(payload: serde_json::Value) -> Self {
+        Self::Deferred { payload }
     }
 
     pub fn with_provenance(mut self, sources: Vec<ProvenanceSource>) -> Self {
@@ -442,11 +438,10 @@ mod tests {
         assert_eq!(failed.text(), "boom");
         assert!(failed.output().is_none());
 
-        let deferred = ToolResult::defer("human_ask", serde_json::json!({ "question": "ok?" }));
+        let deferred = ToolResult::defer(serde_json::json!({ "question": "ok?" }));
         assert!(!deferred.is_error());
         let json = serde_json::to_value(&deferred).unwrap();
         assert_eq!(json["deferred"]["payload"]["question"], "ok?");
-        assert_eq!(json["deferred"]["channel"], "human_ask");
     }
 
     #[test]

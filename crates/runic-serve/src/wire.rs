@@ -162,7 +162,7 @@ pub enum WireEvent {
     ToolDeferred {
         run_id: String,
         call_id: String,
-        channel: String,
+        tool: String,
         payload: serde_json::Value,
     },
 
@@ -305,14 +305,14 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
         AgentEvent::ToolDeferred {
             run_id,
             call_id,
-            channel,
+            tool,
             payload,
             ..
         } => vec![
             WireEvent::ToolDeferred {
                 run_id,
                 call_id,
-                channel,
+                tool,
                 payload,
             },
             WireEvent::Done {
@@ -498,13 +498,13 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
         SessionEvent::ToolDeferred {
             run_id,
             call_id,
-            channel,
+            tool,
             payload,
             ..
         } => Some(WireEvent::ToolDeferred {
             run_id,
             call_id,
-            channel,
+            tool,
             payload,
         }),
         SessionEvent::TurnEnd {
@@ -800,14 +800,14 @@ mod tests {
         let evt = SessionEvent::ToolDeferred {
             run_id: "r1".into(),
             call_id: "call-1".into(),
-            channel: "human_ask".into(),
+            tool: "ask_user".into(),
             payload: serde_json::json!({ "question": "continue?" }),
             at: Utc::now(),
         };
         let Some(WireEvent::ToolDeferred {
             run_id,
             call_id,
-            channel,
+            tool,
             payload,
         }) = from_session_event(evt)
         else {
@@ -815,7 +815,7 @@ mod tests {
         };
         assert_eq!(run_id, "r1");
         assert_eq!(call_id, "call-1");
-        assert_eq!(channel, "human_ask");
+        assert_eq!(tool, "ask_user");
         assert_eq!(payload["question"], "continue?");
     }
 }

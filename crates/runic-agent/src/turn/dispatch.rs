@@ -257,10 +257,10 @@ impl Runner {
             } = dispatched;
 
             let mut result = match result {
-                ToolResult::Deferred { channel, payload } => {
+                ToolResult::Deferred { payload } => {
                     self.pending_deferral = Some(PendingDeferral {
                         call_id: call.id.clone(),
-                        channel,
+                        tool: call.name.clone(),
                         payload,
                     });
                     continue;

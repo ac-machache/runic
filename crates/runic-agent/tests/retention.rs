@@ -376,7 +376,7 @@ impl Tool for DeferringTool {
         _args: serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::defer("test", serde_json::json!({})))
+        Ok(ToolResult::defer(serde_json::json!({})))
     }
 }
 

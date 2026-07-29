@@ -183,7 +183,7 @@ impl Runner {
                 self.emit(crate::AgentEvent::ToolDeferred {
                     run_id: run_id.clone(),
                     call_id: deferral.call_id,
-                    channel: deferral.channel,
+                    tool: deferral.tool,
                     payload: deferral.payload,
                     at: Utc::now(),
                 });

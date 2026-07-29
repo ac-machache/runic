@@ -11,7 +11,7 @@ use runic_tool::Tool;
 
 pub use calc::CalculatorTool;
 pub use composio::ComposioTool;
-pub use hitl::{AskUserTool, EscalateToHumanTool};
+pub use hitl::QuestionnaireTool;
 pub use time::SystemTimeTool;
 pub use weather::{WeatherHistoryTool, WeatherTool};
 pub use web::{

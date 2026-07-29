@@ -118,7 +118,7 @@ impl Tool for AskTool {
         serde_json::json!({ "type": "object" })
     }
     async fn execute(&self, _a: serde_json::Value, _c: &ToolContext) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::defer("human_ask", serde_json::json!({})))
+        Ok(ToolResult::defer(serde_json::json!({})))
     }
 }
 

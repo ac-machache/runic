@@ -70,7 +70,6 @@ impl Runner {
         if let Some(emitter) = ctx.events.take() {
             self.state.set_emitter(Some(emitter));
         }
-        self.human = ctx.human.take();
         self.sub_session = ctx.sub_session.take();
         let cancel = ctx.cancel.take();
         let mut steering = ctx.steering.take();
@@ -115,7 +114,6 @@ impl Runner {
         }
 
         self.state.set_emitter(None);
-        self.human = None;
         self.sub_session = None;
         self.clear_transient_tool_outputs();
         if let Some(p) = saved_provider {

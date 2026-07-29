@@ -141,13 +141,6 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
-/// Per-run channel to the human operating the agent.
-#[async_trait]
-pub trait HumanInterface: Send + Sync {
-    async fn ask(&self, question: &str, context: Option<&str>) -> anyhow::Result<String>;
-    async fn escalate(&self, reason: &str, detail: Option<&str>) -> anyhow::Result<()>;
-}
-
 /// Runtime context handed to a tool at execution.
 #[derive(Default)]
 pub struct ToolContext {
@@ -156,7 +149,6 @@ pub struct ToolContext {
     pub run_id: String,
     bag: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     config: serde_json::Map<String, serde_json::Value>,
-    human: Option<Arc<dyn HumanInterface>>,
     emitter: Option<Arc<dyn runic_state::Emitter>>,
     sub_session: Option<Arc<dyn runic_state::SubSession>>,
 }
@@ -173,19 +165,9 @@ impl ToolContext {
             run_id: run_id.into(),
             bag: HashMap::new(),
             config: serde_json::Map::new(),
-            human: None,
             emitter: None,
             sub_session: None,
         }
-    }
-
-    pub fn with_human(mut self, human: Option<Arc<dyn HumanInterface>>) -> Self {
-        self.human = human;
-        self
-    }
-
-    pub fn human(&self) -> Option<Arc<dyn HumanInterface>> {
-        self.human.clone()
     }
 
     pub fn with_emitter(mut self, emitter: Option<Arc<dyn runic_state::Emitter>>) -> Self {

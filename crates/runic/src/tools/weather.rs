@@ -1,24 +1,8 @@
-//! `weather` + `weather_history` — current/forecast and historical conditions
-//! via [Open-Meteo].
-//!
-//! Keyless and accurate: Open-Meteo serves national weather-service models
-//! (ICON / GFS / ECMWF) and ERA5 reanalysis, no API key, generous limits. Both
-//! tools are coordinate-based, so each is a **two-call flow**: geocode the
-//! `location` name → coordinates (the free geocoding endpoint), then fetch.
-//!
-//! - `weather`: current conditions + a 7-day forecast (`api.open-meteo.com`).
-//! - `weather_history`: daily conditions over a past date range, back to 1940
-//!   (`archive-api.open-meteo.com`).
-//!
-//! [Open-Meteo]: https://open-meteo.com
-
-use std::time::Duration;
-
-use async_trait::async_trait;
+use runic_macros::tool;
+use runic_tool::{ToolContext, ToolResult};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-
-use runic_tool::{Tool, ToolContext, ToolResult};
+use std::time::Duration;
 
 const GEOCODE_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -258,7 +242,54 @@ fn render_daily(d: &Daily, fahrenheit: bool) -> String {
 
 // ── weather (current + forecast) ────────────────────────────────────────────
 
-/// Current conditions + 7-day forecast for a named location.
+#[derive(Deserialize, schemars::JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Units {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+impl Units {
+    fn is_fahrenheit(&self) -> bool {
+        *self == Units::Fahrenheit
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WeatherArgs {
+    #[schemars(description = "Place name, e.g. 'Paris' or 'Austin, Texas'.")]
+    location: String,
+    #[serde(default)]
+    #[schemars(description = "Temperature units (default celsius).")]
+    units: Units,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct WeatherHistoryArgs {
+    #[schemars(description = "Place name, e.g. 'Paris'.")]
+    location: String,
+    #[schemars(description = "Start date, YYYY-MM-DD.")]
+    start_date: String,
+    #[serde(default)]
+    #[schemars(
+        with = "String",
+        description = "End date, YYYY-MM-DD (defaults to start_date)."
+    )]
+    end_date: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Temperature units (default celsius).")]
+    units: Units,
+}
+
+#[tool(
+    name = "weather",
+    args = WeatherArgs,
+    execution = parallel,
+    description = "Current conditions and a 7-day forecast for a place. Pass `location` (a \
+                   city/place name, e.g. \"Paris\" or \"Tokyo, Japan\"); set `units` to \
+                   \"fahrenheit\" for °F (default celsius)."
+)]
 pub struct WeatherTool {
     client: reqwest::Client,
 }
@@ -273,42 +304,11 @@ impl WeatherTool {
     pub fn new() -> Self {
         Self { client: client() }
     }
-}
 
-#[async_trait]
-impl Tool for WeatherTool {
-    fn name(&self) -> &str {
-        "weather"
-    }
-    fn description(&self) -> &str {
-        "Current conditions and a 7-day forecast for a place. Pass `location` (a \
-         city/place name, e.g. \"Paris\" or \"Tokyo, Japan\"); set `units` to \
-         \"fahrenheit\" for °F (default celsius)."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "location": { "type": "string", "description": "Place name, e.g. 'Paris' or 'Austin, Texas'." },
-                "units": { "type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature units (default celsius)." }
-            },
-            "required": ["location"]
-        })
-    }
-    fn parallelizable(&self) -> bool {
-        true
-    }
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolResult> {
-        let Some(location) = args.get("location").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("weather requires `location`"));
-        };
-        let fahrenheit = args.get("units").and_then(|v| v.as_str()) == Some("fahrenheit");
+    async fn tool(&self, args: WeatherArgs, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        let fahrenheit = args.units.is_fahrenheit();
 
-        let geo = match geocode(&self.client, location).await {
+        let geo = match geocode(&self.client, &args.location).await {
             Ok(g) => g,
             Err(e) => return Ok(ToolResult::error(e)),
         };
@@ -347,7 +347,14 @@ impl Tool for WeatherTool {
 
 // ── weather_history (archive) ───────────────────────────────────────────────
 
-/// Daily historical conditions over a past date range (back to 1940).
+#[tool(
+    name = "weather_history",
+    args = WeatherHistoryArgs,
+    execution = parallel,
+    description = "Past daily weather for a place over a date range (reanalysis, back to \
+                   1940). Pass `location` and `start_date` (YYYY-MM-DD); `end_date` \
+                   defaults to `start_date` for a single day. `units`: 'fahrenheit' for °F."
+)]
 pub struct WeatherHistoryTool {
     client: reqwest::Client,
 }
@@ -362,53 +369,17 @@ impl WeatherHistoryTool {
     pub fn new() -> Self {
         Self { client: client() }
     }
-}
 
-#[async_trait]
-impl Tool for WeatherHistoryTool {
-    fn name(&self) -> &str {
-        "weather_history"
-    }
-    fn description(&self) -> &str {
-        "Past daily weather for a place over a date range (reanalysis, back to \
-         1940). Pass `location` and `start_date` (YYYY-MM-DD); `end_date` \
-         defaults to `start_date` for a single day. `units`: 'fahrenheit' for °F."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "location": { "type": "string", "description": "Place name, e.g. 'Paris'." },
-                "start_date": { "type": "string", "description": "Start date, YYYY-MM-DD." },
-                "end_date": { "type": "string", "description": "End date, YYYY-MM-DD (defaults to start_date)." },
-                "units": { "type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature units (default celsius)." }
-            },
-            "required": ["location", "start_date"]
-        })
-    }
-    fn parallelizable(&self) -> bool {
-        true
-    }
-    async fn execute(
+    async fn tool(
         &self,
-        args: serde_json::Value,
+        args: WeatherHistoryArgs,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        let Some(location) = args.get("location").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("weather_history requires `location`"));
-        };
-        let Some(start) = args.get("start_date").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error(
-                "weather_history requires `start_date` (YYYY-MM-DD)",
-            ));
-        };
-        let end = args
-            .get("end_date")
-            .and_then(|v| v.as_str())
-            .unwrap_or(start);
-        let fahrenheit = args.get("units").and_then(|v| v.as_str()) == Some("fahrenheit");
+        let start = args.start_date.as_str();
+        let end = args.end_date.as_deref().unwrap_or(start);
+        let fahrenheit = args.units.is_fahrenheit();
 
-        let geo = match geocode(&self.client, location).await {
+        let geo = match geocode(&self.client, &args.location).await {
             Ok(g) => g,
             Err(e) => return Ok(ToolResult::error(e)),
         };

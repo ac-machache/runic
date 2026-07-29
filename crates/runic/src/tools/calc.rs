@@ -1,41 +1,23 @@
-//! `calculator` — evaluate an arithmetic expression. LLMs are unreliable at
-//! exact math; this gives them a precise calculator. A tiny recursive-descent
-//! evaluator (no deps): `+ - * / %`, parentheses, unary minus, decimals.
+use runic_macros::tool;
+use runic_tool::{ToolContext, ToolResult};
 
-use async_trait::async_trait;
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CalculatorArgs {
+    expression: String,
+}
 
-use runic_tool::{Tool, ToolContext, ToolResult};
-
+#[tool(
+    name = "calculator",
+    args = CalculatorArgs,
+    execution = parallel,
+    description = "Evaluate an arithmetic expression for an exact result. Supports \
+                   + - * / %, parentheses, and decimals, e.g. \"(3 + 4) * 2.5\"."
+)]
 pub struct CalculatorTool;
 
-#[async_trait]
-impl Tool for CalculatorTool {
-    fn name(&self) -> &str {
-        "calculator"
-    }
-    fn description(&self) -> &str {
-        "Evaluate an arithmetic expression for an exact result. Supports \
-         + - * / %, parentheses, and decimals, e.g. \"(3 + 4) * 2.5\"."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": { "expression": { "type": "string" } },
-            "required": ["expression"]
-        })
-    }
-    fn parallelizable(&self) -> bool {
-        true
-    }
-    async fn execute(
-        &self,
-        args: serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolResult> {
-        let Some(expr) = args.get("expression").and_then(|v| v.as_str()) else {
-            return Ok(ToolResult::error("calculator requires `expression`"));
-        };
-        Ok(match eval(expr) {
+impl CalculatorTool {
+    async fn tool(&self, args: CalculatorArgs, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(match eval(&args.expression) {
             Ok(v) => ToolResult::ok(format_num(v)),
             Err(e) => ToolResult::error(e),
         })

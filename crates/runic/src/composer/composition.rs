@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::subagent::{RosterVoice, Subagent};
+use crate::subagent::{DelegationLabels, Subagent};
 use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
 
@@ -13,7 +13,7 @@ pub struct Composition {
     pub(super) tool_catalogs: Vec<Arc<dyn ToolCatalog>>,
     pub(super) skills: Vec<Arc<SkillSet>>,
     pub(super) subagents: Vec<Subagent>,
-    pub(super) delegation_voice: RosterVoice,
+    pub(super) delegation_labels: DelegationLabels,
 }
 
 impl Composition {
@@ -27,7 +27,7 @@ impl Composition {
         }
         self.skills.extend(parts.skills);
         self.subagents.extend(parts.subagents);
-        self.delegation_voice
-            .merge_first_wins(&parts.delegation_voice);
+        self.delegation_labels
+            .merge_first_wins(&parts.delegation_labels);
     }
 }

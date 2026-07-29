@@ -6,7 +6,7 @@ use runic_skills::SkillSet;
 use runic_tool::{Tool, ToolCatalog};
 
 use super::{AbilityDescriptor, ActivationPolicy, BuildCtx, Layer, ToAbility};
-use crate::subagent::{RosterVoice, Subagent};
+use crate::subagent::{DelegationLabels, Subagent};
 
 pub fn ability(id: impl Into<String>) -> Ability {
     Ability::new(id)
@@ -23,7 +23,7 @@ pub struct Ability {
     pub(crate) skills: Vec<Arc<SkillSet>>,
     pub(crate) subagents: Vec<Subagent>,
     pub(crate) tool_catalog: Option<Arc<dyn ToolCatalog>>,
-    pub(crate) delegation_voice: RosterVoice,
+    pub(crate) delegation_labels: DelegationLabels,
     nested: Vec<Arc<dyn ToAbility>>,
 }
 
@@ -100,8 +100,8 @@ impl Ability {
         self
     }
 
-    pub(crate) fn voice(&mut self, voice: &RosterVoice) {
-        self.delegation_voice.merge_first_wins(voice);
+    pub(crate) fn labels(&mut self, labels: &DelegationLabels) {
+        self.delegation_labels.merge_first_wins(labels);
     }
 
     pub(crate) fn carries_nothing(&self) -> bool {
@@ -135,8 +135,8 @@ impl Ability {
         if let Some(catalog) = &other.tool_catalog {
             self.tool_catalog = Some(catalog.clone());
         }
-        self.delegation_voice
-            .merge_first_wins(&other.delegation_voice);
+        self.delegation_labels
+            .merge_first_wins(&other.delegation_labels);
     }
 }
 

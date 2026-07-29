@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use runic_agent::Llm;
-use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
+use runic_hook::HookOutcome;
+use runic_macros::hook;
 use runic_provider::{CompletionRequest, Provider};
 use runic_state::{AgentEvent, AgentState};
 use runic_types::{ContentBlock, Message, MessageContent, Role};
@@ -17,6 +17,7 @@ const SUMMARY_MARKER: &str = "[Conversation summary — earlier context was comp
 
 const CHARS_PER_TOKEN: usize = 4;
 
+#[hook(kind = write, name = "compaction", at = before_model)]
 #[derive(Clone)]
 pub struct Compaction {
     max_context_tokens: usize,
@@ -48,19 +49,8 @@ impl Compaction {
         self.guidance = guidance.into();
         self
     }
-}
 
-#[async_trait]
-impl WriteHook for Compaction {
-    fn name(&self) -> &str {
-        "compaction"
-    }
-
-    fn points(&self) -> &'static [HookLifecycle] {
-        &[HookLifecycle::BeforeModel]
-    }
-
-    async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
+    async fn hook(&self, state: &mut AgentState) -> HookOutcome {
         let est_tokens = {
             let msgs = state.messages_for_provider();
             let total_chars: usize = msgs.iter().map(|m| m.content.text_length()).sum();

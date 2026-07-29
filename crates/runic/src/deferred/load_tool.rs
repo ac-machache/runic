@@ -92,7 +92,7 @@ impl Tool for LoadAbilityTool {
                 .parts
                 .subagents
                 .iter()
-                .map(crate::subagent::Subagent::roster_line)
+                .map(crate::subagent::Subagent::summary_line)
                 .collect();
             output.push_str(&lines.join("\n"));
             output.push_str("\n\n");

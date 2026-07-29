@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::ability::ability;
 use runic::builtin::{
-    Delegation, QuestionnaireTool, WeatherHistoryTool, WeatherTool, WebFetchTool, default_tools,
+    CalculatorTool, Delegation, QuestionnaireTool, SystemTimeTool, WeatherHistoryTool, WeatherTool,
+    WebClient, WebFetchTool,
 };
 use runic::composer::Agent;
 use runic::subagent::Subagent;
@@ -111,7 +112,7 @@ async fn composes_prompt_sections_in_order() {
 }
 
 #[tokio::test]
-async fn delegation_voice_flows_through_the_composer() {
+async fn delegation_labels_flows_through_the_composer() {
     let provider = Arc::new(RecordingProvider::default());
     let agent = base(provider)
         .with(
@@ -149,9 +150,10 @@ async fn registers_enabled_tool_surfaces() {
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
 
     let mut agent = base(provider.clone())
-        .tools(default_tools())
+        .tool(CalculatorTool)
+        .tool(SystemTimeTool)
         .tool(QuestionnaireTool)
-        .tool(WebFetchTool::new())
+        .tool(WebFetchTool::new(WebClient::new()))
         .tool(WeatherTool::new())
         .tool(WeatherHistoryTool::new())
         .tool(runic_substrate::SearchChatsTool::new(

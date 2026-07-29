@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use runic::Llm;
+use runic::builtin::TaskReminder;
 use runic::composer::Agent;
-use runic::hooks::TaskReminder;
 use runic::subagent::{DelegateTool, Subagent};
 use runic_agent::{Runner, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};

@@ -141,7 +141,7 @@ pub struct DelegateTool {
     budget: Arc<SpawnBudget>,
     cancel: CancelToken,
     tasks: Arc<Mutex<HashMap<String, BackgroundTask>>>,
-    voice: crate::subagent::RosterVoice,
+    labels: crate::subagent::DelegationLabels,
 }
 
 impl DelegateTool {
@@ -153,47 +153,47 @@ impl DelegateTool {
             budget: SpawnBudget::new(DEFAULT_MAX_TOTAL_SPAWNS, DEFAULT_MAX_CONCURRENT),
             cancel: CancelToken::new(),
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            voice: crate::subagent::RosterVoice::default(),
+            labels: crate::subagent::DelegationLabels::default(),
         }
     }
 
     pub fn tag(mut self, tag: impl Into<String>) -> Self {
-        self.voice.tag = Some(tag.into());
+        self.labels.tag = Some(tag.into());
         self
     }
 
     pub fn intro(mut self, text: impl Into<String>) -> Self {
-        self.voice.intro = Some(text.into());
+        self.labels.intro = Some(text.into());
         self
     }
 
     pub fn tool_name(mut self, name: impl Into<String>) -> Self {
-        self.voice.tool_name = Some(name.into());
+        self.labels.tool_name = Some(name.into());
         self
     }
 
     pub fn tool_description(mut self, text: impl Into<String>) -> Self {
-        self.voice.tool_description = Some(text.into());
+        self.labels.tool_description = Some(text.into());
         self
     }
 
-    pub fn voice(mut self, voice: crate::subagent::RosterVoice) -> Self {
-        self.voice = voice;
+    pub fn labels(mut self, labels: crate::subagent::DelegationLabels) -> Self {
+        self.labels = labels;
         self
     }
 
-    pub fn roster_section(&self) -> String {
-        self.voice.roster_section(&self.subagents)
+    pub fn prompt_section(&self) -> String {
+        self.labels.prompt_section(&self.subagents)
     }
 
     fn find(&self, name: &str) -> Option<&Subagent> {
         self.subagents.iter().find(|s| s.name == name)
     }
 
-    fn roster_lines(&self) -> String {
+    fn summary_lines(&self) -> String {
         self.subagents
             .iter()
-            .map(Subagent::roster_line)
+            .map(Subagent::summary_line)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -236,7 +236,7 @@ impl DelegateTool {
         let Some(sub) = self.find(agent).cloned() else {
             return ToolResult::error(format!(
                 "unknown subagent '{agent}'. Available:\n{}",
-                self.roster_lines()
+                self.summary_lines()
             ));
         };
         let guard = match self.budget.acquire() {
@@ -748,11 +748,11 @@ fn compose_prompt(context: Option<&str>, prompt: &str) -> String {
 #[async_trait]
 impl Tool for DelegateTool {
     fn name(&self) -> &str {
-        self.voice.resolved_tool_name()
+        self.labels.resolved_tool_name()
     }
 
     fn description(&self) -> &str {
-        self.voice
+        self.labels
             .tool_description
             .as_deref()
             .unwrap_or(DEFAULT_TOOL_DESCRIPTION)

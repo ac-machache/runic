@@ -1765,6 +1765,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1883,6 +1884,7 @@ dependencies = [
  "chrono",
  "futures",
  "redis",
+ "runic",
  "runic-agent",
  "runic-state",
  "runic-substrate",

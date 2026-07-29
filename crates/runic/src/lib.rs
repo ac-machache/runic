@@ -5,16 +5,15 @@ pub mod builtin;
 pub mod composer;
 mod context;
 pub mod deferred;
-pub mod hooks;
 mod models;
 pub mod output;
 
 pub use ability::{Ability, ToAbility};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
+pub use builtin::Compaction;
 pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Runtime, Session};
 pub use context::Context;
-pub use hooks::Compaction;
 pub use runic_agent::{Llm, LlmOutput};
 
 pub fn llm(spec: &str) -> Result<Llm, ComposeError> {

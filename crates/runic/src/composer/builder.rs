@@ -319,8 +319,8 @@ impl Composer {
                 composition.prompt.fragment(
                     Layer::Stable,
                     composition
-                        .delegation_voice
-                        .roster_section(&composition.subagents),
+                        .delegation_labels
+                        .prompt_section(&composition.subagents),
                 );
             }
             let full_roster: Vec<Subagent> = composition
@@ -330,7 +330,7 @@ impl Composer {
                 .chain(deferred_defs)
                 .collect();
             let delegate: Arc<dyn Tool> = Arc::new(
-                DelegateTool::new(full_roster).voice(composition.delegation_voice.clone()),
+                DelegateTool::new(full_roster).labels(composition.delegation_labels.clone()),
             );
             delegate_tool_name = Some(delegate.name().to_string());
             composition.tools.push(Arc::new(GatedTool::new(

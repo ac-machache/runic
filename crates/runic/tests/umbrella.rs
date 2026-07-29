@@ -3,7 +3,7 @@
 //! just to write code against them.
 
 use runic::agent::{Runner, RunnerBuilder};
-use runic::builtin::default_tools;
+use runic::builtin::CalculatorTool;
 use runic::hook::{ReadHook, WriteHook};
 use runic::mcp::McpClient;
 use runic::provider::Provider;
@@ -29,7 +29,7 @@ fn assert_types_reachable() {
     fn _tool_context(_: ToolContext) {}
     fn _tool_result(_: ToolResult) {}
     fn _message(_: Message) {}
-    let _ = default_tools;
+    let _ = CalculatorTool;
 }
 
 #[test]

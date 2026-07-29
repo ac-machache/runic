@@ -1,21 +1,26 @@
 mod calc;
+mod compaction;
 mod composio;
-mod defaults;
 mod delegation;
-mod hitl;
+mod questionnaire;
+mod task_reminder;
 mod time;
+mod tool_limit;
 mod weather;
-mod web;
+pub mod web;
 
 pub use calc::CalculatorTool;
+pub use compaction::{Compaction, DEFAULT_SUMMARY_GUIDANCE};
 pub use composio::ComposioTool;
-pub use defaults::default_tools;
 pub use delegation::Delegation;
-pub use hitl::QuestionnaireTool;
+pub use questionnaire::QuestionnaireTool;
+pub use task_reminder::TaskReminder;
 pub use time::SystemTimeTool;
+pub use tool_limit::ToolCallLimit;
 pub use weather::{WeatherHistoryTool, WeatherTool};
 pub use web::{
-    SearchProvider, SearchResult, SearxngProvider, TavilyProvider, WebFetchTool, WebSearchTool,
+    Format, SearchProvider, SearchResult, SearxngProvider, TavilyProvider, Web, WebClient,
+    WebFetchTool, WebSearchTool,
 };
 
 #[doc(hidden)]

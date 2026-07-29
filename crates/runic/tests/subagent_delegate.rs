@@ -122,14 +122,14 @@ async fn subagent_with_own_llm_uses_its_provider() {
 }
 
 #[tokio::test]
-async fn voice_knobs_render_section_and_rename_the_tool() {
+async fn label_knobs_render_section_and_rename_the_tool() {
     let tool = DelegateTool::new(roster())
         .tag("team")
         .intro("Hand self-contained work to your team:")
         .tool_name("dispatch")
         .tool_description("Send a teammate a task.");
 
-    let section = tool.roster_section();
+    let section = tool.prompt_section();
     assert!(section.starts_with("<team>\n"));
     assert!(section.ends_with("</team>"));
     assert!(section.contains("Hand self-contained work to your team:"));
@@ -143,7 +143,7 @@ async fn voice_knobs_render_section_and_rename_the_tool() {
 #[tokio::test]
 async fn default_intro_interpolates_a_renamed_tool() {
     let tool = DelegateTool::new(roster()).tool_name("dispatch");
-    let section = tool.roster_section();
+    let section = tool.prompt_section();
     assert!(section.starts_with("<subagents>"));
     assert!(section.contains("via the `dispatch` tool"));
     assert!(!section.contains("`delegate`"));
@@ -314,12 +314,12 @@ async fn invocation_any_leaves_the_choice_to_the_model_and_adds_no_note() {
 }
 
 #[test]
-fn the_roster_line_advertises_a_constrained_invocation() {
+fn the_summary_line_advertises_a_constrained_invocation() {
     let sub = Subagent::new("slow", "takes ages", child("x")).invocation(Invocation::Background);
-    assert!(sub.roster_line().contains("runs in the background"));
+    assert!(sub.summary_line().contains("runs in the background"));
     assert!(
         Subagent::new("plain", "normal", child("x"))
-            .roster_line()
+            .summary_line()
             .ends_with("normal")
     );
 }

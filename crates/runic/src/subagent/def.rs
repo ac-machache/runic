@@ -59,7 +59,7 @@ impl Subagent {
         self
     }
 
-    pub fn roster_line(&self) -> String {
+    pub fn summary_line(&self) -> String {
         match self.invocation {
             Invocation::Any => format!("- {}: {}", self.name, self.description),
             Invocation::Sync => format!("- {}: {} (runs inline)", self.name, self.description),
@@ -81,21 +81,21 @@ pub(crate) fn default_intro(tool_name: &str) -> String {
 }
 
 #[derive(Clone, Default)]
-pub struct RosterVoice {
+pub struct DelegationLabels {
     pub tag: Option<String>,
     pub intro: Option<String>,
     pub tool_name: Option<String>,
     pub tool_description: Option<String>,
 }
 
-impl RosterVoice {
+impl DelegationLabels {
     pub fn resolved_tool_name(&self) -> &str {
         self.tool_name
             .as_deref()
             .unwrap_or(crate::subagent::delegate::DEFAULT_TOOL_NAME)
     }
 
-    pub fn roster_section(&self, subagents: &[Subagent]) -> String {
+    pub fn prompt_section(&self, subagents: &[Subagent]) -> String {
         if subagents.is_empty() {
             return String::new();
         }
@@ -104,11 +104,11 @@ impl RosterVoice {
             Some(text) => text.clone(),
             None => default_intro(self.resolved_tool_name()),
         };
-        let lines: Vec<String> = subagents.iter().map(Subagent::roster_line).collect();
+        let lines: Vec<String> = subagents.iter().map(Subagent::summary_line).collect();
         format!("<{tag}>\n{intro}\n{}\n</{tag}>", lines.join("\n"))
     }
 
-    pub fn merge_first_wins(&mut self, other: &RosterVoice) {
+    pub fn merge_first_wins(&mut self, other: &DelegationLabels) {
         self.tag = self.tag.take().or_else(|| other.tag.clone());
         self.intro = self.intro.take().or_else(|| other.intro.clone());
         self.tool_name = self.tool_name.take().or_else(|| other.tool_name.clone());
@@ -119,8 +119,8 @@ impl RosterVoice {
     }
 }
 
-pub fn roster_prompt_section(subagents: &[Subagent]) -> String {
-    RosterVoice::default().roster_section(subagents)
+pub fn prompt_section(subagents: &[Subagent]) -> String {
+    DelegationLabels::default().prompt_section(subagents)
 }
 
 #[cfg(test)]
@@ -148,30 +148,30 @@ mod tests {
     }
 
     #[test]
-    fn roster_line_renders_name_and_description() {
+    fn summary_line_renders_name_and_description() {
         assert_eq!(
-            sub("reviewer", "reviews diffs").roster_line(),
+            sub("reviewer", "reviews diffs").summary_line(),
             "- reviewer: reviews diffs"
         );
     }
 
     #[test]
-    fn roster_section_lists_every_subagent_and_is_empty_without_any() {
-        assert!(roster_prompt_section(&[]).is_empty());
-        let section = roster_prompt_section(&[sub("a", "does A"), sub("b", "does B")]);
+    fn prompt_section_lists_every_subagent_and_is_empty_without_any() {
+        assert!(prompt_section(&[]).is_empty());
+        let section = prompt_section(&[sub("a", "does A"), sub("b", "does B")]);
         assert!(section.starts_with("<subagents>"));
         assert!(section.contains("- a: does A"));
         assert!(section.contains("- b: does B"));
     }
 
     #[test]
-    fn voice_overrides_tag_and_intro() {
-        let voice = RosterVoice {
+    fn labels_override_tag_and_intro() {
+        let voice = DelegationLabels {
             tag: Some("crew".into()),
             intro: Some("Your crew:".into()),
             ..Default::default()
         };
-        let section = voice.roster_section(&[sub("a", "does A")]);
+        let section = voice.prompt_section(&[sub("a", "does A")]);
         assert!(section.starts_with("<crew>"));
         assert!(section.contains("Your crew:"));
         assert!(section.ends_with("</crew>"));

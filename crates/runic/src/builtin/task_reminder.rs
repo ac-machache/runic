@@ -1,9 +1,10 @@
-use async_trait::async_trait;
 use chrono::Utc;
-use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
+use runic_hook::HookOutcome;
+use runic_macros::hook;
 use runic_state::{AgentEvent, AgentState, TaskStatus};
 use runic_types::Message;
 
+#[hook(kind = write, name = "task-reminder", at = before_model)]
 #[derive(Default)]
 pub struct TaskReminder;
 
@@ -11,19 +12,8 @@ impl TaskReminder {
     pub fn new() -> Self {
         Self
     }
-}
 
-#[async_trait]
-impl WriteHook for TaskReminder {
-    fn name(&self) -> &str {
-        "task-reminder"
-    }
-
-    fn points(&self) -> &'static [HookLifecycle] {
-        &[HookLifecycle::BeforeModel]
-    }
-
-    async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
+    async fn hook(&self, state: &mut AgentState) -> HookOutcome {
         let mut due: Vec<_> = state
             .tasks()
             .values()
@@ -88,6 +78,7 @@ fn notified_key(task_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runic_hook::WriteHook;
 
     fn spawn(s: &mut AgentState, id: &str) {
         s.emit(AgentEvent::TaskSpawned {

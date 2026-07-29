@@ -29,6 +29,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
 reqwest = { workspace = true }
+url = { workspace = true }
+runic-extract = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "net"] }
 uuid = { workspace = true }
 futures = { workspace = true }
@@ -39,6 +41,7 @@ proptest = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
+web-extract = ["dep:runic-extract"]
 anthropic = ["runic-provider/anthropic"]
 openai = ["runic-provider/openai"]
 mistral = ["runic-provider/mistral"]

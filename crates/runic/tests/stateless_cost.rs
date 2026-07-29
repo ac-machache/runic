@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use runic::Llm;
-use runic::ability::{Delegation, ability, basics};
+use runic::ability::ability;
+use runic::builtin::{Delegation, default_tools};
 use runic::composer::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -75,7 +76,7 @@ fn assembly(_fx: &Fixture, skills: Arc<SkillSet>) -> Agent {
     .with(Delegation::new(
         ["scout", "coder", "critic"].into_iter().map(bench_subagent),
     ))
-    .with(basics())
+    .tools(default_tools())
 }
 
 async fn timed<F, Fut>(label: &str, iters: u32, mut f: F) -> Duration

@@ -3,6 +3,7 @@
 //! just to write code against them.
 
 use runic::agent::{Runner, RunnerBuilder};
+use runic::builtin::default_tools;
 use runic::hook::{ReadHook, WriteHook};
 use runic::mcp::McpClient;
 use runic::provider::Provider;
@@ -11,7 +12,6 @@ use runic::state::AgentState;
 use runic::subagent::Subagent;
 use runic::substrate::SessionStore;
 use runic::tool::{Tool, ToolContext, ToolResult};
-use runic::tools::default_tools;
 use runic::types::Message;
 
 fn assert_types_reachable() {

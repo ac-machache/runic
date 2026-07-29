@@ -29,9 +29,14 @@ When in doubt, leave it out.
   No types, no functions, no logic. Content lives in named sibling files.
 - **Organize by domain, one module per concern.** Never pile a new feature into
   an unrelated existing module; a new domain gets a new module.
-- In the `runic` umbrella crate: `ability/` (the ability model), `composer/`
+- In the `runic` umbrella crate: `ability/` (the ability *model*), `composer/`
   (the build pipeline), `deferred/` (activation machinery), `models.rs`
-  (provider-string inference), `context.rs` (prompt layering), `tools/`
-  (the built-in `Tool` impls — calc/time/web/weather/composio/hitl; there is
-  no separate `runic-tools` crate). `lib.rs` re-exports the hot path
-  (`Composer`, `Compose`, `ability`, `ComposeError`).
+  (provider-string inference), `context.rs` (prompt layering), `builtin/`
+  (the shipped capabilities — one file per domain, each holding its `Tool`
+  impls and any ability that bundles them; there is no separate `runic-tools`
+  crate). `lib.rs` re-exports the hot path (`Composer`, `Compose`, `ability`,
+  `ComposeError`).
+- **An ability is a bundle, not a wrapper.** `Agent` takes tools, hooks,
+  skills and subagents directly; reach for an ability when several parts ship
+  as a unit, or when it needs an id, a description, or deferred activation.
+  Never write `ability(id).tool(x)` just to attach one tool.

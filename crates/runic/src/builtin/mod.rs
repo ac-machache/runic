@@ -1,16 +1,16 @@
 mod calc;
 mod composio;
+mod defaults;
+mod delegation;
 mod hitl;
 mod time;
 mod weather;
 mod web;
 
-use std::sync::Arc;
-
-use runic_tool::Tool;
-
 pub use calc::CalculatorTool;
 pub use composio::ComposioTool;
+pub use defaults::default_tools;
+pub use delegation::Delegation;
 pub use hitl::QuestionnaireTool;
 pub use time::SystemTimeTool;
 pub use weather::{WeatherHistoryTool, WeatherTool};
@@ -22,7 +22,3 @@ pub use web::{
 pub use calc::eval as eval_calc;
 #[doc(hidden)]
 pub use web::{decode_entities, html_to_text};
-
-pub fn default_tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(CalculatorTool), Arc::new(SystemTimeTool)]
-}

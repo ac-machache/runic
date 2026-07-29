@@ -1,7 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::{Delegation, ability, ask_user, basics, search_chats, weather, web_fetch};
+use runic::ability::ability;
+use runic::builtin::{
+    Delegation, QuestionnaireTool, WeatherHistoryTool, WeatherTool, WebFetchTool, default_tools,
+};
 use runic::composer::Agent;
 use runic::subagent::Subagent;
 use runic::{Compaction, Llm};
@@ -146,17 +149,20 @@ async fn registers_enabled_tool_surfaces() {
     write_skill(skill_dir.path(), "review", "review", "reviews code").await;
 
     let mut agent = base(provider.clone())
-        .with(basics())
-        .with(ask_user())
-        .with(web_fetch())
-        .with(weather())
+        .tools(default_tools())
+        .tool(QuestionnaireTool)
+        .tool(WebFetchTool::new())
+        .tool(WeatherTool::new())
+        .tool(WeatherHistoryTool::new())
+        .tool(runic_substrate::SearchChatsTool::new(
+            sessions_memory().store(),
+        ))
         .with(ability("skills").skills(Arc::new(SkillSet::load_dir("", skill_dir.path()).await)))
         .with(Delegation::new([Subagent::new(
             "researcher",
             "researches",
             child_agent("Act carefully."),
         )]))
-        .with(search_chats(sessions_memory().store()))
         .build("alice", "s1")
         .await
         .unwrap();

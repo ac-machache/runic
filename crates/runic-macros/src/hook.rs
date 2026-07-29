@@ -2,6 +2,8 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Meta, parse_macro_input};
 
+use crate::shared::runic_root;
+
 struct HookAttrs {
     kind: HookKind,
     at: HookPoint,
@@ -172,6 +174,7 @@ impl syn::parse::Parse for HookAttrs {
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     let attrs = parse_macro_input!(attr as HookAttrs);
+    let runic = runic_root();
 
     let (ident, generics) = match &input {
         syn::Item::Struct(item) => (&item.ident, &item.generics),
@@ -195,34 +198,34 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let (trait_path, outcome) = match attrs.kind {
         HookKind::Read => (
-            quote!(::runic::hook::ReadHook),
-            quote!(::runic::hook::HookSignal),
+            quote!(#runic::hook::ReadHook),
+            quote!(#runic::hook::HookSignal),
         ),
         HookKind::Write => (
-            quote!(::runic::hook::WriteHook),
-            quote!(::runic::hook::HookOutcome),
+            quote!(#runic::hook::WriteHook),
+            quote!(#runic::hook::HookOutcome),
         ),
     };
 
     let state_ty = match attrs.kind {
-        HookKind::Read => quote!(&::runic::state::AgentState),
-        HookKind::Write => quote!(&mut ::runic::state::AgentState),
+        HookKind::Read => quote!(&#runic::state::AgentState),
+        HookKind::Write => quote!(&mut #runic::state::AgentState),
     };
 
     let (params, forward) = match (attrs.at, attrs.kind) {
         (HookPoint::BeforeTool, HookKind::Read) => (
-            quote!(state: #state_ty, call: &::runic::types::ToolCall),
+            quote!(state: #state_ty, call: &#runic::types::ToolCall),
             quote!(self.hook(state, call)),
         ),
         (HookPoint::BeforeTool, HookKind::Write) => (
-            quote!(state: #state_ty, call: &mut ::runic::types::ToolCall),
+            quote!(state: #state_ty, call: &mut #runic::types::ToolCall),
             quote!(self.hook(state, call)),
         ),
         (HookPoint::AfterTool, _) => (
             quote!(
                 state: #state_ty,
-                call: &::runic::types::ToolCall,
-                result: &::runic::tool::ToolResult
+                call: &#runic::types::ToolCall,
+                result: &#runic::tool::ToolResult
             ),
             quote!(self.hook(state, call, result)),
         ),
@@ -232,7 +235,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output = quote! {
         #input
 
-        #[::runic::__private::async_trait]
+        #[#runic::__private::async_trait]
         impl #impl_generics #trait_path for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #hook_name
@@ -242,8 +245,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #priority
             }
 
-            fn points(&self) -> &'static [::runic::hook::HookLifecycle] {
-                &[::runic::hook::HookLifecycle::#variant]
+            fn points(&self) -> &'static [#runic::hook::HookLifecycle] {
+                &[#runic::hook::HookLifecycle::#variant]
             }
 
             async fn #method(&self, #params) -> #outcome {

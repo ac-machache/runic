@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Meta, parse_macro_input};
 
-use crate::shared::{ident_value, string_value};
+use crate::shared::{ident_value, runic_root, string_value};
 
 struct SubagentAttrs {
     name: String,
@@ -95,6 +95,7 @@ impl syn::parse::Parse for SubagentAttrs {
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     let attrs = parse_macro_input!(attr as SubagentAttrs);
+    let runic = runic_root();
 
     let (ident, generics) = match &input {
         syn::Item::Struct(item) => (&item.ident, &item.generics),
@@ -128,7 +129,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let model_check = match &model {
         Some(model) => quote! {
             if agent.model() != #model {
-                return Err(::runic::__private::anyhow::Error::msg(format!(
+                return Err(#runic::__private::anyhow::Error::msg(format!(
                     "subagent `{}` declares model = `{}`, but agent() returned one built on \
                      `{}`. Use the `llm` you were handed, or drop the model attribute.",
                     #name, #model, agent.model()
@@ -139,30 +140,30 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let invocation_expr = match invocation.as_deref() {
-        Some("sync") => quote!(::runic::subagent::Invocation::Sync),
-        Some("background") => quote!(::runic::subagent::Invocation::Background),
-        _ => quote!(::runic::subagent::Invocation::Any),
+        Some("sync") => quote!(#runic::subagent::Invocation::Sync),
+        Some("background") => quote!(#runic::subagent::Invocation::Background),
+        _ => quote!(#runic::subagent::Invocation::Any),
     };
 
     let output = quote! {
         #input
 
-        #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::ability::ToAbility for #ident #ty_generics #where_clause {
+        #[#runic::__private::async_trait]
+        impl #impl_generics #runic::ability::ToAbility for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #name
             }
 
             async fn to_ability(
                 &self,
-                base: ::runic::ability::Ability,
-                ctx: &::runic::ability::BuildCtx<'_>,
-            ) -> ::runic::__private::anyhow::Result<::runic::ability::Ability> {
-                let llm = ::runic::Llm::new(ctx.provider.clone(), #model_expr);
+                base: #runic::ability::Ability,
+                ctx: &#runic::ability::BuildCtx<'_>,
+            ) -> #runic::__private::anyhow::Result<#runic::ability::Ability> {
+                let llm = #runic::Llm::new(ctx.provider.clone(), #model_expr);
                 let agent = self.agent(llm).await?;
                 #model_check
                 Ok(base.subagent(
-                    ::runic::subagent::Subagent::new(#name, #description, agent)
+                    #runic::subagent::Subagent::new(#name, #description, agent)
                         .invocation(#invocation_expr),
                 ))
             }

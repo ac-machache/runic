@@ -104,6 +104,53 @@ impl Ping {
     }
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Units {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ConvertArgs {
+    #[serde(default)]
+    #[schemars(description = "Temperature units (default celsius).")]
+    units: Units,
+}
+
+/// Report a temperature.
+#[tool(args = ConvertArgs)]
+struct Convert;
+
+impl Convert {
+    async fn tool(&self, args: ConvertArgs, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
+        Ok(ToolResult::ok(if args.units == Units::Fahrenheit {
+            "72F"
+        } else {
+            "22C"
+        }))
+    }
+}
+
+#[test]
+fn a_nested_type_is_inlined_not_left_as_a_ref() {
+    let schema = Convert.parameters_schema();
+    assert!(
+        schema.get("$defs").is_none(),
+        "providers do not resolve $ref in tool schemas: {schema}"
+    );
+    assert_eq!(
+        schema["properties"]["units"],
+        serde_json::json!({
+            "type": "string",
+            "enum": ["celsius", "fahrenheit"],
+            "description": "Temperature units (default celsius)."
+        })
+    );
+    assert!(schema.get("required").is_none());
+}
+
 /// Look a row up in the tenant's catalog.
 #[tool(args = LookupArgs)]
 struct Lookup {

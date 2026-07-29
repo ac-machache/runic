@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Meta, parse_macro_input};
 
-use crate::shared::{doc_description, snake_case};
+use crate::shared::{doc_description, runic_root, snake_case};
 
 struct ToolAttrs {
     name: Option<String>,
@@ -104,6 +104,7 @@ impl syn::parse::Parse for ToolAttrs {
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     let attrs = parse_macro_input!(attr as ToolAttrs);
+    let runic = runic_root();
 
     let (ident, generics, item_attrs) = match &input {
         syn::Item::Struct(item) => (&item.ident, &item.generics, &item.attrs),
@@ -129,8 +130,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (schema_body, execute_body) = match &attrs.args {
         Some(args_ty) => (
             quote! {
-                let mut schema = ::runic::__private::serde_json::to_value(
-                    schemars::schema_for!(#args_ty)
+                let mut settings = schemars::generate::SchemaSettings::default();
+                settings.inline_subschemas = true;
+                let mut schema = #runic::__private::serde_json::to_value(
+                    settings.into_generator().into_root_schema_for::<#args_ty>()
                 ).unwrap_or_default();
                 if let Some(object) = schema.as_object_mut() {
                     object.remove("$schema");
@@ -139,10 +142,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 schema
             },
             quote! {
-                let typed_args: #args_ty = match ::runic::__private::serde_json::from_value(args) {
+                let typed_args: #args_ty = match #runic::__private::serde_json::from_value(args) {
                     Ok(typed_args) => typed_args,
                     Err(error) => {
-                        return Ok(::runic::tool::ToolResult::error(format!(
+                        return Ok(#runic::tool::ToolResult::error(format!(
                             "invalid arguments for `{}`: {error}", #tool_name
                         )));
                     }
@@ -151,7 +154,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             },
         ),
         None => (
-            quote!(::runic::__private::serde_json::json!({ "type": "object" })),
+            quote!(#runic::__private::serde_json::json!({ "type": "object" })),
             quote! {
                 let _ = args;
                 self.tool(ctx).await
@@ -172,8 +175,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output = quote! {
         #input
 
-        #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::tool::Tool for #ident #ty_generics #where_clause {
+        #[#runic::__private::async_trait]
+        impl #impl_generics #runic::tool::Tool for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #tool_name
             }
@@ -182,7 +185,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #description
             }
 
-            fn parameters_schema(&self) -> ::runic::__private::serde_json::Value {
+            fn parameters_schema(&self) -> #runic::__private::serde_json::Value {
                 #schema_body
             }
 
@@ -190,9 +193,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             async fn execute(
                 &self,
-                args: ::runic::__private::serde_json::Value,
-                ctx: &::runic::tool::ToolContext,
-            ) -> ::runic::__private::anyhow::Result<::runic::tool::ToolResult> {
+                args: #runic::__private::serde_json::Value,
+                ctx: &#runic::tool::ToolContext,
+            ) -> #runic::__private::anyhow::Result<#runic::tool::ToolResult> {
                 #execute_body
             }
         }

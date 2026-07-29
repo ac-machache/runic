@@ -1,3 +1,10 @@
+pub(crate) fn runic_root() -> proc_macro2::TokenStream {
+    match std::env::var("CARGO_CRATE_NAME").as_deref() {
+        Ok("runic") => quote::quote!(crate),
+        _ => quote::quote!(::runic),
+    }
+}
+
 pub(crate) fn doc_description(attrs: &[syn::Attribute]) -> Option<String> {
     let doc_lines: Vec<String> = attrs
         .iter()

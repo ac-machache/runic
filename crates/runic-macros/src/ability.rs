@@ -2,6 +2,8 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Meta, parse_macro_input};
 
+use crate::shared::runic_root;
+
 struct AbilityAttrs {
     id: Option<String>,
     description: Option<String>,
@@ -143,6 +145,7 @@ impl syn::parse::Parse for AbilityAttrs {
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     let attrs = parse_macro_input!(attr as AbilityAttrs);
+    let runic = runic_root();
 
     let (ident, generics) = match &input {
         syn::Item::Struct(item) => (&item.ident, &item.generics),
@@ -164,18 +167,18 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         Some(id) => {
             let descriptor = if attrs.deferred {
                 let description = attrs.description.clone().unwrap();
-                quote!(::runic::ability::AbilityDescriptor::deferred(#id, #description))
+                quote!(#runic::ability::AbilityDescriptor::deferred(#id, #description))
             } else {
-                quote!(::runic::ability::AbilityDescriptor {
+                quote!(#runic::ability::AbilityDescriptor {
                     id: Some(#id.to_string()),
                     description: None,
-                    activation: ::runic::ability::ActivationPolicy::Eager,
+                    activation: #runic::ability::ActivationPolicy::Eager,
                 })
             };
             (
                 quote! { fn name(&self) -> &str { #id } },
                 quote! {
-                    fn descriptor(&self) -> ::runic::ability::AbilityDescriptor {
+                    fn descriptor(&self) -> #runic::ability::AbilityDescriptor {
                         #descriptor
                     }
                 },
@@ -187,16 +190,16 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output = quote! {
         #input
 
-        #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::ability::ToAbility for #ident #ty_generics #where_clause {
+        #[#runic::__private::async_trait]
+        impl #impl_generics #runic::ability::ToAbility for #ident #ty_generics #where_clause {
             #name_method
             #descriptor_method
 
             async fn to_ability(
                 &self,
-                base: ::runic::ability::Ability,
-                ctx: &::runic::ability::BuildCtx<'_>,
-            ) -> ::runic::__private::anyhow::Result<::runic::ability::Ability> {
+                base: #runic::ability::Ability,
+                ctx: &#runic::ability::BuildCtx<'_>,
+            ) -> #runic::__private::anyhow::Result<#runic::ability::Ability> {
                 self.ability(base, ctx).await
             }
         }

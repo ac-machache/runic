@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Meta, parse_macro_input};
 
-use crate::shared::string_value;
+use crate::shared::{runic_root, string_value};
 
 struct AgentAttrs {
     name: String,
@@ -72,6 +72,7 @@ impl syn::parse::Parse for AgentAttrs {
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as syn::Item);
     let attrs = parse_macro_input!(attr as AgentAttrs);
+    let runic = runic_root();
 
     let (ident, generics) = match &input {
         syn::Item::Struct(item) => (&item.ident, &item.generics),
@@ -102,15 +103,15 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let output = quote! {
         #input
 
-        #[::runic::__private::async_trait]
-        impl #impl_generics ::runic::AgentDef for #ident #ty_generics #where_clause {
+        #[#runic::__private::async_trait]
+        impl #impl_generics #runic::AgentDef for #ident #ty_generics #where_clause {
             fn name(&self) -> &str {
                 #name
             }
 
             #description_method
 
-            async fn build_agent(&self) -> ::runic::__private::anyhow::Result<::runic::Agent> {
+            async fn build_agent(&self) -> #runic::__private::anyhow::Result<#runic::Agent> {
                 self.agent().await
             }
         }

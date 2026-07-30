@@ -2,11 +2,10 @@ use std::io::Write;
 
 use std::sync::Arc;
 
-use base64::Engine;
+use runic::Input;
 use runic::builtin::{CalculatorTool, SystemTimeTool};
 use runic::composer::Agent;
 use runic::state::{AgentEvent, Emitter};
-use runic::types::{ContentBlock, Message};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Debug)]
@@ -45,35 +44,22 @@ fn media_type(path: &str) -> &'static str {
     }
 }
 
-fn attachment(rest: &str) -> anyhow::Result<Message> {
+fn attachment(rest: &str) -> anyhow::Result<Input> {
     let (path, text) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
     let bytes = std::fs::read(path)?;
     let mime = media_type(path);
-    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
     println!("  attaching {path} — {} bytes, {mime}", bytes.len());
-    let block = if mime.starts_with("image/") {
-        ContentBlock::Image {
-            media_type: mime.to_string(),
-            data,
-        }
-    } else {
-        ContentBlock::File {
-            media_type: mime.to_string(),
-            data,
-        }
-    };
     let text = if text.trim().is_empty() {
         "what is this"
     } else {
         text.trim()
     };
-    Ok(Message::user_with_blocks(vec![
-        ContentBlock::Text {
-            text: text.to_string(),
-            provider_metadata: None,
-        },
-        block,
-    ]))
+    let input = Input::text(text);
+    Ok(if mime.starts_with("image/") {
+        input.image(mime, &bytes)
+    } else {
+        input.file(mime, &bytes)
+    })
 }
 
 #[tokio::main]
@@ -127,19 +113,18 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        let message = match line.strip_prefix("/file ") {
+        let input = match line.strip_prefix("/file ") {
             Some(rest) => match attachment(rest.trim()) {
-                Ok(message) => message,
+                Ok(input) => input,
                 Err(error) => {
                     println!("\ncannot attach: {error}\n");
                     continue;
                 }
             },
-            None => Message::user(line),
+            None => Input::text(line),
         };
 
-        let ctx = runic::RunContext::new().with_events(Arc::new(Printer));
-        match chat.run_message_with(&agent, message, ctx).await {
+        match chat.invoke(&agent, input.events(Arc::new(Printer))).await {
             Ok(answer) => println!("\n\n{}\n", answer.text),
             Err(error) => println!("\nerror: {error}\n"),
         }

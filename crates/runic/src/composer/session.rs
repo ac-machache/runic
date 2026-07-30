@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use runic_agent::RunContext;
 use runic_substrate::{
     Blobs, SessionMeta, SessionStore, Sessions, StoreSubSession, StoredEvent, attach_persister,
     replay_messages,
@@ -9,6 +8,7 @@ use runic_types::Message;
 use tracing::Instrument;
 
 use super::{Agent, AgentOutput};
+use crate::Input;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thread {
@@ -125,29 +125,8 @@ impl Session {
         Ok(())
     }
 
-    pub async fn run(
-        &self,
-        agent: &Agent,
-        message: impl Into<String>,
-    ) -> anyhow::Result<AgentOutput> {
-        self.run_message(agent, Message::user(message.into())).await
-    }
-
-    pub async fn run_message(
-        &self,
-        agent: &Agent,
-        message: Message,
-    ) -> anyhow::Result<AgentOutput> {
-        self.run_message_with(agent, message, RunContext::new())
-            .await
-    }
-
-    pub async fn run_message_with(
-        &self,
-        agent: &Agent,
-        message: Message,
-        mut ctx: RunContext,
-    ) -> anyhow::Result<AgentOutput> {
+    pub async fn invoke(&self, agent: &Agent, input: Input) -> anyhow::Result<AgentOutput> {
+        let (message, mut ctx) = input.split();
         let span = tracing::info_span!(
             "session_run",
             tenant = %self.tenant(),

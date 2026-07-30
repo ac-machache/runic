@@ -1494,7 +1494,6 @@ name = "runic-e2e-harness"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "base64",
  "dotenvy",
  "runic",
  "tokio",

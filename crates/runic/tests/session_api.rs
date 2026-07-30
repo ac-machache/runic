@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use runic::tool::{Tool, ToolContext, ToolResult};
-use runic::{Agent, Llm, subagent};
+use runic::{Agent, Input, Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
@@ -68,7 +68,7 @@ async fn session_persists_and_hydrates_across_runs() {
 
     let first = runic::session(("tenant", "thread-1"))
         .store(store.clone())
-        .run(&agent, "remember my name")
+        .invoke(&agent, Input::text("remember my name"))
         .await
         .unwrap();
     assert_eq!(first.text, "my name is Ada");
@@ -81,7 +81,7 @@ async fn session_persists_and_hydrates_across_runs() {
 
     let second = runic::session(("tenant", "thread-1"))
         .store(store.clone())
-        .run(&agent, "what is my name")
+        .invoke(&agent, Input::text("what is my name"))
         .await
         .unwrap();
     assert_eq!(second.text, "you are Ada");
@@ -172,7 +172,7 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
 
     let out = runic::session(("tenant", "t1"))
         .store(store.clone())
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
     assert_eq!(out.text, "parent done");
@@ -209,7 +209,7 @@ async fn one_thread_can_be_answered_by_different_agents() {
 
     runic::session(("tenant", "shared-thread"))
         .store(store.clone())
-        .run(&support, "my order id is 4417")
+        .invoke(&support, Input::text("my order id is 4417"))
         .await
         .unwrap();
 
@@ -219,7 +219,7 @@ async fn one_thread_can_be_answered_by_different_agents() {
 
     runic::session(("tenant", "shared-thread"))
         .store(store.clone())
-        .run(&analyst, "what was the order id")
+        .invoke(&analyst, Input::text("what was the order id"))
         .await
         .unwrap();
 
@@ -252,7 +252,7 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     let bare = runic::substrate::sessions_memory();
     runic::session(("tenant", "t1"))
         .store(bare)
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
     let offered = provider.requests().last().unwrap().tools.len();
@@ -264,7 +264,7 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     let searchable = runic::substrate::sessions_memory().tool(Probe("search_chats"));
     runic::session(("tenant", "t1"))
         .store(searchable)
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
 
@@ -288,7 +288,7 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
     runic::session(("tenant", "t1"))
         .store(runic::substrate::sessions_memory())
         .artifacts(blobs.clone())
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
     assert!(
@@ -303,7 +303,7 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
     runic::session(("tenant", "t1"))
         .store(runic::substrate::sessions_memory())
         .artifacts(readable)
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
 
@@ -349,7 +349,7 @@ async fn a_store_contributes_the_hooks_it_was_given() {
     runic::session(("tenant", "t1"))
         .store(sessions)
         .artifacts(blobs)
-        .run(&agent, "go")
+        .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
 
@@ -380,7 +380,9 @@ async fn a_session_answers_for_its_own_thread_without_reaching_for_the_store() {
     let sessions = runic::substrate::sessions_memory();
 
     let chat = runic::session(("tenant", "t1")).store(sessions);
-    chat.run(&agent, "my order is 4417").await.unwrap();
+    chat.invoke(&agent, Input::text("my order is 4417"))
+        .await
+        .unwrap();
     chat.set_label(Some("order 4417")).await.unwrap();
 
     assert_eq!(chat.label().await.unwrap().as_deref(), Some("order 4417"));
@@ -406,7 +408,10 @@ async fn without_a_store_a_thread_has_no_history_and_cannot_be_written_to() {
     let agent = Agent::new(Llm::new(provider, "test-model"));
     let chat = runic::session(("tenant", "t1"));
 
-    assert_eq!(chat.run(&agent, "hi").await.unwrap().text, "hello");
+    assert_eq!(
+        chat.invoke(&agent, Input::text("hi")).await.unwrap().text,
+        "hello"
+    );
 
     assert!(chat.meta().await.unwrap().is_none());
     assert!(chat.label().await.unwrap().is_none());

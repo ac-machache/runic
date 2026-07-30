@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::{Agent, Llm};
+use runic::{Agent, Input, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_substrate::{MemorySessionStore, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
@@ -74,12 +74,12 @@ async fn session_run_carries_session_and_hydrate_spans() {
 
     runic::session(("tenant", "thread-1"))
         .store(store.clone())
-        .run(&agent, "first message")
+        .invoke(&agent, Input::text("first message"))
         .await
         .unwrap();
     runic::session(("tenant", "thread-1"))
         .store(store.clone())
-        .run(&agent, "second message")
+        .invoke(&agent, Input::text("second message"))
         .await
         .unwrap();
 

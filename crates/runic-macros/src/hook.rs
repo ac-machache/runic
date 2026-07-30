@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Meta, parse_macro_input};
 
-use crate::shared::{dep_path, hook_path, state_path, tool_path, types_path};
+use crate::shared::{dep_path, hook_path, provider_path, state_path, tool_path, types_path};
 
 struct HookAttrs {
     kind: HookKind,
@@ -225,6 +225,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let state = state_path();
     let types = types_path();
     let tool = tool_path();
+    let provider = provider_path();
     let async_trait = dep_path("async-trait");
 
     let (ident, generics) = match &input {
@@ -281,6 +282,22 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                     result: &#tool::ToolResult
                 ),
                 quote!(self.#body(state, call, result)),
+            ),
+            (HookPoint::AfterModel, HookKind::Read) => (
+                quote!(state: #state_ty, response: &#provider::CompletionResponse),
+                quote!(self.#body(state, response)),
+            ),
+            (HookPoint::AfterModel, HookKind::Write) => (
+                quote!(state: #state_ty, response: &mut #provider::CompletionResponse),
+                quote!(self.#body(state, response)),
+            ),
+            (HookPoint::BeforeModel, HookKind::Read) => (
+                quote!(state: #state_ty, request: &#provider::CompletionRequest),
+                quote!(self.#body(state, request)),
+            ),
+            (HookPoint::BeforeModel, HookKind::Write) => (
+                quote!(state: #state_ty, request: &mut #provider::CompletionRequest),
+                quote!(self.#body(state, request)),
             ),
             _ => (quote!(state: #state_ty), quote!(self.#body(state))),
         };

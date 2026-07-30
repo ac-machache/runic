@@ -50,9 +50,9 @@ impl Compaction {
         self
     }
 
-    async fn hook(&self, state: &mut AgentState) -> HookOutcome {
+    async fn hook(&self, state: &mut AgentState, request: &mut CompletionRequest) -> HookOutcome {
         let est_tokens = {
-            let msgs = state.messages_for_provider();
+            let msgs = request.messages.as_slice();
             let total_chars: usize = msgs.iter().map(|m| m.content.text_length()).sum();
             let est =
                 (total_chars / CHARS_PER_TOKEN).max(state.stats().last_prompt_tokens as usize);
@@ -61,7 +61,7 @@ impl Compaction {
             }
             est
         };
-        let msgs = state.messages_for_provider().to_vec();
+        let msgs = request.messages.clone();
 
         let want = msgs.len() - self.keep_recent;
         let Some(split) = clean_boundary(&msgs, want) else {
@@ -73,7 +73,7 @@ impl Compaction {
         };
 
         let transcript = render(&msgs[..split]);
-        let request = CompletionRequest {
+        let summarize = CompletionRequest {
             model: self.model.clone(),
             messages: vec![Message::user(transcript)],
             tools: vec![],
@@ -82,7 +82,7 @@ impl Compaction {
             system: Some(self.guidance.clone()),
             thinking: None,
         };
-        let summary = match self.provider.complete(request).await {
+        let summary = match self.provider.complete(summarize).await {
             Ok(response) => response.text(),
             Err(e) => {
                 tracing::warn!(error = %e, "compaction summarizer failed — skipped");
@@ -114,6 +114,7 @@ impl Compaction {
             self.max_context_tokens
         );
         let system_prompt = state.system_prompt.clone();
+        request.messages = messages.clone();
         state.emit(AgentEvent::StateSnapshot {
             run_id,
             messages,

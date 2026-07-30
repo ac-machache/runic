@@ -40,18 +40,18 @@ async fn every_hook_execution_leaves_a_hookfired_entry() {
             "RunStart",
             "Message",      // user
             "HookFired",    // before_agent (continue)
-            "HookFired",    // before_model (continue)
+            "HookFired",    // before_model (continue) — sees the built request
+            "HookFired",    // after_model (continue) — sees the response, may edit it
             "Message",      // assistant (tool_use)
-            "TurnEnd",      // turn 1 — durable before after_model can fail
-            "HookFired",    // after_model (continue)
+            "TurnEnd",      // turn 1 — durable even if after_model had failed
             "HookFired",    // before_tool (substitute)
             "ToolFinished", // substituted disposition (no ToolStarted — never ran)
             "HookFired",    // after_tool (continue)
             "Message",      // substituted tool result
             "HookFired",    // before_model (continue)
+            "HookFired",    // after_model (continue)
             "Message",      // assistant (final text)
             "TurnEnd",      // turn 2
-            "HookFired",    // after_model (continue)
             "HookFired",    // after_agent (continue)
             "RunEnd",
         ]

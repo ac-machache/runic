@@ -16,8 +16,6 @@ use crate::{AgentError, AgentEvent, Runner};
 pub(crate) enum Point {
     BeforeAgent,
     AfterAgent,
-    BeforeModel,
-    AfterModel,
 }
 
 impl Point {
@@ -25,8 +23,6 @@ impl Point {
         match self {
             Point::BeforeAgent => "before_agent",
             Point::AfterAgent => "after_agent",
-            Point::BeforeModel => "before_model",
-            Point::AfterModel => "after_model",
         }
     }
 
@@ -34,8 +30,6 @@ impl Point {
         match self {
             Point::BeforeAgent => HookLifecycle::BeforeAgent,
             Point::AfterAgent => HookLifecycle::AfterAgent,
-            Point::BeforeModel => HookLifecycle::BeforeModel,
-            Point::AfterModel => HookLifecycle::AfterModel,
         }
     }
 }
@@ -107,6 +101,122 @@ impl Runner {
         });
     }
 
+    pub(crate) async fn fire_write_before_model(
+        &mut self,
+        run_id: &str,
+        request: &mut runic_provider::CompletionRequest,
+    ) -> Result<(), AgentError> {
+        for scoped in self.write_hooks.clone() {
+            let h = &scoped.hook;
+            if !h.points().contains(&HookLifecycle::BeforeModel) {
+                continue;
+            }
+            if !scoped.fires_this_turn() {
+                continue;
+            }
+            let outcome = h.before_model(&mut self.state, request).await;
+            tracing::debug!(
+                hook_name = h.name(),
+                hook_kind = "write",
+                point = "before_model",
+                priority = h.priority(),
+                outcome = outcome_kind(&outcome),
+                "hook fired"
+            );
+            self.record_write_hook(run_id, h.name(), HookLifecycle::BeforeModel, &outcome);
+            match outcome {
+                HookOutcome::Noop
+                | HookOutcome::Continue
+                | HookOutcome::SubstituteToolResult(_) => {}
+                HookOutcome::Stop | HookOutcome::Cancel(_) => return Err(AgentError::HookStop),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fire_read_before_model(
+        &mut self,
+        run_id: &str,
+        request: &runic_provider::CompletionRequest,
+    ) -> Result<(), AgentError> {
+        for h in self.read_hooks.clone() {
+            if !h.points().contains(&HookLifecycle::BeforeModel) {
+                continue;
+            }
+            let signal = h.before_model(&self.state, request).await;
+            tracing::debug!(
+                hook_name = h.name(),
+                hook_kind = "read",
+                point = "before_model",
+                priority = h.priority(),
+                "hook fired"
+            );
+            self.record_read_hook(run_id, h.name(), HookLifecycle::BeforeModel, &signal);
+            if matches!(signal, HookSignal::Stop) {
+                return Err(AgentError::HookStop);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fire_write_after_model(
+        &mut self,
+        run_id: &str,
+        response: &mut runic_provider::CompletionResponse,
+    ) -> Result<(), AgentError> {
+        for scoped in self.write_hooks.clone() {
+            let h = &scoped.hook;
+            if !h.points().contains(&HookLifecycle::AfterModel) {
+                continue;
+            }
+            if !scoped.fires_this_turn() {
+                continue;
+            }
+            let outcome = h.after_model(&mut self.state, response).await;
+            tracing::debug!(
+                hook_name = h.name(),
+                hook_kind = "write",
+                point = "after_model",
+                priority = h.priority(),
+                outcome = outcome_kind(&outcome),
+                "hook fired"
+            );
+            self.record_write_hook(run_id, h.name(), HookLifecycle::AfterModel, &outcome);
+            match outcome {
+                HookOutcome::Noop
+                | HookOutcome::Continue
+                | HookOutcome::SubstituteToolResult(_) => {}
+                HookOutcome::Stop | HookOutcome::Cancel(_) => return Err(AgentError::HookStop),
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn fire_read_after_model(
+        &mut self,
+        run_id: &str,
+        response: &runic_provider::CompletionResponse,
+    ) -> Result<(), AgentError> {
+        for h in self.read_hooks.clone() {
+            if !h.points().contains(&HookLifecycle::AfterModel) {
+                continue;
+            }
+            let signal = h.after_model(&self.state, response).await;
+            tracing::debug!(
+                hook_name = h.name(),
+                hook_kind = "read",
+                point = "after_model",
+                priority = h.priority(),
+                "hook fired"
+            );
+            self.record_read_hook(run_id, h.name(), HookLifecycle::AfterModel, &signal);
+            if matches!(signal, HookSignal::Stop) {
+                return Err(AgentError::HookStop);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn fire_write(
         &mut self,
         run_id: &str,
@@ -123,8 +233,6 @@ impl Runner {
             let outcome = match point {
                 Point::BeforeAgent => h.before_agent(&mut self.state).await,
                 Point::AfterAgent => h.after_agent(&mut self.state).await,
-                Point::BeforeModel => h.before_model(&mut self.state).await,
-                Point::AfterModel => h.after_model(&mut self.state).await,
             };
             tracing::debug!(
                 hook_name = h.name(),
@@ -157,8 +265,6 @@ impl Runner {
                     let signal = match point {
                         Point::BeforeAgent => h.before_agent(state).await,
                         Point::AfterAgent => h.after_agent(state).await,
-                        Point::BeforeModel => h.before_model(state).await,
-                        Point::AfterModel => h.after_model(state).await,
                     };
                     tracing::debug!(
                         hook_name = h.name(),

@@ -67,7 +67,12 @@ async fn the_span_tree_carries_the_agreed_fields() {
         responses: Mutex::new(
             vec![
                 CompletionResponse {
-                    content: vec![],
+                    content: vec![ContentBlock::ToolUse {
+                        id: "c1".into(),
+                        name: "echo".into(),
+                        input: serde_json::json!({}),
+                        provider_metadata: None,
+                    }],
                     stop_reason: StopReason::ToolUse,
                     tool_calls: vec![ToolCall {
                         id: "c1".into(),

@@ -338,3 +338,96 @@ async fn read_hook_stop_at_after_tool_halts_the_run() {
     assert!(matches!(err, AgentError::HookStop));
     assert_eq!(provider.call_count(), 1, "no second model call after stop");
 }
+
+struct ReshapeRequest;
+
+#[async_trait::async_trait]
+impl runic_hook::WriteHook for ReshapeRequest {
+    fn name(&self) -> &str {
+        "reshape"
+    }
+    fn points(&self) -> &'static [runic_hook::HookLifecycle] {
+        &[runic_hook::HookLifecycle::BeforeModel]
+    }
+    async fn before_model(
+        &self,
+        _state: &mut runic_state::AgentState,
+        request: &mut runic_provider::CompletionRequest,
+    ) -> runic_hook::HookOutcome {
+        request.model = "swapped-model".into();
+        request.temperature = 0.0;
+        request.system = Some("hook-installed system".into());
+        request.tools.clear();
+        runic_hook::HookOutcome::Continue
+    }
+}
+
+#[tokio::test]
+async fn a_before_model_hook_can_change_what_state_cannot_express() {
+    let provider = Arc::new(ScriptedProvider::new(vec![text_response("ok")]));
+    let mut agent = Runner::builder(provider.clone(), "u1", "s1")
+        .model("configured-model")
+        .system_prompt("configured system")
+        .write_hook(Arc::new(ReshapeRequest))
+        .build();
+
+    agent.run("go").await.unwrap();
+
+    let req = provider.last_request();
+    assert_eq!(req.model, "swapped-model", "model is not in AgentState");
+    assert_eq!(req.temperature, 0.0, "sampling config is not in AgentState");
+    assert_eq!(req.system.as_deref(), Some("hook-installed system"));
+    assert!(req.tools.is_empty(), "the tool list is not in AgentState");
+}
+
+struct RewriteReply;
+
+#[async_trait::async_trait]
+impl runic_hook::WriteHook for RewriteReply {
+    fn name(&self) -> &str {
+        "rewrite"
+    }
+    fn points(&self) -> &'static [runic_hook::HookLifecycle] {
+        &[runic_hook::HookLifecycle::AfterModel]
+    }
+    async fn after_model(
+        &self,
+        _state: &mut runic_state::AgentState,
+        response: &mut runic_provider::CompletionResponse,
+    ) -> runic_hook::HookOutcome {
+        response.content = vec![runic_types::ContentBlock::Text {
+            text: "[redacted by policy]".into(),
+            provider_metadata: None,
+        }];
+        runic_hook::HookOutcome::Continue
+    }
+}
+
+#[tokio::test]
+async fn an_after_model_hook_rewrites_what_is_persisted_and_cancels_the_tool_call() {
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_use_response(
+        "t1",
+        "rec",
+        serde_json::json!({}),
+    )]));
+    let rec = Arc::new(RecordingTool::new("rec", "REAL"));
+    let calls = rec.log();
+    let mut agent = Runner::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(rec)
+        .write_hook(Arc::new(RewriteReply))
+        .build();
+
+    agent.run("go").await.unwrap();
+
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "dropping the ToolUse block must stop the tool running — tool_calls is re-derived from content"
+    );
+
+    let text = agent.state().last_assistant_text().unwrap_or_default();
+    assert_eq!(
+        text, "[redacted by policy]",
+        "the rewritten reply is what got persisted"
+    );
+}

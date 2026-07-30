@@ -152,7 +152,12 @@ impl Provider for GatedProvider {
         self.entered.notify_one();
         self.gate.notified().await;
         Ok(CompletionResponse {
-            content: vec![],
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "noop".into(),
+                input: json!({}),
+                provider_metadata: None,
+            }],
             stop_reason: StopReason::ToolUse,
             tool_calls: vec![ToolCall {
                 id: "call-1".into(),
@@ -224,7 +229,12 @@ struct DeferringProvider;
 impl Provider for DeferringProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         Ok(CompletionResponse {
-            content: vec![],
+            content: vec![ContentBlock::ToolUse {
+                id: "defer-1".into(),
+                name: "defer_to_human".into(),
+                input: json!({ "question": "continue?" }),
+                provider_metadata: None,
+            }],
             stop_reason: StopReason::ToolUse,
             tool_calls: vec![ToolCall {
                 id: "defer-1".into(),
@@ -1908,7 +1918,12 @@ impl Provider for SteerableProvider {
             self.entered.notify_one();
             self.gate.notified().await;
             return Ok(CompletionResponse {
-                content: vec![],
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "noop".into(),
+                    input: json!({}),
+                    provider_metadata: None,
+                }],
                 stop_reason: StopReason::ToolUse,
                 tool_calls: vec![ToolCall {
                     id: "call-1".into(),

@@ -50,6 +50,10 @@ pub(crate) fn types_path() -> TokenStream {
     leaf("runic-types", quote!(types))
 }
 
+pub(crate) fn provider_path() -> TokenStream {
+    leaf("runic-provider", quote!(provider))
+}
+
 pub(crate) fn dep_path(krate: &str) -> TokenStream {
     match resolve(krate) {
         Some(path) => path,

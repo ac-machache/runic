@@ -606,7 +606,16 @@ impl WriteHook for RecordWriteHook {
     async fn before_agent(&self, state: &mut AgentState) -> HookOutcome {
         self.run("before_agent", state).await
     }
-    async fn before_model(&self, state: &mut AgentState) -> HookOutcome {
+    async fn before_model(
+        &self,
+        state: &mut AgentState,
+        request: &mut runic_provider::CompletionRequest,
+    ) -> HookOutcome {
+        if let Some(Act::Inject(text)) = self.actions.get("before_model") {
+            request
+                .messages
+                .push(runic_types::Message::user(text.clone()));
+        }
         self.run("before_model", state).await
     }
     async fn before_tool(&self, state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
@@ -627,7 +636,11 @@ impl WriteHook for RecordWriteHook {
             }
         }
     }
-    async fn after_model(&self, state: &mut AgentState) -> HookOutcome {
+    async fn after_model(
+        &self,
+        state: &mut AgentState,
+        _response: &mut runic_provider::CompletionResponse,
+    ) -> HookOutcome {
         self.run("after_model", state).await
     }
     async fn after_tool(
@@ -697,13 +710,21 @@ impl ReadHook for RecordReadHook {
     async fn before_agent(&self, _state: &AgentState) -> HookSignal {
         self.signal("before_agent")
     }
-    async fn before_model(&self, _state: &AgentState) -> HookSignal {
+    async fn before_model(
+        &self,
+        _state: &AgentState,
+        _request: &runic_provider::CompletionRequest,
+    ) -> HookSignal {
         self.signal("before_model")
     }
     async fn before_tool(&self, _state: &AgentState, _call: &ToolCall) -> HookSignal {
         self.signal("before_tool")
     }
-    async fn after_model(&self, _state: &AgentState) -> HookSignal {
+    async fn after_model(
+        &self,
+        _state: &AgentState,
+        _response: &runic_provider::CompletionResponse,
+    ) -> HookSignal {
         self.signal("after_model")
     }
     async fn after_tool(

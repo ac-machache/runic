@@ -1,6 +1,7 @@
 //! Hook contracts for observing, mutating, or steering the agent loop.
 
 use async_trait::async_trait;
+use runic_provider::{CompletionRequest, CompletionResponse};
 use runic_state::AgentState;
 use runic_tool::ToolResult;
 use runic_types::ToolCall;
@@ -53,7 +54,7 @@ pub trait ReadHook: Send + Sync {
         HookSignal::Noop
     }
 
-    async fn before_model(&self, _state: &AgentState) -> HookSignal {
+    async fn before_model(&self, _state: &AgentState, _request: &CompletionRequest) -> HookSignal {
         HookSignal::Noop
     }
 
@@ -61,7 +62,7 @@ pub trait ReadHook: Send + Sync {
         HookSignal::Noop
     }
 
-    async fn after_model(&self, _state: &AgentState) -> HookSignal {
+    async fn after_model(&self, _state: &AgentState, _response: &CompletionResponse) -> HookSignal {
         HookSignal::Noop
     }
 
@@ -97,7 +98,11 @@ pub trait WriteHook: Send + Sync {
         HookOutcome::Noop
     }
 
-    async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn before_model(
+        &self,
+        _state: &mut AgentState,
+        _request: &mut CompletionRequest,
+    ) -> HookOutcome {
         HookOutcome::Noop
     }
 
@@ -105,7 +110,11 @@ pub trait WriteHook: Send + Sync {
         HookOutcome::Noop
     }
 
-    async fn after_model(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn after_model(
+        &self,
+        _state: &mut AgentState,
+        _response: &mut CompletionResponse,
+    ) -> HookOutcome {
         HookOutcome::Noop
     }
 
@@ -264,7 +273,19 @@ mod tests {
             }
         }
         let mut s = state();
-        assert!(matches!(Noop.before_model(&mut s).await, HookOutcome::Noop));
+        let mut request = CompletionRequest {
+            model: "m".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        };
+        assert!(matches!(
+            Noop.before_model(&mut s, &mut request).await,
+            HookOutcome::Noop
+        ));
         assert!(matches!(
             Noop.before_tool(&mut s, &mut call("x")).await,
             HookOutcome::Noop

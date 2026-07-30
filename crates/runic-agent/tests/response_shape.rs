@@ -1,6 +1,7 @@
-//! Provider responses where `content` and `tool_calls` disagree. The loop is
-//! driven by `tool_calls` (the parsed calls), and keeps `content` verbatim on
-//! the assistant message — these tests pin that contract down.
+//! Provider responses where `content` and `tool_calls` disagree. Every driver
+//! writes both together, so this shape is unreachable from the wire; these
+//! tests pin the loop's normalization of it — `content` is the transcript and
+//! the parsed calls are rebuilt from it.
 
 mod harness;
 
@@ -11,25 +12,20 @@ use runic_agent::Runner;
 use runic_types::{ContentBlock, StopReason, ToolCall};
 
 #[tokio::test]
-async fn tool_use_block_without_parsed_tool_calls_does_not_crash_or_hang() {
-    // KNOWN SHARP EDGE, not an endorsed contract: a malformed response whose
-    // content carries a tool_use block but whose parsed `tool_calls` is empty.
-    // The loop is driven by `tool_calls`, so it has nothing to dispatch and the
-    // turn is terminal — which can leave a dangling tool_use in history.
-    // Orphaned-tool_use pruning is a planned normalization step (see
-    // `src/turn/history.rs`); this test only guards that the loop stays safe
-    // (no panic, no hang, run terminates) until that lands. Do not read it as
-    // "dangling tool_use is the desired outcome".
-    let provider = Arc::new(ScriptedProvider::new(vec![mismatched_response(
-        vec![ContentBlock::ToolUse {
-            id: "t1".into(),
-            name: "rec".into(),
-            input: serde_json::json!({}),
-            provider_metadata: None,
-        }],
-        vec![], // no parsed calls
-        StopReason::ToolUse,
-    )]));
+async fn a_tool_use_block_without_parsed_calls_is_dispatched_not_orphaned() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        mismatched_response(
+            vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "rec".into(),
+                input: serde_json::json!({}),
+                provider_metadata: None,
+            }],
+            vec![], // no parsed calls
+            StopReason::ToolUse,
+        ),
+        text_response("done"),
+    ]));
     let rec = Arc::new(RecordingTool::new("rec", "ran"));
     let calls = rec.log();
     let mut agent = Runner::builder(provider, "u1", "s1")
@@ -38,8 +34,12 @@ async fn tool_use_block_without_parsed_tool_calls_does_not_crash_or_hang() {
         .build();
 
     let outcome = agent.run("go").await.unwrap();
-    assert_eq!(outcome.total_turns, 1, "no dispatch ⇒ the run terminates");
-    assert!(calls.lock().unwrap().is_empty(), "the tool must not run");
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "the call is rebuilt from the block, so it dispatches instead of dangling"
+    );
+    assert_eq!(outcome.total_turns, 2, "dispatch ⇒ the run continues");
     assert!(
         agent.state().current_run_id().is_none(),
         "run closed cleanly"
@@ -47,9 +47,7 @@ async fn tool_use_block_without_parsed_tool_calls_does_not_crash_or_hang() {
 }
 
 #[tokio::test]
-async fn parsed_tool_calls_without_a_tool_use_block_still_dispatch() {
-    // The inverse: no tool_use content block, but `tool_calls` is populated.
-    // Dispatch is driven by `tool_calls`, so the tool runs.
+async fn parsed_calls_without_a_tool_use_block_are_dropped() {
     let provider = Arc::new(ScriptedProvider::new(vec![
         mismatched_response(
             vec![ContentBlock::Text {
@@ -73,15 +71,11 @@ async fn parsed_tool_calls_without_a_tool_use_block_still_dispatch() {
         .build();
 
     let outcome = agent.run("go").await.unwrap();
-    assert_eq!(
-        outcome.total_turns, 2,
-        "the call dispatched and the run continued"
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "nothing in the transcript asked for it, so nothing runs"
     );
-    assert_eq!(calls.lock().unwrap().len(), 1, "tool_calls drives dispatch");
-
-    let results = tool_results(&provider.requests()[1].messages);
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].0, "t1");
+    assert_eq!(outcome.total_turns, 1, "no dispatch ⇒ the run terminates");
 }
 
 #[tokio::test]

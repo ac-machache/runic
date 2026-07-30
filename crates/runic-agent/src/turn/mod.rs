@@ -24,10 +24,9 @@ impl Runner {
         turn_number: u32,
     ) -> Result<TurnRecord, AgentError> {
         self.refresh_activated_tools();
-        self.fire_write(run_id, Point::BeforeModel).await?; // hooks (sequential)
-        self.fire_read(run_id, Point::BeforeModel).await?; //        (parallel)
-
-        let request = self.prepare_request(); // request.rs
+        let mut request = self.prepare_request(); // request.rs
+        self.fire_write_before_model(run_id, &mut request).await?; // (sequential)
+        self.fire_read_before_model(run_id, &request).await?; //      (observe)
         tracing::debug!(
             run_id,
             messages = request.messages.len(),
@@ -44,6 +43,21 @@ impl Runner {
             "model response received"
         );
 
+        let mut response = response;
+        let mut aborted = self
+            .fire_write_after_model(run_id, &mut response)
+            .await
+            .err();
+        if aborted.is_none() {
+            response.tool_calls = Self::tool_calls_of(&response.content);
+            if response.tool_calls.is_empty()
+                && response.stop_reason == runic_types::StopReason::ToolUse
+            {
+                response.stop_reason = runic_types::StopReason::EndTurn;
+            }
+            aborted = self.fire_read_after_model(run_id, &response).await.err();
+        }
+
         let (assistant, turn) = Self::interpret_response(response, model, model_ms); // response.rs
         self.push_assistant(assistant, run_id); // history.rs — state now has the reply
 
@@ -57,8 +71,9 @@ impl Runner {
             at: chrono::Utc::now(),
         });
 
-        self.fire_write(run_id, Point::AfterModel).await?; // hooks see the reply
-        self.fire_read(run_id, Point::AfterModel).await?;
+        if let Some(error) = aborted {
+            return Err(error);
+        }
 
         Ok(turn)
     }

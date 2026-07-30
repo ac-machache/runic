@@ -4,11 +4,27 @@
 //! and the `tool_use` blocks round-trip to match the next turn's results.
 
 use runic_provider::CompletionResponse;
-use runic_types::Message;
+use runic_types::{ContentBlock, Message, ToolCall};
 
 use crate::{Runner, TurnRecord};
 
 impl Runner {
+    pub(crate) fn tool_calls_of(content: &[ContentBlock]) -> Vec<ToolCall> {
+        content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn interpret_response(
         response: CompletionResponse,
         model: String,

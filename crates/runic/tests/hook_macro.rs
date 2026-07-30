@@ -105,7 +105,11 @@ impl InjectUserId {
 struct ObserveModel;
 
 impl ObserveModel {
-    async fn hook(&self, _state: &AgentState) -> HookSignal {
+    async fn hook(
+        &self,
+        _state: &AgentState,
+        _request: &runic_provider::CompletionRequest,
+    ) -> HookSignal {
         HookSignal::Continue
     }
 }
@@ -117,7 +121,11 @@ struct Summarize {
 }
 
 impl Summarize {
-    async fn hook(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn hook(
+        &self,
+        _state: &mut AgentState,
+        _request: &mut runic_provider::CompletionRequest,
+    ) -> HookOutcome {
         match self.llm.run("summarize the thread").await {
             Ok(output) => {
                 *self.seen.lock().unwrap() = Some(output.text);

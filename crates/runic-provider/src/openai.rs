@@ -688,20 +688,11 @@ impl Provider for OpenAIDriver {
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
 
-                // Groq "tool_use_failed": model generated tool call in XML format.
-                // Parse the failed_generation and convert to a proper tool call response.
-                if status == 400 && body.contains("tool_use_failed") {
-                    if let Some(response) = parse_groq_failed_tool_call(&body) {
-                        warn!("Recovered tool call from Groq failed_generation");
-                        return Ok(response);
-                    }
-                    // If parsing fails, retry on next attempt
-                    if attempt < max_retries {
-                        let retry_ms = (attempt + 1) as u64 * 1500;
-                        warn!(status, attempt, retry_ms, "tool_use_failed, retrying");
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-                        continue;
-                    }
+                if status == 400 && body.contains("tool_use_failed") && attempt < max_retries {
+                    let retry_ms = (attempt + 1) as u64 * 1500;
+                    warn!(status, attempt, retry_ms, "tool_use_failed, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    continue;
                 }
 
                 // o-series / reasoning models: strip temperature if rejected
@@ -1043,21 +1034,14 @@ impl Provider for OpenAIDriver {
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
 
-                // Groq "tool_use_failed": parse and recover (streaming path)
-                if status == 400 && body.contains("tool_use_failed") {
-                    if let Some(response) = parse_groq_failed_tool_call(&body) {
-                        warn!("Recovered tool call from Groq failed_generation (stream)");
-                        return Ok(response);
-                    }
-                    if attempt < max_retries {
-                        let retry_ms = (attempt + 1) as u64 * 1500;
-                        warn!(
-                            status,
-                            attempt, retry_ms, "tool_use_failed (stream), retrying"
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
-                        continue;
-                    }
+                if status == 400 && body.contains("tool_use_failed") && attempt < max_retries {
+                    let retry_ms = (attempt + 1) as u64 * 1500;
+                    warn!(
+                        status,
+                        attempt, retry_ms, "tool_use_failed (stream), retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    continue;
                 }
 
                 // o-series / reasoning models: strip temperature if rejected
@@ -1606,78 +1590,6 @@ fn tool_result_text(content: &runic_types::ToolResultPayload, is_error: bool) ->
     }
 }
 
-///
-/// Some models (e.g. Llama 3.3) generate tool calls as XML: `<function=NAME ARGS></function>`
-/// instead of the proper JSON format. Groq rejects these with `tool_use_failed` but includes
-/// the raw generation. We parse it and construct a proper CompletionResponse.
-fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
-    let json_body: serde_json::Value = serde_json::from_str(body).ok()?;
-    let failed = json_body
-        .pointer("/error/failed_generation")
-        .and_then(|v| v.as_str())?;
-
-    // Parse all tool calls from the failed generation.
-    // Format: <function=tool_name{"arg":"val"}></function> or <function=tool_name {"arg":"val"}></function>
-    let mut tool_calls = Vec::new();
-    let mut remaining = failed;
-
-    while let Some(start) = remaining.find("<function=") {
-        remaining = &remaining[start + 10..]; // skip "<function="
-        // Find the end tag
-        let end = remaining.find("</function>")?;
-        let mut call_content = &remaining[..end];
-        remaining = &remaining[end + 11..]; // skip "</function>"
-
-        // Strip trailing ">" from the XML opening tag close
-        call_content = call_content.strip_suffix('>').unwrap_or(call_content);
-
-        // Split into name and args: "tool_name{"arg":"val"}" or "tool_name {"arg":"val"}"
-        let (name, args) = if let Some(brace_pos) = call_content.find('{') {
-            let name = call_content[..brace_pos].trim();
-            let args = &call_content[brace_pos..];
-            (name, args)
-        } else {
-            // No args â€” just a tool name
-            (call_content.trim(), "{}")
-        };
-
-        // Parse args as JSON Value
-        let args_value: serde_json::Value =
-            serde_json::from_str(args).unwrap_or(serde_json::json!({}));
-
-        tool_calls.push(ToolCall {
-            id: format!("groq_recovered_{}", tool_calls.len()),
-            name: name.to_string(),
-            input: args_value,
-        });
-    }
-
-    if tool_calls.is_empty() {
-        // No tool calls found â€” the model generated plain text but Groq rejected it.
-        // Return it as a normal text response instead of failing.
-        if !failed.trim().is_empty() {
-            warn!("Recovering plain text from Groq failed_generation (no tool calls)");
-            return Some(CompletionResponse {
-                content: vec![ContentBlock::Text {
-                    text: failed.to_string(),
-                    provider_metadata: None,
-                }],
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: TokenUsage::default(),
-            });
-        }
-        return None;
-    }
-
-    Some(CompletionResponse {
-        content: vec![],
-        tool_calls,
-        stop_reason: StopReason::ToolUse,
-        usage: TokenUsage::default(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1706,31 +1618,6 @@ mod tests {
     fn test_openai_driver_creation() {
         let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
         assert_eq!(driver.api_key.as_str(), "test-key");
-    }
-
-    #[test]
-    fn test_parse_groq_failed_tool_call() {
-        let body = r#"{"error":{"message":"Failed to call a function.","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=web_fetch{\"url\": \"https://example.com\"}></function>\n"}}"#;
-        let result = parse_groq_failed_tool_call(body);
-        assert!(result.is_some());
-        let resp = result.unwrap();
-        assert_eq!(resp.tool_calls.len(), 1);
-        assert_eq!(resp.tool_calls[0].name, "web_fetch");
-        assert!(
-            resp.tool_calls[0]
-                .input
-                .to_string()
-                .contains("https://example.com")
-        );
-    }
-
-    #[test]
-    fn test_parse_groq_failed_tool_call_with_space() {
-        let body = r#"{"error":{"message":"Failed","type":"invalid_request_error","code":"tool_use_failed","failed_generation":"<function=shell_exec {\"command\": \"ls -la\"}></function>"}}"#;
-        let result = parse_groq_failed_tool_call(body);
-        assert!(result.is_some());
-        let resp = result.unwrap();
-        assert_eq!(resp.tool_calls[0].name, "shell_exec");
     }
 
     // ----- rejects_temperature tests -----

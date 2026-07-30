@@ -103,7 +103,11 @@ impl WriteHook for MarkerHook {
     fn points(&self) -> &'static [HookLifecycle] {
         &[HookLifecycle::BeforeModel]
     }
-    async fn before_model(&self, _state: &mut AgentState) -> HookOutcome {
+    async fn before_model(
+        &self,
+        _state: &mut AgentState,
+        _request: &mut runic_provider::CompletionRequest,
+    ) -> HookOutcome {
         *self.0.lock().unwrap() = true;
         HookOutcome::Continue
     }

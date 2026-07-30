@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 runic-state = { path = "../runic-state" }
 runic-types = { path = "../runic-types" }
 runic-tool = { path = "../runic-tool" }
+runic-provider = { path = "../runic-provider" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

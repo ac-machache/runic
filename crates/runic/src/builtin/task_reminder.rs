@@ -1,6 +1,7 @@
 use chrono::Utc;
 use runic_hook::HookOutcome;
 use runic_macros::hook;
+use runic_provider::CompletionRequest;
 use runic_state::{AgentEvent, AgentState, TaskStatus};
 use runic_types::Message;
 
@@ -13,7 +14,7 @@ impl TaskReminder {
         Self
     }
 
-    async fn hook(&self, state: &mut AgentState) -> HookOutcome {
+    async fn hook(&self, state: &mut AgentState, request: &mut CompletionRequest) -> HookOutcome {
         let mut due: Vec<_> = state
             .tasks()
             .values()
@@ -60,9 +61,11 @@ impl TaskReminder {
             .current_run_id()
             .unwrap_or("task-reminder")
             .to_string();
+        let reminder = Message::user(notes.join("\n"));
+        request.messages.push(reminder.clone());
         state.emit(AgentEvent::Message {
             run_id,
-            msg: Message::user(notes.join("\n")),
+            msg: reminder,
             at: Utc::now(),
         });
         HookOutcome::Continue
@@ -79,6 +82,18 @@ fn notified_key(task_id: &str) -> String {
 mod tests {
     use super::*;
     use runic_hook::WriteHook;
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            model: "m".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+        }
+    }
 
     fn spawn(s: &mut AgentState, id: &str) {
         s.emit(AgentEvent::TaskSpawned {
@@ -110,7 +125,7 @@ mod tests {
         spawn(&mut s, "t2");
         finish(&mut s, "t2", TaskStatus::Failed, Some("timeout"));
 
-        hook.before_model(&mut s).await;
+        hook.before_model(&mut s, &mut request()).await;
         let text = {
             let msgs = s.messages_for_provider();
             assert_eq!(msgs.len(), 1);
@@ -121,7 +136,7 @@ mod tests {
         assert_eq!(s.get(&notified_key("t1")), Some(&serde_json::json!(true)));
         assert_eq!(s.get(&notified_key("t2")), Some(&serde_json::json!(true)));
 
-        hook.before_model(&mut s).await;
+        hook.before_model(&mut s, &mut request()).await;
         assert_eq!(s.messages_for_provider().len(), 1);
     }
 
@@ -131,7 +146,7 @@ mod tests {
         let mut s = AgentState::new("u1", "s1", "sys");
         spawn(&mut s, "t1");
 
-        hook.before_model(&mut s).await;
+        hook.before_model(&mut s, &mut request()).await;
         assert!(s.messages_for_provider().is_empty());
         assert!(s.get(&notified_key("t1")).is_none());
     }

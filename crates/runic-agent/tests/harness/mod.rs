@@ -766,6 +766,7 @@ pub fn session_kinds(evs: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ThinkingDelta(_) => "ThinkingDelta",
             AgentEvent::RunStarted { .. } => "RunStart",
             AgentEvent::RunEnd { .. } => "RunEnd",
+            AgentEvent::Persisted { .. } => "Persisted",
             AgentEvent::Message { .. } => "Message",
             AgentEvent::TurnEnd { .. } => "TurnEnd",
             AgentEvent::ToolStarted { .. } => "ToolStarted",

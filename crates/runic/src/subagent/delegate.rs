@@ -534,7 +534,7 @@ struct ChildRun {
 struct ChildOutcome {
     result: anyhow::Result<ChildRun>,
     child_session: Option<String>,
-    persistence: Option<runic_state::ChildPersistenceStatus>,
+    persistence: Option<runic_state::PersistenceStatus>,
 }
 
 async fn run_child(
@@ -579,8 +579,8 @@ async fn run_child(
     };
     let persistence = match sub {
         Some(sub) => Some(match sub.flush().await {
-            Ok(()) => runic_state::ChildPersistenceStatus::Flushed,
-            Err(e) => runic_state::ChildPersistenceStatus::FlushFailed(e.to_string()),
+            Ok(()) => runic_state::PersistenceStatus::Flushed,
+            Err(e) => runic_state::PersistenceStatus::FlushFailed(e.to_string()),
         }),
         None => None,
     };

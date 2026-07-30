@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use runic_state::{
-    AgentEvent, AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus,
-    HookLifecycle, RunEndStatus, RunOutcome, TaskRecord, TaskStatus, ThreadStats, ToolStatus,
+    AgentEvent, AuditStamp, DelegationMode, DelegationStatus, HookLifecycle, PersistenceStatus,
+    RunEndStatus, RunOutcome, TaskRecord, TaskStatus, ThreadStats, ToolStatus,
 };
 use runic_types::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -82,7 +82,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        child_persistence: Option<ChildPersistenceStatus>,
+        child_persistence: Option<PersistenceStatus>,
         at: DateTime<Utc>,
     },
 
@@ -383,7 +383,9 @@ impl SessionEvent {
 
 pub fn project(event: &AgentEvent) -> Option<SessionEvent> {
     Some(match event {
-        AgentEvent::TextDelta(_) | AgentEvent::ThinkingDelta(_) => return None,
+        AgentEvent::TextDelta(_) | AgentEvent::ThinkingDelta(_) | AgentEvent::Persisted { .. } => {
+            return None;
+        }
         AgentEvent::RunStarted {
             run_id,
             agent,

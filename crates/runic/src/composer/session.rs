@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use runic_state::ThreadStats;
+use runic_state::{AgentEvent, PersistenceStatus, ThreadStats};
 use runic_substrate::{
     Blobs, SessionMeta, SessionScope, SessionStore, Sessions, StoreSubSession, StoredEvent,
     attach_persister, replay_messages,
@@ -272,7 +272,11 @@ impl Session {
                     self.thread().to_string(),
                 )));
             }
+            // The runner drops its subscribers when the run ends, so keep a
+            // copy: the flush outcome is reported after that.
+            let subscribers = ctx.events.clone();
 
+            let run_id = ctx.run_id.clone();
             let outcome = runner
                 .run_message_with(message, ctx)
                 .await
@@ -281,8 +285,23 @@ impl Session {
             let current = tracing::Span::current();
             current.record("persist_backlog_at_flush", handle.backlog());
             let started = std::time::Instant::now();
-            handle.flush().await?;
+            let flushed = handle.flush().await;
             current.record("flush_ms", started.elapsed().as_millis() as u64);
+
+            let event = AgentEvent::Persisted {
+                run_id: run_id
+                    .or_else(|| runner.state().current_run_id().map(str::to_string))
+                    .unwrap_or_default(),
+                status: match &flushed {
+                    Ok(()) => PersistenceStatus::Flushed,
+                    Err(error) => PersistenceStatus::FlushFailed(error.to_string()),
+                },
+                at: chrono::Utc::now(),
+            };
+            for subscriber in &subscribers {
+                subscriber.emit(event.clone());
+            }
+            flushed?;
 
             Ok(AgentOutput::from_run(&runner, outcome))
         }

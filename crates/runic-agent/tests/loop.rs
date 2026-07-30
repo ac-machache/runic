@@ -593,7 +593,8 @@ async fn streaming_emits_lifecycle_and_token_events() {
             | AgentEvent::StateSnapshot { .. }
             | AgentEvent::StateUpdated { .. }
             | AgentEvent::TaskSpawned { .. }
-            | AgentEvent::TaskFinished { .. } => {}
+            | AgentEvent::TaskFinished { .. }
+            | AgentEvent::Persisted { .. } => {}
         }
     }
 

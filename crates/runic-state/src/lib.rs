@@ -15,8 +15,8 @@ pub mod subsession;
 pub mod tasks;
 
 pub use event::{
-    AgentEvent, AuditStamp, ChildPersistenceStatus, DelegationMode, DelegationStatus,
-    HookLifecycle, RunEndStatus, RunOutcome, ToolStatus,
+    AgentEvent, AuditStamp, DelegationMode, DelegationStatus, HookLifecycle, PersistenceStatus,
+    RunEndStatus, RunOutcome, ToolStatus,
 };
 pub use state::{
     AgentState, Emitter, InvalidStateKey, MAX_STATE_KEY_BYTES, Reader, RunTimeContext, new_run_id,

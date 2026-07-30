@@ -187,6 +187,14 @@ pub enum WireEvent {
         stop_reason: Option<String>,
     },
 
+    /// The run's events are durable — safe to reload the thread. `Done` only
+    /// means the agent answered.
+    Persisted {
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+
     /// A hook did something other than `continue` — live and replay.
     HookFired {
         hook_name: String,
@@ -220,6 +228,7 @@ impl WireEvent {
             Self::Warning { .. } => "warning",
             Self::RunError { .. } => "run_error",
             Self::Done { .. } => "done",
+            Self::Persisted { .. } => "persisted",
             Self::HookFired { .. } => "hook_fired",
             Self::TaskSpawned { .. } => "task_spawned",
             Self::TaskFinished { .. } => "task_finished",
@@ -335,6 +344,20 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             }
             wires
         }
+        AgentEvent::Persisted { status, .. } => match status {
+            runic_state::PersistenceStatus::Flushed => {
+                vec![WireEvent::Persisted {
+                    ok: true,
+                    error: None,
+                }]
+            }
+            runic_state::PersistenceStatus::FlushFailed(error) => {
+                vec![WireEvent::Persisted {
+                    ok: false,
+                    error: Some(error),
+                }]
+            }
+        },
         AgentEvent::HookFired {
             hook,
             hook_kind,
@@ -390,7 +413,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             output_tokens: usage.output_tokens,
             child_session,
             child_persisted: child_persistence
-                .map(|p| matches!(p, runic_state::ChildPersistenceStatus::Flushed)),
+                .map(|p| matches!(p, runic_state::PersistenceStatus::Flushed)),
         }],
         AgentEvent::StateUpdated { run_id, key, .. } => {
             vec![WireEvent::StateUpdated { run_id, key }]
@@ -576,7 +599,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             output_tokens: usage.output_tokens,
             child_session,
             child_persisted: child_persistence
-                .map(|p| matches!(p, runic_state::ChildPersistenceStatus::Flushed)),
+                .map(|p| matches!(p, runic_state::PersistenceStatus::Flushed)),
         }),
         SessionEvent::ToolStarted { .. } | SessionEvent::StateSnapshot { .. } => None,
     }

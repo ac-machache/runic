@@ -424,3 +424,56 @@ async fn without_a_store_a_thread_has_no_history_and_cannot_be_written_to() {
     );
     assert!(chat.delete().await.is_err());
 }
+
+#[derive(Debug)]
+struct Collect(Arc<Mutex<Vec<String>>>);
+
+impl runic::state::Emitter for Collect {
+    fn emit(&self, event: runic::state::AgentEvent) {
+        let kind = match event {
+            runic::state::AgentEvent::RunEnd { .. } => "RunEnd".to_string(),
+            runic::state::AgentEvent::Persisted { status, .. } => format!("Persisted:{status:?}"),
+            _ => return,
+        };
+        self.0.lock().unwrap().push(kind);
+    }
+}
+
+#[tokio::test]
+async fn persisted_lands_after_the_run_ended_because_done_is_not_durable() {
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let agent = Agent::new(Llm::new(provider, "test-model"));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    runic::session(("tenant", "t1"))
+        .store(runic::substrate::sessions_memory())
+        .invoke(
+            &agent,
+            Input::text("go").events(Arc::new(Collect(seen.clone()))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["RunEnd".to_string(), "Persisted:Flushed".to_string(),],
+        "the run ends, then the log catches up — two separate facts, in that order"
+    );
+}
+
+#[tokio::test]
+async fn a_storeless_run_never_claims_to_have_persisted() {
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let agent = Agent::new(Llm::new(provider, "test-model"));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+
+    runic::session(("tenant", "t1"))
+        .invoke(
+            &agent,
+            Input::text("go").events(Arc::new(Collect(seen.clone()))),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec!["RunEnd".to_string()]);
+}

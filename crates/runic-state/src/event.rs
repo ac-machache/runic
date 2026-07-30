@@ -68,7 +68,7 @@ pub enum DelegationStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChildPersistenceStatus {
+pub enum PersistenceStatus {
     Flushed,
     FlushFailed(String),
 }
@@ -159,7 +159,7 @@ pub enum AgentEvent {
         model: Option<String>,
         duration_ms: u64,
         child_session: Option<String>,
-        child_persistence: Option<ChildPersistenceStatus>,
+        child_persistence: Option<PersistenceStatus>,
         at: DateTime<Utc>,
     },
     StateSnapshot {
@@ -199,6 +199,11 @@ pub enum AgentEvent {
         outcome: RunOutcome,
         at: DateTime<Utc>,
     },
+    Persisted {
+        run_id: String,
+        status: PersistenceStatus,
+        at: DateTime<Utc>,
+    },
 }
 
 impl AgentEvent {
@@ -218,7 +223,8 @@ impl AgentEvent {
             | AgentEvent::StateUpdated { run_id, .. }
             | AgentEvent::TaskSpawned { run_id, .. }
             | AgentEvent::TaskFinished { run_id, .. }
-            | AgentEvent::RunEnd { run_id, .. } => Some(run_id),
+            | AgentEvent::RunEnd { run_id, .. }
+            | AgentEvent::Persisted { run_id, .. } => Some(run_id),
         }
     }
 }

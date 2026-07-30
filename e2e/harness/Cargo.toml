@@ -7,8 +7,10 @@ publish = false
 [workspace]
 
 [dependencies]
-runic = { path = "../../crates/runic", features = ["mistral"] }
+runic = { path = "../../crates/runic", features = ["mistral", "postgres"] }
 
 anyhow = "1"
+base64 = "0.22"
+dotenvy = "0.15"
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

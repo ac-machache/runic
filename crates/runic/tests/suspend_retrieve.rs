@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::ability;
-use runic::composer::{Agent, Composer, Runtime};
+use runic::builtin::ReadThreadArtifactTool;
+use runic::composer::{Agent, Composer};
 use runic_agent::RunContext;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentEvent;
@@ -123,7 +124,7 @@ impl Tool for AskTool {
 }
 
 #[tokio::test]
-async fn a_suspended_spill_is_retrievable_through_the_auto_wired_reader_after_resume() {
+async fn a_suspended_spill_is_retrievable_through_the_reader_after_resume() {
     let provider = Arc::new(ScriptedProvider::new(vec![tool_use(vec![
         ("c1", "big", serde_json::json!({})),
         ("c2", "ask", serde_json::json!({})),
@@ -131,8 +132,9 @@ async fn a_suspended_spill_is_retrievable_through_the_auto_wired_reader_after_re
     let store = Arc::new(MemoryArtifactStore::new());
     let mut agent = Composer::new(
         Agent::new(Llm::new(provider.clone(), "m").instructions("core"))
-            .with(ability("work").tool(BigTool).tool(AskTool)),
-        Runtime::new().artifacts(store),
+            .with(ability("work").tool(BigTool).tool(AskTool))
+            .artifacts(store.clone())
+            .tool(ReadThreadArtifactTool::new(store.clone())),
     )
     .build("alice", "s1")
     .await

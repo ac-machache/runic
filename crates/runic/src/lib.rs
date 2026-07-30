@@ -12,7 +12,7 @@ pub use ability::{Ability, ToAbility};
 pub use artifact_resolver::ArtifactResolver;
 pub use artifact_spill::SpillToArtifacts;
 pub use builtin::Compaction;
-pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Runtime, Session};
+pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, session};
 pub use context::Context;
 pub use runic_agent::{Llm, LlmOutput};
 

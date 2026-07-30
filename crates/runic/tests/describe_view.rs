@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use proptest::prelude::*;
 use runic::Llm;
 use runic::ability::ability;
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::{Agent, Composer};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_tool::{Tool, ToolContext, ToolResult};
 
@@ -107,7 +107,7 @@ fn build_composer(specs: &[AbilitySpec]) -> Composer {
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    Composer::new(agent, Runtime::new()).activated(activated_ids)
+    Composer::new(agent).activated(activated_ids)
 }
 
 async fn run_case(specs: Vec<AbilitySpec>) -> Result<(), TestCaseError> {

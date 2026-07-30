@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use runic::ability::ability;
 use runic::composer::Agent;
-use runic::composer::{Composer, Runtime};
+use runic::composer::Composer;
 use runic::subagent::Subagent;
 use runic::{Llm, agent};
 use runic_agent::Runner;
@@ -174,7 +174,6 @@ async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
                         ),
                     )),
             ),
-        Runtime::new(),
     )
 }
 

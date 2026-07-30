@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use runic::Llm;
 use runic::builtin::{Format, SearchProvider, SearchResult, Web, WebClient, WebFetchTool};
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::{Agent, Composer};
 use runic::tool::{Tool, ToolContext};
 
 struct Nowhere;
@@ -37,10 +37,7 @@ impl runic_provider::Provider for Stub {
 
 async fn tool_names(web: Web) -> Vec<String> {
     let agent = Agent::new(Llm::new(Arc::new(Stub), "test-model")).with(web);
-    let views = Composer::new(agent, Runtime::new())
-        .describe("alice", "s1")
-        .await
-        .unwrap();
+    let views = Composer::new(agent).describe("alice", "s1").await.unwrap();
     views
         .iter()
         .flat_map(|view| view.tools.iter().map(|spec| spec.name.clone()))

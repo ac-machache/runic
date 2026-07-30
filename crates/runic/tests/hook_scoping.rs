@@ -167,7 +167,7 @@ async fn a_runtime_hook_sees_every_call() {
     assert_eq!(
         *seen.lock().unwrap(),
         vec!["global:alpha", "global:beta"],
-        "agent-wide policy is what Runtime::hook is for"
+        "agent-wide policy is what Agent::hook is for"
     );
 }
 

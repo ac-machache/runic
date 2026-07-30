@@ -42,7 +42,7 @@ pub enum ComposeError {
         name: String,
     },
     #[error(
-        "hook `{hook}` on ability `{ability}` declares `{point}`, which is not an ability-scoped moment — an ability's hook is live only while that ability is in play, and the run boundary is outside every ability. Narrow `points()` to the model and tool points, or move the hook to `Runtime::hook` to make it agent-wide"
+        "hook `{hook}` on ability `{ability}` declares `{point}`, which is not an ability-scoped moment — an ability's hook is live only while that ability is in play, and the run boundary is outside every ability. Narrow `points()` to the model and tool points, or move the hook to `Agent::hook` to make it agent-wide"
     )]
     AbilityLifecycleHook {
         ability: String,

@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use runic_tool::Tool;
+
 use crate::{
     ArtifactStore, LocalArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
 };
@@ -14,6 +16,7 @@ pub fn sessions_memory() -> Sessions {
     tracing::info!("using in-memory session store (ephemeral)");
     Sessions {
         store: Arc::new(MemorySessionStore::new()),
+        tools: Vec::new(),
     }
 }
 
@@ -25,6 +28,7 @@ pub async fn sessions_postgres(database_url: &str) -> crate::Result<Sessions> {
     tracing::info!("connected to postgres session store");
     Ok(Sessions {
         store: Arc::new(store),
+        tools: Vec::new(),
     })
 }
 
@@ -41,13 +45,33 @@ pub async fn sessions_postgres_or_memory(database_url: &str) -> Sessions {
     }
 }
 
+#[derive(Clone)]
 pub struct Sessions {
     store: Arc<dyn SessionStore>,
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl Sessions {
     pub fn store(&self) -> Arc<dyn SessionStore> {
         self.store.clone()
+    }
+
+    pub fn tools(&self) -> &[Arc<dyn Tool>] {
+        &self.tools
+    }
+
+    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.push(Arc::new(tool));
+        self
+    }
+}
+
+impl From<Arc<dyn SessionStore>> for Sessions {
+    fn from(store: Arc<dyn SessionStore>) -> Self {
+        Self {
+            store,
+            tools: Vec::new(),
+        }
     }
 }
 
@@ -58,6 +82,7 @@ pub fn blobs_memory() -> Blobs {
     tracing::info!("using in-memory artifact store (ephemeral)");
     Blobs {
         store: Arc::new(MemoryArtifactStore::new()),
+        tools: Vec::new(),
     }
 }
 
@@ -67,6 +92,7 @@ pub fn blobs_local(root: impl Into<PathBuf>) -> Blobs {
     tracing::info!(root = %root.display(), "using local artifact store");
     Blobs {
         store: Arc::new(LocalArtifactStore::new(root)),
+        tools: Vec::new(),
     }
 }
 
@@ -83,6 +109,7 @@ pub async fn blobs_postgres(
     tracing::info!(bytes_root = %bytes_root.display(), "connected to postgres artifact store (bytes on local fs)");
     Ok(Blobs {
         store: Arc::new(store),
+        tools: Vec::new(),
     })
 }
 
@@ -100,13 +127,33 @@ pub async fn blobs_postgres_or_local(database_url: &str, bytes_root: impl Into<P
     }
 }
 
+#[derive(Clone)]
 pub struct Blobs {
     store: Arc<dyn ArtifactStore>,
+    tools: Vec<Arc<dyn Tool>>,
 }
 
 impl Blobs {
     /// The store itself — for the server's artifact endpoints.
     pub fn store(&self) -> Arc<dyn ArtifactStore> {
         self.store.clone()
+    }
+
+    pub fn tools(&self) -> &[Arc<dyn Tool>] {
+        &self.tools
+    }
+
+    pub fn tool(mut self, tool: impl Tool + 'static) -> Self {
+        self.tools.push(Arc::new(tool));
+        self
+    }
+}
+
+impl From<Arc<dyn ArtifactStore>> for Blobs {
+    fn from(store: Arc<dyn ArtifactStore>) -> Self {
+        Self {
+            store,
+            tools: Vec::new(),
+        }
     }
 }

@@ -1,34 +1,58 @@
 use std::sync::Arc;
 
 use runic_agent::RunContext;
-use runic_substrate::{SessionStore, StoreSubSession, attach_persister};
+use runic_substrate::{Blobs, Sessions, StoreSubSession, attach_persister};
 use tracing::Instrument;
 
 use super::{Agent, AgentOutput};
 
 pub struct Session {
-    agent: Agent,
-    store: Arc<dyn SessionStore>,
+    sessions: Sessions,
     tenant: String,
     session_id: String,
+    blobs: Option<Blobs>,
+}
+
+pub fn session(
+    sessions: impl Into<Sessions>,
+    tenant: impl Into<String>,
+    thread: impl Into<String>,
+) -> Session {
+    Session::new(sessions, tenant, thread)
 }
 
 impl Session {
     pub fn new(
-        agent: Agent,
-        store: Arc<dyn SessionStore>,
-        tenant: String,
-        session_id: String,
+        sessions: impl Into<Sessions>,
+        tenant: impl Into<String>,
+        thread: impl Into<String>,
     ) -> Self {
         Self {
-            agent,
-            store,
-            tenant,
-            session_id,
+            sessions: sessions.into(),
+            tenant: tenant.into(),
+            session_id: thread.into(),
+            blobs: None,
         }
     }
 
-    pub async fn run(&self, message: impl Into<String>) -> anyhow::Result<AgentOutput> {
+    pub fn artifacts(mut self, blobs: impl Into<Blobs>) -> Self {
+        self.blobs = Some(blobs.into());
+        self
+    }
+
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    pub fn thread(&self) -> &str {
+        &self.session_id
+    }
+
+    pub async fn run(
+        &self,
+        agent: &Agent,
+        message: impl Into<String>,
+    ) -> anyhow::Result<AgentOutput> {
         let message = message.into();
         let span = tracing::info_span!(
             "session_run",
@@ -46,8 +70,27 @@ impl Session {
                 events = tracing::field::Empty,
             );
             let mut runner = async {
-                let mut runner = self.agent.build(&self.tenant, &self.session_id).await?;
-                let entries = self.store.read_tail(&self.tenant, &self.session_id).await?;
+                let mut bound = agent.clone();
+                if let Some(blobs) = &self.blobs {
+                    if blobs.tools().is_empty() {
+                        tracing::warn!(
+                            tenant = %self.tenant,
+                            thread = %self.session_id,
+                            "artifact store has no tool: spilled tool output and uploads are \
+                             written but the model cannot read them back — add \
+                             `.tool(ReadThreadArtifactTool::new(store))`"
+                        );
+                    }
+                    bound = bound.artifacts(blobs.store());
+                    bound = bound.tools(blobs.tools().iter().cloned());
+                }
+                bound = bound.tools(self.sessions.tools().iter().cloned());
+                let mut runner = bound.build(&self.tenant, &self.session_id).await?;
+                let entries = self
+                    .sessions
+                    .store()
+                    .read_tail(&self.tenant, &self.session_id)
+                    .await?;
                 tracing::Span::current().record("events", entries.len());
                 for entry in entries {
                     runner.state_mut().fold(&entry.event.lift());
@@ -58,12 +101,12 @@ impl Session {
             .await?;
 
             let (emitter, handle) = attach_persister(
-                self.store.clone(),
+                self.sessions.store(),
                 self.tenant.clone(),
                 self.session_id.clone(),
             );
             let sub_session = Arc::new(StoreSubSession::new(
-                self.store.clone(),
+                self.sessions.store(),
                 self.tenant.clone(),
                 self.session_id.clone(),
             ));

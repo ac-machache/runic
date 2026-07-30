@@ -6,40 +6,9 @@ publish = false
 
 [workspace]
 
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "harness"
-path = "src/main.rs"
-
 [dependencies]
 runic = { path = "../../crates/runic", features = ["mistral"] }
-runic-agent = { path = "../../crates/runic-agent" }
-runic-provider = { path = "../../crates/runic-provider", features = ["mistral"] }
-runic-tool = { path = "../../crates/runic-tool" }
-runic-hook = { path = "../../crates/runic-hook" }
-runic-state = { path = "../../crates/runic-state" }
-runic-serve = { path = "../../crates/runic-serve" }
-runic-skills = { path = "../../crates/runic-skills" }
-runic-substrate = { path = "../../crates/runic-substrate", features = ["postgres"] }
-runic-types = { path = "../../crates/runic-types" }
 
 anyhow = "1"
-async-trait = "0.1"
-serde_json = "1"
-tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
-runic-substrate = { path = "../../crates/runic-substrate" }
-runic-state = { path = "../../crates/runic-state" }
-runic-types = { path = "../../crates/runic-types" }
-proptest = "1"
-tokio = { version = "1", features = ["full", "test-util"] }
-tower = { version = "0.5", features = ["util"] }
-axum = "0.8"
-http-body-util = "0.1"
-chrono = "0.4"

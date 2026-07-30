@@ -12,29 +12,61 @@ use runic_tool::{Tool, ToolContext, ToolResult};
 use crate::{Error, SessionStore};
 
 const DEFAULT_LIMIT: usize = 10;
+const DEFAULT_NAME: &str = "search_chats";
+const DEFAULT_DESCRIPTION: &str = "Search your OTHER past conversations (same tenant) by keywords — a \
+     textual full-text search, not semantic. Returns matching snippets and \
+     their session ids so you can open one. Query syntax supports quoted \
+     \"exact phrases\", OR, and -exclusion.";
 
 /// Searches conversations via a [`SessionStore`].
 pub struct SearchChatsTool {
     store: Arc<dyn SessionStore>,
+    name: String,
+    description: String,
+    default_limit: usize,
+    max_limit: Option<usize>,
 }
 
 impl SearchChatsTool {
     pub fn new(store: Arc<dyn SessionStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            name: DEFAULT_NAME.to_string(),
+            description: DEFAULT_DESCRIPTION.to_string(),
+            default_limit: DEFAULT_LIMIT,
+            max_limit: None,
+        }
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn description(mut self, text: impl Into<String>) -> Self {
+        self.description = text.into();
+        self
+    }
+
+    pub fn default_limit(mut self, hits: usize) -> Self {
+        self.default_limit = hits.max(1);
+        self
+    }
+
+    pub fn max_limit(mut self, hits: usize) -> Self {
+        self.max_limit = Some(hits.max(1));
+        self
     }
 }
 
 #[async_trait]
 impl Tool for SearchChatsTool {
     fn name(&self) -> &str {
-        "search_chats"
+        &self.name
     }
 
     fn description(&self) -> &str {
-        "Search your OTHER past conversations (same tenant) by keywords — a \
-         textual full-text search, not semantic. Returns matching snippets and \
-         their session ids so you can open one. Query syntax supports quoted \
-         \"exact phrases\", OR, and -exclusion."
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -64,13 +96,17 @@ impl Tool for SearchChatsTool {
             .unwrap_or("")
             .trim();
         if query.is_empty() {
-            return Ok(ToolResult::error("search_chats requires a non-empty query"));
+            return Ok(ToolResult::error(format!(
+                "{} requires a non-empty query",
+                self.name
+            )));
         }
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
-            .map(|n| usize::try_from(n).unwrap_or(DEFAULT_LIMIT))
-            .unwrap_or(DEFAULT_LIMIT);
+            .map(|n| usize::try_from(n).unwrap_or(self.default_limit))
+            .unwrap_or(self.default_limit)
+            .min(self.max_limit.unwrap_or(usize::MAX));
 
         // Tenant + current session come from the run context, not the model.
         let tenant = &ctx.user_id;

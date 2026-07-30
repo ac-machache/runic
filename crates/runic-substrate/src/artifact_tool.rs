@@ -12,14 +12,37 @@ use runic_tool::{Tool, ToolContext, ToolResult};
 
 use crate::ArtifactStore;
 
+const DEFAULT_NAME: &str = "read_thread_artifact";
+const DEFAULT_DESCRIPTION: &str = "Read an artifact stored in THIS thread: a file the user uploaded, or a \
+     large tool output that was stored instead of shown inline (its result \
+     says 'full output stored as artifact <id>'). You cannot read arbitrary \
+     local paths, URLs, or artifacts from other threads — the artifact_id \
+     must come from a reference in this thread.";
+
 /// Reads a thread's own artifacts via an [`ArtifactStore`].
 pub struct ReadThreadArtifactTool {
     artifacts: Arc<dyn ArtifactStore>,
+    name: String,
+    description: String,
 }
 
 impl ReadThreadArtifactTool {
     pub fn new(artifacts: Arc<dyn ArtifactStore>) -> Self {
-        Self { artifacts }
+        Self {
+            artifacts,
+            name: DEFAULT_NAME.to_string(),
+            description: DEFAULT_DESCRIPTION.to_string(),
+        }
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn description(mut self, text: impl Into<String>) -> Self {
+        self.description = text.into();
+        self
     }
 }
 
@@ -37,15 +60,11 @@ fn is_textual(mime: &str) -> bool {
 #[async_trait]
 impl Tool for ReadThreadArtifactTool {
     fn name(&self) -> &str {
-        "read_thread_artifact"
+        &self.name
     }
 
     fn description(&self) -> &str {
-        "Read an artifact stored in THIS thread: a file the user uploaded, or a \
-         large tool output that was stored instead of shown inline (its result \
-         says 'full output stored as artifact <id>'). You cannot read arbitrary \
-         local paths, URLs, or artifacts from other threads — the artifact_id \
-         must come from a reference in this thread."
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

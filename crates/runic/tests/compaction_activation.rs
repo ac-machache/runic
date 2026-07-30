@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use proptest::prelude::*;
 use runic::ability::ability;
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::{Agent, Composer};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
 use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -181,7 +181,6 @@ async fn run_survival_case(ability_count: usize) -> Result<(), TestCaseError> {
                 .max_context_tokens(2000)
                 .keep_recent(3),
         ),
-        Runtime::new(),
     );
     let mut agent = composer.build("tenant", "session").await.unwrap();
 
@@ -288,7 +287,6 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
                 .max_context_tokens(2000)
                 .keep_recent(3),
         ),
-        Runtime::new(),
     );
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("load billing").await.unwrap();
@@ -321,7 +319,6 @@ async fn a_rebuild_after_compaction_restores_full_ability_fidelity() {
                     marker: "ran:billing".to_string(),
                 }),
         ),
-        Runtime::new(),
     )
     .activated(ids)
     .build("tenant", "session")

@@ -8,7 +8,7 @@ use std::{
 
 use super::scope::PendingHooks;
 use super::view::{AbilityView, SkillInfo, SubagentInfo};
-use super::{Agent, ComposeError, Composition, Runtime};
+use super::{Agent, ComposeError, Composition};
 use crate::ability::{Ability, ActivationPolicy, BuildCtx, Layer, ToAbility};
 use crate::artifact_resolver::ArtifactResolver;
 use crate::deferred::{
@@ -94,15 +94,13 @@ fn into_catalog(mut catalogs: Vec<Arc<dyn ToolCatalog>>) -> Option<Arc<dyn ToolC
 
 pub struct Composer {
     agent: Agent,
-    runtime: Runtime,
     activated: HashSet<String>,
 }
 
 impl Composer {
-    pub fn new(agent: Agent, runtime: Runtime) -> Self {
+    pub fn new(agent: Agent) -> Self {
         Self {
             agent,
-            runtime,
             activated: HashSet::new(),
         }
     }
@@ -356,14 +354,7 @@ impl Composer {
             composition.tool_catalogs.push(registry);
         }
 
-        let mut tools = composition.tools;
-        if let Some(store) = &self.runtime.artifact_store
-            && !tools.iter().any(|t| t.name() == "read_thread_artifact")
-        {
-            tools.push(Arc::new(runic_substrate::ReadThreadArtifactTool::new(
-                store.clone(),
-            )));
-        }
+        let tools = composition.tools;
         let mut agent_builder = runic_agent::Runner::builder(provider.clone(), tenant, session)
             .config(self.agent.llm.config().clone())
             .system_prompt(composition.prompt.render());
@@ -386,7 +377,7 @@ impl Composer {
                 agent_builder = agent_builder.scoped_write_hook(hook, scope.clone());
             }
         }
-        if let Some(store) = &self.runtime.artifact_store {
+        if let Some(store) = &self.agent.artifact_store {
             agent_builder = agent_builder
                 .media_resolver(Arc::new(ArtifactResolver::new(
                     store.clone(),
@@ -395,7 +386,7 @@ impl Composer {
                 )))
                 .artifact_spill(Arc::new(crate::SpillToArtifacts::new(store.clone())));
         }
-        if let Some(bytes) = self.runtime.auto_spill_over {
+        if let Some(bytes) = self.agent.auto_spill_over {
             agent_builder = agent_builder.auto_spill_over(bytes);
         }
         if let Some(catalog) = into_catalog(composition.tool_catalogs) {

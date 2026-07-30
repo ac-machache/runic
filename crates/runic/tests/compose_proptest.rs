@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use proptest::prelude::*;
 use runic::Llm;
 use runic::ability::ability;
-use runic::composer::{Agent, Composer, Runtime};
+use runic::composer::{Agent, Composer};
 use runic::subagent::Subagent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
@@ -205,7 +205,7 @@ async fn run_gating_case(specs: Vec<AbilitySpec>) -> Result<(), TestCaseError> {
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    let composer = Composer::new(def, Runtime::new()).activated(activated_ids);
+    let composer = Composer::new(def).activated(activated_ids);
 
     let mut agent = composer.build("tenant", "session").await.unwrap();
     let system_prompt = agent.state().system_prompt.clone();
@@ -419,7 +419,7 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
         .filter(|spec| spec.activated)
         .map(|spec| spec.id.clone())
         .collect();
-    let composer = Composer::new(def, Runtime::new()).activated(activated_ids);
+    let composer = Composer::new(def).activated(activated_ids);
 
     let mut agent = composer.build("tenant", "session").await.unwrap();
     agent.run("go").await.unwrap();

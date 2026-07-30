@@ -1,46 +1,49 @@
-use std::time::Duration;
+use std::io::Write;
+use std::sync::Arc;
 
-use runic_e2e_harness::dummy_agents;
-use runic_serve::{RedisBroker, ServeConfig, WorkerConfig, serve};
+use runic::builtin::{CalculatorTool, SystemTimeTool};
+use runic::composer::Agent;
+use runic::state::{AgentEvent, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[derive(Debug)]
+struct Printer;
+
+impl Emitter for Printer {
+    fn emit(&self, event: AgentEvent) {
+        println!("  {event:?}");
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,runic_serve=info,runic_agent=info".into()),
-        )
-        .init();
+    let agent = Agent::new(runic::llm("mistral:mistral-small-latest")?)
+        .tool(CalculatorTool)
+        .tool(SystemTimeTool);
 
-    let database_url =
-        std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8920);
-    let instance = std::env::var("INSTANCE_ID").unwrap_or_else(|_| "harness".into());
-    let redis_url = std::env::var("REDIS_URL").ok();
-    let real_mistral = std::env::var("RUNIC_REAL_MISTRAL").is_ok();
+    println!("runic repl — every line is a fresh agent, no history. ctrl-d to exit.\n");
 
-    let sessions = runic_substrate::sessions_postgres(&database_url).await?;
-    let blobs = runic_substrate::blobs_postgres_or_local(&database_url, "/tmp/runic-blobs").await;
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        print!("› ");
+        std::io::stdout().flush()?;
 
-    let mut config = ServeConfig::new(sessions.store(), blobs.store(), dummy_agents(real_mistral))
-        .workers(WorkerConfig {
-            max_concurrent_runs: 8,
-            poll_every: Duration::from_millis(500),
-        });
+        let Some(line) = lines.next_line().await? else {
+            break;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if matches!(line, "exit" | "quit") {
+            break;
+        }
 
-    let use_redis = if let Some(url) = &redis_url {
-        let broker = RedisBroker::connect(url).await?;
-        config = config.broker(broker.clone()).nudge(broker);
-        true
-    } else {
-        false
-    };
+        match agent.stream(line, Arc::new(Printer)).await {
+            Ok(answer) => println!("\n{}\n", answer.text),
+            Err(error) => println!("\nerror: {error}\n"),
+        }
+    }
 
-    let addr = format!("0.0.0.0:{port}");
-    tracing::info!(%instance, %addr, redis = use_redis, real_mistral, "harness up");
-    serve(config, addr).await?;
     Ok(())
 }

@@ -72,14 +72,12 @@ async fn session_run_carries_session_and_hydrate_spans() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    agent
-        .session(store.clone(), "tenant", "thread-1")
-        .run("first message")
+    runic::session(store.clone(), "tenant", "thread-1")
+        .run(&agent, "first message")
         .await
         .unwrap();
-    agent
-        .session(store.clone(), "tenant", "thread-1")
-        .run("second message")
+    runic::session(store.clone(), "tenant", "thread-1")
+        .run(&agent, "second message")
         .await
         .unwrap();
 

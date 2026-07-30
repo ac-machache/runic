@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::Llm;
 use runic::ability::{Ability, AbilityDescriptor, BuildCtx, ToAbility, ability};
-use runic::composer::{Agent, ComposeError, Composer, Runtime};
+use runic::composer::{Agent, ComposeError, Composer};
 use runic::deferred::{ability_activated_key, activated_ability_ids};
 use runic::subagent::Subagent;
 use runic_hook::{HookLifecycle, HookOutcome, WriteHook};
@@ -524,7 +524,6 @@ async fn a_rebuild_with_the_activated_id_merges_the_full_bundle() {
                 }))
                 .hook(Arc::new(MarkerHook(fired.clone()))),
         ),
-        Runtime::new(),
     )
     .activated(["billing"])
     .build("alice", "s1")
@@ -548,7 +547,6 @@ async fn the_catalog_lists_only_unloaded_abilities() {
         Agent::new(Llm::new(provider, "test-model"))
             .with(DeferredAbility::new("billing", "invoices"))
             .with(DeferredAbility::new("shipping", "labels and tracking")),
-        Runtime::new(),
     )
     .activated(["billing"])
     .build("alice", "s1")
@@ -642,7 +640,6 @@ async fn deferred_subagents_are_gated_until_load_then_delegatable_in_the_same_ru
     let mut agent = Composer::new(
         Agent::new(Llm::new(provider, "test-model"))
             .with(DeferredAbility::new("ops", "operations crew").subagent(worker_def())),
-        Runtime::new(),
     )
     .build("alice", "s1")
     .await
@@ -688,7 +685,6 @@ async fn a_rebuild_with_the_activated_id_ungates_skills_and_subagents() {
                 .skill(crm)
                 .subagent(worker_def()),
         ),
-        Runtime::new(),
     )
     .activated(["crm-pack"])
     .build("alice", "s1")
@@ -721,7 +717,6 @@ async fn a_loaded_ability_bounces_after_a_rebuild_with_its_id() {
         Agent::new(Llm::new(provider, "test-model"))
             .with(DeferredAbility::new("billing", "invoices"))
             .with(DeferredAbility::new("shipping", "labels")),
-        Runtime::new(),
     )
     .activated(["billing"])
     .build("alice", "s1")

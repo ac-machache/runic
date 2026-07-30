@@ -18,6 +18,7 @@ pub struct Agent {
     pub(crate) abilities: Vec<Arc<dyn ToAbility>>,
     pub(crate) output_schema: Option<serde_json::Value>,
     pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
+    pub(crate) auto_spill_over: Option<usize>,
 }
 
 impl Agent {
@@ -28,6 +29,7 @@ impl Agent {
             abilities: Vec::new(),
             output_schema: None,
             artifact_store: None,
+            auto_spill_over: None,
         }
     }
 
@@ -85,6 +87,11 @@ impl Agent {
         self
     }
 
+    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
+        self.auto_spill_over = Some(bytes);
+        self
+    }
+
     pub fn output<T: schemars::JsonSchema>(self) -> Self {
         let schema = runic_agent::schema_of::<T>();
         self.output_schema(schema)
@@ -100,11 +107,7 @@ impl Agent {
         tenant: &str,
         session: &str,
     ) -> Result<runic_agent::Runner, super::ComposeError> {
-        let mut runtime = super::Runtime::new();
-        if let Some(store) = &self.artifact_store {
-            runtime = runtime.artifacts(store.clone());
-        }
-        super::Composer::new(self.clone(), runtime)
+        super::Composer::new(self.clone())
             .build(tenant, session)
             .await
     }
@@ -130,15 +133,6 @@ impl Agent {
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(AgentOutput::from_run(&runner, outcome))
-    }
-
-    pub fn session(
-        &self,
-        store: Arc<dyn runic_substrate::SessionStore>,
-        tenant: impl Into<String>,
-        session: impl Into<String>,
-    ) -> super::Session {
-        super::Session::new(self.clone(), store, tenant.into(), session.into())
     }
 }
 

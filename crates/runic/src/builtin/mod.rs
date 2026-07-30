@@ -9,6 +9,8 @@ mod tool_limit;
 mod weather;
 pub mod web;
 
+pub use runic_substrate::{ReadThreadArtifactTool, SearchChatsTool};
+
 pub use calc::CalculatorTool;
 pub use compaction::{Compaction, DEFAULT_SUMMARY_GUIDANCE};
 pub use composio::ComposioTool;

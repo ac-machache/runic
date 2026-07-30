@@ -101,7 +101,7 @@ pub struct RunContext {
     /// Optional steering channel: text pushed here is injected into the
     /// conversation as a user message at the start of the next turn.
     pub steering: Option<mpsc::UnboundedReceiver<String>>,
-    pub events: Option<Arc<dyn Emitter>>,
+    pub events: Vec<Arc<dyn Emitter>>,
     pub sub_session: Option<Arc<dyn SubSession>>,
     /// Optional agent name recorded on the run's `RunStart` event.
     pub agent: Option<String>,
@@ -147,7 +147,7 @@ impl RunContext {
         self
     }
     pub fn with_events(mut self, events: Arc<dyn Emitter>) -> Self {
-        self.events = Some(events);
+        self.events.push(events);
         self
     }
     pub fn with_sub_session(mut self, sub_session: Arc<dyn SubSession>) -> Self {

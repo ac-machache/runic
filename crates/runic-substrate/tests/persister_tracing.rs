@@ -101,8 +101,7 @@ async fn persist_batch_span_carries_a_retry_count_and_no_error_on_eventual_succe
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let (emitter, handle) =
-        attach_persister(store.clone(), "tenant".into(), "thread-1".into(), None);
+    let (emitter, handle) = attach_persister(store.clone(), "tenant".into(), "thread-1".into());
     for i in 0..3 {
         emitter.emit(message_event(i).lift());
     }
@@ -136,8 +135,7 @@ async fn persist_batch_span_marks_otel_error_when_the_store_never_recovers() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let (emitter, handle) =
-        attach_persister(store.clone(), "tenant".into(), "thread-1".into(), None);
+    let (emitter, handle) = attach_persister(store.clone(), "tenant".into(), "thread-1".into());
     emitter.emit(message_event(0).lift());
     assert!(handle.flush().await.is_err());
 

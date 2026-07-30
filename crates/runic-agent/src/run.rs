@@ -66,8 +66,8 @@ impl Runner {
             .provider
             .take()
             .map(|p| std::mem::replace(&mut self.provider, p));
-        if let Some(emitter) = ctx.events.take() {
-            self.state.set_emitter(Some(emitter));
+        if !ctx.events.is_empty() {
+            self.state.set_emitters(std::mem::take(&mut ctx.events));
         }
         self.sub_session = ctx.sub_session.take();
         let cancel = ctx.cancel.take();
@@ -112,7 +112,7 @@ impl Runner {
             }
         }
 
-        self.state.set_emitter(None);
+        self.state.set_emitters(Vec::new());
         self.sub_session = None;
         if let Some(p) = saved_provider {
             self.provider = p;

@@ -378,7 +378,7 @@ impl Runner {
 
     fn tool_context(&self, run_id: &str) -> ToolContext {
         let tool_emitter = std::sync::Arc::new(crate::ToolEmitter {
-            sink: self.state.emitter(),
+            sinks: self.state.emitters().to_vec(),
             fold: self.fold_tx.clone(),
         });
         let mut ctx = ToolContext::new(&self.state.user_id, &self.state.session_id, run_id)

@@ -14,13 +14,13 @@ impl Emitter for ChannelEmitter {
 
 #[derive(Debug, Clone)]
 pub struct ToolEmitter {
-    pub sink: Option<Arc<dyn Emitter>>,
+    pub sinks: Vec<Arc<dyn Emitter>>,
     pub fold: mpsc::UnboundedSender<AgentEvent>,
 }
 
 impl Emitter for ToolEmitter {
     fn emit(&self, event: AgentEvent) {
-        if let Some(sink) = &self.sink {
+        for sink in &self.sinks {
             sink.emit(event.clone());
         }
         let _ = self.fold.send(event);

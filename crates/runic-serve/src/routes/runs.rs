@@ -287,14 +287,14 @@ pub async fn create_and_stream_run(
     let persist = begun.persist.clone();
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     let stateless = state.agents.factory(&agent_name)?.stateless();
-    let (agent_tx, _tee) = crate::registry::tee_events(
+    let durable = crate::registry::DurableEvents::emitter(
         (!stateless).then(|| begun.persist_sink.clone()),
         begun.events_tx.clone(),
-        Some(evt_tx),
     );
 
     run_ctx = run_ctx
-        .with_events(agent_tx)
+        .with_events(durable)
+        .with_events(std::sync::Arc::new(runic_agent::ChannelEmitter(evt_tx)))
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
@@ -499,13 +499,12 @@ pub async fn wait_run(
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     let stateless = state.agents.factory(&agent_name)?.stateless();
-    let (agent_tx, tee) = crate::registry::tee_events(
+    let durable = crate::registry::DurableEvents::emitter(
         (!stateless).then(|| begun.persist_sink.clone()),
         begun.events_tx.clone(),
-        None,
     );
     run_ctx = run_ctx
-        .with_events(agent_tx)
+        .with_events(durable)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
@@ -582,7 +581,6 @@ pub async fn wait_run(
                 Ok(_) => (RunStatus::Success, None),
                 Err(e) => (RunStatus::Error, Some(e.to_string())),
             };
-            let _ = tee.await;
             flush_persist(&begun.persist).await;
             if let Err(e) = store
                 .set_run_status(&run_id, status, error.as_deref())
@@ -708,13 +706,12 @@ pub async fn background_run(
     let mut begun = state.runs.begin(&tenant, &thread_id, &run_id).await?;
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     let stateless = state.agents.factory(&agent_name)?.stateless();
-    let (agent_tx, tee) = crate::registry::tee_events(
+    let durable = crate::registry::DurableEvents::emitter(
         (!stateless).then(|| begun.persist_sink.clone()),
         begun.events_tx.clone(),
-        None,
     );
     run_ctx = run_ctx
-        .with_events(agent_tx)
+        .with_events(durable)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&agent_name)
@@ -792,7 +789,6 @@ pub async fn background_run(
             if let Err(e) = &outcome {
                 tracing::error!(%tenant, %thread_id, %run_id, error = %e, "background run failed");
             }
-            let _ = tee.await;
             flush_persist(&begun.persist).await;
             if let Err(e) = store
                 .set_run_status(&run_id, status, error.as_deref())

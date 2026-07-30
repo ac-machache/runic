@@ -15,6 +15,10 @@ use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
 use crate::tenant::Tenant;
 
+fn thread(state: &AppState, tenant: &str, thread_id: &str) -> runic::Session {
+    runic::session((tenant, thread_id)).store(state.session_store.clone())
+}
+
 /// One thread's current shape.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Thread {
@@ -407,9 +411,8 @@ pub async fn get_thread(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Thread>, ServeError> {
-    let meta = state
-        .session_store
-        .session_meta(&tenant, &thread_id)
+    let meta = thread(&state, &tenant, &thread_id)
+        .meta()
         .await?
         .ok_or(ServeError::ThreadNotFound { id: thread_id })?;
     Ok(Json(thread_from_meta(tenant, meta)))
@@ -438,26 +441,17 @@ pub async fn update_thread(
     Json(req): Json<UpdateThreadRequest>,
 ) -> Result<Json<Thread>, ServeError> {
     // PATCH updates an existing thread; it never creates one.
-    if state
-        .session_store
-        .session_meta(&tenant, &thread_id)
-        .await?
-        .is_none()
-    {
+    let thread = thread(&state, &tenant, &thread_id);
+    if thread.meta().await?.is_none() {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     }
 
     if let Some(label) = req.label {
-        let label = normalize_label(label);
-        state
-            .session_store
-            .set_label(&tenant, &thread_id, label.as_deref())
-            .await?;
+        thread.set_label(normalize_label(label).as_deref()).await?;
     }
 
-    let meta = state
-        .session_store
-        .session_meta(&tenant, &thread_id)
+    let meta = thread
+        .meta()
         .await?
         .ok_or_else(|| ServeError::Internal("thread metadata vanished".into()))?;
     Ok(Json(thread_from_meta(tenant, meta)))
@@ -486,22 +480,13 @@ pub async fn thread_events(
     Path(thread_id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<ThreadEventsResponse>, ServeError> {
-    if state
-        .session_store
-        .session_meta(&tenant, &thread_id)
-        .await?
-        .is_none()
-    {
+    let thread = thread(&state, &tenant, &thread_id);
+    if thread.meta().await?.is_none() {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     }
 
     let limit = q.limit.clamp(1, 1000);
-    let mut stored = state
-        .session_store
-        .read_after_limited(&tenant, &thread_id, q.after_seq, limit + 1)
-        .await?;
-    let has_more = stored.len() > limit;
-    stored.truncate(limit);
+    let (stored, has_more) = thread.events_after(q.after_seq, limit).await?;
     let next_after_seq = stored.last().map(|s| s.seq);
     let events = stored
         .into_iter()
@@ -543,31 +528,15 @@ pub async fn thread_state(
 ) -> Result<Json<ThreadStateResponse>, ServeError> {
     // Authoritative label + event_count from metadata; 404 if the thread was
     // never created (don't build a warm agent for a phantom thread).
-    let Some(meta) = state
-        .session_store
-        .session_meta(&tenant, &thread_id)
-        .await?
-    else {
+    let thread = thread(&state, &tenant, &thread_id);
+    let Some(meta) = thread.meta().await? else {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     };
     let label = meta.label;
     let event_count = meta.event_count;
 
-    let stored = state
-        .session_store
-        .read_tail(&tenant, &thread_id)
-        .await
-        .unwrap_or_default();
-    let mut messages: Vec<runic_types::Message> = Vec::new();
-    let mut stats = runic_state::ThreadStats::default();
-    for entry in stored {
-        stats.fold(&entry.event.lift());
-        match entry.event {
-            runic_substrate::SessionEvent::Message { msg, .. } => messages.push(msg),
-            runic_substrate::SessionEvent::StateSnapshot { messages: snap, .. } => messages = snap,
-            _ => {}
-        }
-    }
+    let messages = thread.messages().await.unwrap_or_default();
+    let stats = thread.stats().await.unwrap_or_default();
     let busy = state.runs.is_busy(&tenant, &thread_id).await;
     Ok(Json(ThreadStateResponse {
         thread_id,
@@ -626,27 +595,7 @@ pub async fn delete_thread(
 }
 
 async fn delete_tree(state: &AppState, tenant: &str, thread_id: &str) -> Result<(), ServeError> {
-    let mut pending = vec![thread_id.to_string()];
-    let mut order = Vec::new();
-    while let Some(session) = pending.pop() {
-        let mut cursor = None;
-        loop {
-            let page = state
-                .session_store
-                .list_sessions_page(
-                    tenant,
-                    cursor,
-                    500,
-                    runic_substrate::SessionScope::ChildrenOf(session.clone()),
-                )
-                .await?;
-            let Some(last) = page.last() else { break };
-            cursor = Some((last.last_activity, last.session_id.clone()));
-            pending.extend(page.into_iter().map(|m| m.session_id));
-        }
-        order.push(session);
-    }
-
+    let order = thread(state, tenant, thread_id).descendants().await?;
     let descendant_count = order.len() - 1;
     let mut artifact_count = 0usize;
     for session in order.iter().rev() {

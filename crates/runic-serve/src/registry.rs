@@ -548,27 +548,35 @@ pub fn spawn_lease_reaper(
     })
 }
 
-pub fn tee_events(
+/// Persistence and the resumable broadcast off one projection — they want the
+/// same `SessionEvent`, and projecting twice per event would be waste. A live
+/// SSE stream subscribes separately, as a plain `ChannelEmitter`.
+#[derive(Debug)]
+pub struct DurableEvents {
     persist: Option<PersistDrain>,
     broadcast: broadcast::Sender<Arc<SessionEvent>>,
-    sse: Option<mpsc::UnboundedSender<AgentEvent>>,
-) -> (Arc<dyn runic_state::Emitter>, tokio::task::JoinHandle<()>) {
-    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let handle = tokio::spawn(async move {
-        while let Some(ae) = agent_rx.recv().await {
-            if let Some(se) = runic_substrate::project(&ae) {
-                let shared = Arc::new(se);
-                if let Some(sink) = &persist {
-                    sink.send(shared.clone());
-                }
-                let _ = broadcast.send(shared);
-            }
-            if let Some(sse) = &sse {
-                let _ = sse.send(ae);
-            }
+}
+
+impl DurableEvents {
+    pub fn emitter(
+        persist: Option<PersistDrain>,
+        broadcast: broadcast::Sender<Arc<SessionEvent>>,
+    ) -> Arc<dyn runic_state::Emitter> {
+        Arc::new(Self { persist, broadcast })
+    }
+}
+
+impl runic_state::Emitter for DurableEvents {
+    fn emit(&self, event: AgentEvent) {
+        let Some(se) = runic_substrate::project(&event) else {
+            return;
+        };
+        let shared = Arc::new(se);
+        if let Some(persist) = &self.persist {
+            persist.send(shared.clone());
         }
-    });
-    (Arc::new(runic_agent::ChannelEmitter(agent_tx)), handle)
+        let _ = self.broadcast.send(shared);
+    }
 }
 
 #[cfg(test)]

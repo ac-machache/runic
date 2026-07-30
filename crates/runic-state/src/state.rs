@@ -110,7 +110,7 @@ pub struct AgentState {
     pub config: serde_json::Map<String, serde_json::Value>,
 
     #[serde(skip, default)]
-    emitter: Option<Arc<dyn Emitter>>,
+    emitters: Vec<Arc<dyn Emitter>>,
 
     #[serde(skip, default)]
     messages: Vec<Message>,
@@ -133,7 +133,7 @@ impl AgentState {
             current_run_id: None,
             runtime: RunTimeContext::default(),
             config: serde_json::Map::new(),
-            emitter: None,
+            emitters: Vec::new(),
             messages: Vec::new(),
         }
     }
@@ -142,19 +142,31 @@ impl AgentState {
         self.config.get(key)
     }
 
-    pub fn set_emitter(&mut self, emitter: Option<Arc<dyn Emitter>>) {
-        self.emitter = emitter;
+    pub fn set_emitters(&mut self, emitters: Vec<Arc<dyn Emitter>>) {
+        self.emitters = emitters;
     }
 
-    pub fn emitter(&self) -> Option<Arc<dyn Emitter>> {
-        self.emitter.clone()
+    pub fn set_emitter(&mut self, emitter: Option<Arc<dyn Emitter>>) {
+        self.emitters = emitter.into_iter().collect();
+    }
+
+    pub fn emitters(&self) -> &[Arc<dyn Emitter>] {
+        &self.emitters
+    }
+
+    pub fn observed(&self) -> bool {
+        !self.emitters.is_empty()
     }
 
     pub fn emit(&mut self, ev: AgentEvent) {
         self.fold(&ev);
-        if let Some(emitter) = &self.emitter {
-            emitter.emit(ev);
+        let Some((last, rest)) = self.emitters.split_last() else {
+            return;
+        };
+        for emitter in rest {
+            emitter.emit(ev.clone());
         }
+        last.emit(ev);
     }
 
     pub fn fold(&mut self, ev: &AgentEvent) {

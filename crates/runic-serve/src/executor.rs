@@ -117,13 +117,12 @@ async fn execute_queued_run(
     };
     let steering_rx = std::mem::replace(&mut begun.steering_rx, mpsc::unbounded_channel().1);
     let stateless = factory.stateless();
-    let (agent_tx, tee) = crate::registry::tee_events(
+    let durable = crate::registry::DurableEvents::emitter(
         (!stateless).then(|| begun.persist_sink.clone()),
         begun.events_tx.clone(),
-        None,
     );
     run_ctx = run_ctx
-        .with_events(agent_tx)
+        .with_events(durable)
         .with_cancel(begun.cancel.clone())
         .with_steering(steering_rx)
         .with_agent(&record.agent)
@@ -186,7 +185,6 @@ async fn execute_queued_run(
     if let Err(e) = &outcome {
         tracing::error!(%tenant, %thread_id, %run_id, error = %e, "queued run failed");
     }
-    let _ = tee.await;
     flush_persist(&begun.persist).await;
     if let Err(e) = store
         .set_run_status(&run_id, status, error.as_deref())

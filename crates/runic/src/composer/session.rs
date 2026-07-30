@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
+use runic_state::ThreadStats;
 use runic_substrate::{
-    Blobs, SessionMeta, SessionStore, Sessions, StoreSubSession, StoredEvent, attach_persister,
-    replay_messages,
+    Blobs, SessionMeta, SessionScope, SessionStore, Sessions, StoreSubSession, StoredEvent,
+    attach_persister, replay_messages,
 };
+
+use runic_substrate::Result as StoreResult;
+
+const CHILD_PAGE: usize = 500;
 use runic_types::Message;
 use tracing::Instrument;
 
@@ -76,49 +81,126 @@ impl Session {
         self.thread.id()
     }
 
-    fn require_store(&self) -> anyhow::Result<Arc<dyn SessionStore>> {
+    fn require_store(&self) -> StoreResult<Arc<dyn SessionStore>> {
         match &self.sessions {
             Some(sessions) => Ok(sessions.store()),
-            None => anyhow::bail!("this session has no store: call .store(sessions)"),
+            None => Err(runic_substrate::Error::Unsupported(
+                "this session has no store: call .store(sessions)".into(),
+            )),
         }
     }
 
-    pub async fn meta(&self) -> anyhow::Result<Option<SessionMeta>> {
+    pub async fn meta(&self) -> StoreResult<Option<SessionMeta>> {
         let Some(sessions) = &self.sessions else {
             return Ok(None);
         };
-        Ok(sessions
+        sessions
             .store()
             .session_meta(self.tenant(), self.thread())
-            .await?)
+            .await
     }
 
-    pub async fn label(&self) -> anyhow::Result<Option<String>> {
+    pub async fn label(&self) -> StoreResult<Option<String>> {
         Ok(self.meta().await?.and_then(|meta| meta.label))
     }
 
-    pub async fn set_label(&self, label: Option<&str>) -> anyhow::Result<()> {
+    pub async fn set_label(&self, label: Option<&str>) -> StoreResult<()> {
         self.require_store()?
             .set_label(self.tenant(), self.thread(), label)
             .await?;
         Ok(())
     }
 
-    pub async fn events(&self) -> anyhow::Result<Vec<StoredEvent>> {
+    pub async fn events(&self) -> StoreResult<Vec<StoredEvent>> {
         let Some(sessions) = &self.sessions else {
             return Ok(Vec::new());
         };
-        Ok(sessions.store().read(self.tenant(), self.thread()).await?)
+        sessions.store().read(self.tenant(), self.thread()).await
     }
 
-    pub async fn messages(&self) -> anyhow::Result<Vec<Message>> {
+    /// A page of the log after `after_seq`, plus whether more remain.
+    pub async fn events_after(
+        &self,
+        after_seq: u64,
+        limit: usize,
+    ) -> StoreResult<(Vec<StoredEvent>, bool)> {
+        let Some(sessions) = &self.sessions else {
+            return Ok((Vec::new(), false));
+        };
+        let mut page = sessions
+            .store()
+            .read_after_limited(self.tenant(), self.thread(), after_seq, limit + 1)
+            .await?;
+        let has_more = page.len() > limit;
+        page.truncate(limit);
+        Ok((page, has_more))
+    }
+
+    /// Folded from the tail: a `StateSnapshot` carries the rolled-up totals and
+    /// replaces rather than accumulates, so reading past one changes nothing.
+    pub async fn stats(&self) -> StoreResult<ThreadStats> {
+        let Some(sessions) = &self.sessions else {
+            return Ok(ThreadStats::default());
+        };
+        let stored = sessions
+            .store()
+            .read_tail(self.tenant(), self.thread())
+            .await?;
+        let mut stats = ThreadStats::default();
+        for entry in stored {
+            stats.fold(&entry.event.lift());
+        }
+        Ok(stats)
+    }
+
+    /// This thread and every thread delegated from it, parents before children.
+    /// Reverse it to delete: a child outliving its parent is an orphan, the
+    /// other way round is just a partial delete.
+    pub async fn descendants(&self) -> StoreResult<Vec<String>> {
+        let store = self.require_store()?;
+        let mut pending = vec![self.thread().to_string()];
+        let mut order: Vec<String> = Vec::new();
+        while let Some(thread) = pending.pop() {
+            let mut cursor = None;
+            loop {
+                let page = store
+                    .list_sessions_page(
+                        self.tenant(),
+                        cursor,
+                        CHILD_PAGE,
+                        SessionScope::ChildrenOf(thread.clone()),
+                    )
+                    .await?;
+                let Some(last) = page.last() else { break };
+                cursor = Some((last.last_activity, last.session_id.clone()));
+                let exhausted = page.len() < CHILD_PAGE;
+                pending.extend(page.into_iter().map(|meta| meta.session_id));
+                if exhausted {
+                    break;
+                }
+            }
+            order.push(thread);
+        }
+        Ok(order)
+    }
+
+    pub async fn delete_tree(&self) -> StoreResult<usize> {
+        let store = self.require_store()?;
+        let order = self.descendants().await?;
+        for thread in order.iter().rev() {
+            store.delete_session(self.tenant(), thread).await?;
+        }
+        Ok(order.len())
+    }
+
+    pub async fn messages(&self) -> StoreResult<Vec<Message>> {
         let Some(sessions) = &self.sessions else {
             return Ok(Vec::new());
         };
-        Ok(replay_messages(sessions.store().as_ref(), self.tenant(), self.thread()).await?)
+        replay_messages(sessions.store().as_ref(), self.tenant(), self.thread()).await
     }
 
-    pub async fn delete(&self) -> anyhow::Result<()> {
+    pub async fn delete(&self) -> StoreResult<()> {
         self.require_store()?
             .delete_session(self.tenant(), self.thread())
             .await?;
@@ -181,9 +263,8 @@ impl Session {
                 sessions.store(),
                 self.tenant().to_string(),
                 self.thread().to_string(),
-                ctx.events.take(),
             );
-            ctx.events = Some(emitter);
+            ctx.events.push(emitter);
             if ctx.sub_session.is_none() {
                 ctx.sub_session = Some(Arc::new(StoreSubSession::new(
                     sessions.store(),

@@ -22,7 +22,7 @@ impl Runner {
         let span = tracing::info_span!(
             "provider_call",
             gen_ai.request.model = %request.model,
-            streaming = self.state.emitter().is_some(),
+            streaming = self.state.observed(),
             messages = request.messages.len(),
             tools = request.tools.len(),
             gen_ai.usage.input_tokens = tracing::field::Empty,
@@ -69,7 +69,7 @@ impl Runner {
                 "unresolved artifact reference {id} reached the model call"
             )));
         }
-        if self.state.emitter().is_some() {
+        if self.state.observed() {
             self.call_model_streaming(request).await
         } else {
             self.call_model_complete(request).await
@@ -83,17 +83,17 @@ impl Runner {
     ) -> Result<(CompletionResponse, String), AgentError> {
         let (se_tx, mut se_rx) = mpsc::channel::<StreamEvent>(64);
         let provider = self.provider.clone();
-        let sink = self.state.emitter();
+        let sinks = self.state.emitters().to_vec();
 
         let forward = async move {
             while let Some(ev) = se_rx.recv().await {
-                let Some(sink) = &sink else { continue };
-                match ev {
-                    StreamEvent::TextDelta { text } => sink.emit(AgentEvent::TextDelta(text)),
-                    StreamEvent::ThinkingDelta { text } => {
-                        sink.emit(AgentEvent::ThinkingDelta(text))
-                    }
-                    _ => {}
+                let delta = match ev {
+                    StreamEvent::TextDelta { text } => AgentEvent::TextDelta(text),
+                    StreamEvent::ThinkingDelta { text } => AgentEvent::ThinkingDelta(text),
+                    _ => continue,
+                };
+                for sink in &sinks {
+                    sink.emit(delta.clone());
                 }
             }
         };

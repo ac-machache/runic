@@ -55,7 +55,7 @@ async fn agent_runs_standalone_and_stateless() {
     let provider = ScriptedProvider::new(vec![text("hello there")]);
     let agent = Agent::new(Llm::new(provider, "test-model"));
 
-    let out = agent.run("hi").await.unwrap();
+    let out = agent.run(Input::text("hi")).await.unwrap();
     assert_eq!(out.text, "hello there");
     assert_eq!(out.outcome.total_turns, 1);
 }

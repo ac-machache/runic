@@ -5,6 +5,7 @@ use runic_hook::WriteHook;
 use runic_skills::SkillSet;
 use runic_tool::Tool;
 
+use crate::Input;
 use crate::ability::{Ability, ToAbility};
 use crate::subagent::Subagent;
 
@@ -97,24 +98,11 @@ impl Agent {
             .await
     }
 
-    pub async fn run(&self, message: impl Into<String>) -> anyhow::Result<AgentOutput> {
+    pub async fn run(&self, input: Input) -> anyhow::Result<AgentOutput> {
+        let (message, ctx) = input.split();
         let mut runner = self.build("local", "local").await?;
         let outcome = runner
-            .run(message.into())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(AgentOutput::from_run(&runner, outcome))
-    }
-
-    pub async fn stream(
-        &self,
-        message: impl Into<String>,
-        events: Arc<dyn runic_state::Emitter>,
-    ) -> anyhow::Result<AgentOutput> {
-        let mut runner = self.build("local", "local").await?;
-        let ctx = runic_agent::RunContext::new().with_events(events);
-        let outcome = runner
-            .run_with(message.into(), ctx)
+            .run_message_with(message, ctx)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(AgentOutput::from_run(&runner, outcome))

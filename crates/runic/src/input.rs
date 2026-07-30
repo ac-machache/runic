@@ -66,7 +66,7 @@ impl Input {
     }
 
     pub fn events(mut self, events: Arc<dyn Emitter>) -> Self {
-        self.ctx.events = Some(events);
+        self.ctx.events.push(events);
         self
     }
 

@@ -127,15 +127,10 @@ pub fn spawn_persist(
 #[derive(Debug)]
 struct PersistEmitter {
     drain: PersistDrain,
-    sink: Option<Arc<dyn Emitter>>,
 }
 
 impl Emitter for PersistEmitter {
     fn emit(&self, event: AgentEvent) {
-        // Ahead of `project`, so an observer still sees the deltas the log drops.
-        if let Some(sink) = &self.sink {
-            sink.emit(event.clone());
-        }
         if let Some(se) = project(&event) {
             self.drain.send(Arc::new(se));
         }
@@ -146,11 +141,10 @@ pub fn attach(
     store: Arc<dyn SessionStore>,
     tenant: String,
     session_id: String,
-    sink: Option<Arc<dyn Emitter>>,
 ) -> (Arc<dyn Emitter>, Arc<PersistHandle>) {
     let (drain, pipe, handle) = persist_channel();
     spawn_persist(pipe, store, tenant, session_id, RetryPolicy::bounded());
-    let emitter: Arc<dyn Emitter> = Arc::new(PersistEmitter { drain, sink });
+    let emitter: Arc<dyn Emitter> = Arc::new(PersistEmitter { drain });
     (emitter, handle)
 }
 
@@ -250,8 +244,7 @@ impl SubSession for StoreSubSession {
             agent,
             uuid::Uuid::new_v4().simple()
         );
-        let (emitter, handle) =
-            attach(self.store.clone(), self.tenant.clone(), child.clone(), None);
+        let (emitter, handle) = attach(self.store.clone(), self.tenant.clone(), child.clone());
         Ok(Box::new(StoreSubRun {
             store: self.store.clone(),
             tenant: self.tenant.clone(),

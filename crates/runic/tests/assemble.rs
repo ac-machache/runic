@@ -11,7 +11,6 @@ use runic::subagent::Subagent;
 use runic::{Compaction, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
-use runic_substrate::sessions_memory;
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -156,9 +155,6 @@ async fn registers_enabled_tool_surfaces() {
         .tool(WebFetchTool::new(WebClient::new()))
         .tool(WeatherTool::new())
         .tool(WeatherHistoryTool::new())
-        .tool(runic_substrate::SearchChatsTool::new(
-            sessions_memory().store(),
-        ))
         .with(ability("skills").skills(Arc::new(SkillSet::load_dir("", skill_dir.path()).await)))
         .with(Delegation::new([Subagent::new(
             "researcher",
@@ -187,7 +183,6 @@ async fn registers_enabled_tool_surfaces() {
         "Questionnaire",
         "skill_view",
         "delegate",
-        "search_chats",
     ] {
         assert!(
             names.iter().any(|name| name == expected),

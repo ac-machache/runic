@@ -189,7 +189,7 @@ impl WriteHook for HookProbe {
         &self,
         _state: &mut AgentState,
         call: &ToolCall,
-        result: &ToolResult,
+        result: &mut ToolResult,
     ) -> HookOutcome {
         self.log
             .lock()

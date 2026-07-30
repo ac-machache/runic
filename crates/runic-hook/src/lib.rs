@@ -122,7 +122,7 @@ pub trait WriteHook: Send + Sync {
         &self,
         _state: &mut AgentState,
         _call: &ToolCall,
-        _result: &ToolResult,
+        _result: &mut ToolResult,
     ) -> HookOutcome {
         HookOutcome::Noop
     }

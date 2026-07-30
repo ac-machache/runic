@@ -8,15 +8,6 @@ use std::sync::Arc;
 
 pub use runic_types::ProvenanceSource;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Retention {
-    #[default]
-    Full,
-    Summary(serde_json::Value),
-    Artifact,
-}
-
 /// Result of executing a tool. Tool-level failures are reported in-band via
 /// `Failed`; the `Result` wrapper is for unexpected execution errors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,8 +17,6 @@ pub enum ToolResult {
         output: serde_json::Value,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         provenance: Vec<ProvenanceSource>,
-        #[serde(default)]
-        retention: Retention,
     },
     Failed {
         message: String,
@@ -42,7 +31,6 @@ impl ToolResult {
         Self::Done {
             output: output.into(),
             provenance: Vec::new(),
-            retention: Retention::Full,
         }
     }
 
@@ -59,20 +47,6 @@ impl ToolResult {
     pub fn with_provenance(mut self, sources: Vec<ProvenanceSource>) -> Self {
         if let Self::Done { provenance, .. } = &mut self {
             *provenance = sources;
-        }
-        self
-    }
-
-    pub fn with_summary(mut self, summary: impl Into<serde_json::Value>) -> Self {
-        if let Self::Done { retention, .. } = &mut self {
-            *retention = Retention::Summary(summary.into());
-        }
-        self
-    }
-
-    pub fn spill(mut self) -> Self {
-        if let Self::Done { retention, .. } = &mut self {
-            *retention = Retention::Artifact;
         }
         self
     }
@@ -445,22 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_and_provenance_builders_only_touch_done() {
-        let summarized = ToolResult::ok("full text").with_summary("short");
-        assert!(matches!(
-            summarized,
-            ToolResult::Done { retention: Retention::Summary(ref s), .. } if s == "short"
-        ));
-
-        let spilled = ToolResult::ok("big").spill();
-        assert!(matches!(
-            spilled,
-            ToolResult::Done {
-                retention: Retention::Artifact,
-                ..
-            }
-        ));
-
+    fn the_provenance_builder_only_touches_done() {
         let sourced = ToolResult::ok("answer")
             .with_provenance(vec![ProvenanceSource::new("s1", "https://e.com")]);
         assert!(matches!(
@@ -468,7 +427,8 @@ mod tests {
             ToolResult::Done { ref provenance, .. } if provenance.len() == 1
         ));
 
-        let failed = ToolResult::error("x").with_summary("ignored").spill();
+        let failed = ToolResult::error("x")
+            .with_provenance(vec![ProvenanceSource::new("s1", "https://e.com")]);
         assert_eq!(failed, ToolResult::error("x"));
     }
 

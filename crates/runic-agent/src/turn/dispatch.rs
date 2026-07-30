@@ -6,15 +6,16 @@
 //! 2. **Execute**: substituted results are filled directly; `parallelizable`
 //!    tools run concurrently via `join_all`; the rest run serially. Every
 //!    dispatch is timeout-wrapped.
-//! 3. **Collect**: `after_tool` hooks fire, and all results are assembled into
-//!    a single user-role message appended to the log.
+//! 3. **Collect**: per call, `after_tool` hooks fire — and may rewrite the
+//!    result — before it is persisted, emitted, and assembled into a single
+//!    user-role message appended to the log.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use runic_hook::HookOutcome;
 use runic_state::HookLifecycle;
-use runic_tool::{Retention, Tool, ToolContext, ToolResult};
+use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{
     ContentBlock, Message, ProvenanceSource, ToolCall, ToolResultPayload, sanitize_provenance,
 };
@@ -23,7 +24,6 @@ use tracing::Instrument;
 use runic_state::ToolStatus;
 
 use crate::loop_guard::Verdict;
-use crate::spill;
 use crate::turn::hooks::outcome_kind;
 use crate::{AgentError, PendingDeferral, Runner};
 
@@ -238,15 +238,7 @@ impl Runner {
 
         // ── Phase 3: collect + after_tool hooks ────────────────────────────
         let mut blocks: Vec<ContentBlock> = Vec::with_capacity(plans.len());
-        let suspending = results.iter().any(|dispatched| {
-            matches!(
-                dispatched,
-                Some(Dispatched {
-                    result: ToolResult::Deferred { .. },
-                    ..
-                })
-            )
-        });
+        let mut aborted: Option<AgentError> = None;
         for (i, plan) in plans.iter().enumerate() {
             let call = plan.call();
             let dispatched = results[i].take().expect("every plan produced a result");
@@ -258,11 +250,7 @@ impl Runner {
 
             let mut result = match result {
                 ToolResult::Deferred { payload } => {
-                    self.pending_deferral = Some(PendingDeferral {
-                        call_id: call.id.clone(),
-                        tool: call.name.clone(),
-                        payload,
-                    });
+                    self.defer(call, payload);
                     continue;
                 }
                 other => other,
@@ -282,7 +270,47 @@ impl Runner {
                 result.push_notes(&notes);
             }
 
-            let (payload, provenance) = self.persist_result(&call.id, &result, suspending).await;
+            // The tool already ran, so there's no call to make in-band: both
+            // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
+            // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
+            // The halt is deferred until every result is recorded, so history
+            // never keeps a `tool_use` without its `tool_result`.
+            if aborted.is_none() {
+                for scoped in self.write_hooks.clone() {
+                    let h = &scoped.hook;
+                    if !h.points().contains(&HookLifecycle::AfterTool) {
+                        continue;
+                    }
+                    if !scoped.fires_for(call) {
+                        continue;
+                    }
+                    let outcome = h.after_tool(&mut self.state, call, &mut result).await;
+                    tracing::debug!(
+                        hook_name = h.name(),
+                        hook_kind = "write",
+                        point = "after_tool",
+                        priority = h.priority(),
+                        outcome = outcome_kind(&outcome),
+                        "hook fired"
+                    );
+                    self.record_write_hook(run_id, h.name(), HookLifecycle::AfterTool, &outcome);
+                    if matches!(outcome, HookOutcome::Stop | HookOutcome::Cancel(_)) {
+                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");
+                        aborted = Some(AgentError::HookStop);
+                        break;
+                    }
+                }
+            }
+            if aborted.is_none() {
+                aborted = self.fire_read_after_tool(run_id, call, &result).await.err();
+            }
+
+            if let ToolResult::Deferred { payload } = result {
+                self.defer(call, payload);
+                continue;
+            }
+
+            let (payload, provenance) = Self::persist_result(&result);
 
             self.emit(crate::AgentEvent::ToolFinished {
                 run_id: run_id.to_string(),
@@ -306,39 +334,6 @@ impl Runner {
                 is_error: result.is_error(),
                 provenance,
             });
-
-            // The tool already ran, so there's no call to make in-band: both
-            // `Stop` and `Cancel` halt the run (matching every non-`before_tool`
-            // seam). Only `before_tool`'s `Cancel` is the skip-and-continue case.
-            for scoped in self.write_hooks.clone() {
-                let h = &scoped.hook;
-                if !h.points().contains(&HookLifecycle::AfterTool) {
-                    continue;
-                }
-                if !scoped.fires_for(call) {
-                    continue;
-                }
-                let outcome = h.after_tool(&mut self.state, call, &result).await;
-                tracing::debug!(
-                    hook_name = h.name(),
-                    hook_kind = "write",
-                    point = "after_tool",
-                    priority = h.priority(),
-                    outcome = outcome_kind(&outcome),
-                    "hook fired"
-                );
-                self.record_write_hook(run_id, h.name(), HookLifecycle::AfterTool, &outcome);
-                match outcome {
-                    HookOutcome::Stop | HookOutcome::Cancel(_) => {
-                        tracing::warn!(run_id, tool = %call.name, hook = h.name(), "hook stopped run after tool");
-                        return Err(AgentError::HookStop);
-                    }
-                    HookOutcome::Noop
-                    | HookOutcome::Continue
-                    | HookOutcome::SubstituteToolResult(_) => {}
-                }
-            }
-            self.fire_read_after_tool(run_id, call, &result).await?;
         }
 
         let errors = blocks
@@ -353,141 +348,31 @@ impl Runner {
             "tool batch completed"
         );
         self.push_tool_results(Message::user_with_blocks(blocks), run_id);
-        Ok(())
+        match aborted {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
-    async fn persist_result(
-        &mut self,
-        call_id: &str,
-        result: &ToolResult,
-        suspending: bool,
-    ) -> (ToolResultPayload, Vec<ProvenanceSource>) {
+    fn defer(&mut self, call: &ToolCall, payload: serde_json::Value) {
+        self.pending_deferral = Some(PendingDeferral {
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            payload,
+        });
+    }
+
+    fn persist_result(result: &ToolResult) -> (ToolResultPayload, Vec<ProvenanceSource>) {
         match result {
-            ToolResult::Done {
-                output,
-                provenance,
-                retention,
-            } => {
-                let sanitized = sanitize_provenance(provenance.clone());
-                let payload = match retention {
-                    Retention::Full => match self.config.auto_spill_over {
-                        Some(threshold) => {
-                            let (text, mime) = spill::serialize_output(output);
-                            if text.len() > threshold {
-                                let preview = spill::preview_of(&text);
-                                self.spill_output(call_id, output, text, mime, preview, suspending)
-                                    .await
-                            } else {
-                                ToolResultPayload::Inline(output.clone())
-                            }
-                        }
-                        None => ToolResultPayload::Inline(output.clone()),
-                    },
-                    Retention::Summary(summary) if suspending && self.spill.is_some() => {
-                        let (text, mime) = spill::serialize_output(output);
-                        let (summary_text, _) = spill::serialize_output(summary);
-                        let preview = spill::preview_of(&summary_text);
-                        self.spill_output(call_id, output, text, mime, preview, true)
-                            .await
-                    }
-                    Retention::Summary(summary) => {
-                        if suspending {
-                            tracing::warn!(
-                                call_id,
-                                "batch suspends with no artifact store; the summarized output cannot survive resume"
-                            );
-                        } else {
-                            self.transient_tool_outputs
-                                .entry(call_id.to_string())
-                                .or_default()
-                                .push(output.clone());
-                        }
-                        ToolResultPayload::Inline(self.bounded_inline(summary.clone()))
-                    }
-                    Retention::Artifact => {
-                        let (text, mime) = spill::serialize_output(output);
-                        let preview = spill::preview_of(&text);
-                        self.spill_output(call_id, output, text, mime, preview, suspending)
-                            .await
-                    }
-                };
-                (payload, sanitized)
-            }
+            ToolResult::Done { output, provenance } => (
+                ToolResultPayload::Inline(output.clone()),
+                sanitize_provenance(provenance.clone()),
+            ),
             ToolResult::Failed { message } => (
-                ToolResultPayload::Inline(
-                    self.bounded_inline(serde_json::Value::String(message.clone())),
-                ),
+                ToolResultPayload::Inline(serde_json::Value::String(message.clone())),
                 Vec::new(),
             ),
             ToolResult::Deferred { .. } => (ToolResultPayload::default(), Vec::new()),
-        }
-    }
-
-    fn bounded_inline(&self, value: serde_json::Value) -> serde_json::Value {
-        let Some(threshold) = self.config.auto_spill_over else {
-            return value;
-        };
-        let (text, _) = spill::serialize_output(&value);
-        if text.len() <= threshold {
-            return value;
-        }
-        let marker = format!("…[truncated from {} bytes]", text.len());
-        if threshold <= marker.len() {
-            return serde_json::Value::String(
-                spill::truncate_to_bytes(&marker, threshold).to_string(),
-            );
-        }
-        serde_json::Value::String(format!(
-            "{}{marker}",
-            spill::truncate_to_bytes(&text, threshold - marker.len())
-        ))
-    }
-
-    async fn spill_output(
-        &mut self,
-        call_id: &str,
-        output: &serde_json::Value,
-        text: String,
-        mime: &'static str,
-        preview: String,
-        suspending: bool,
-    ) -> ToolResultPayload {
-        let stored = match &self.spill {
-            Some(store) => {
-                store
-                    .store(
-                        &self.state.user_id,
-                        &self.state.session_id,
-                        mime,
-                        text.as_bytes(),
-                    )
-                    .await
-            }
-            None => Err(anyhow::anyhow!(
-                "no artifact store wired for tool-output spill"
-            )),
-        };
-        if !suspending {
-            self.transient_tool_outputs
-                .entry(call_id.to_string())
-                .or_default()
-                .push(output.clone());
-        }
-        match stored {
-            Ok(artifact) => ToolResultPayload::Artifact {
-                id: artifact.id,
-                preview,
-                mime: artifact.mime,
-                size: artifact.size,
-            },
-            Err(err) => {
-                tracing::warn!(call_id, error = %err, "tool-output spill failed; persisting a summary note instead");
-                let err_text = err.to_string();
-                ToolResultPayload::Inline(self.bounded_inline(serde_json::Value::String(format!(
-                    "[artifact spill failed: {}] {preview}",
-                    spill::truncate_to_bytes(&err_text, 200)
-                ))))
-            }
         }
     }
 

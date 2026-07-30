@@ -21,6 +21,7 @@ uuid = { workspace = true }
 runic-state = { path = "../runic-state" }
 runic-types = { path = "../runic-types" }
 runic-tool = { path = "../runic-tool" }
+runic-hook = { path = "../runic-hook" }
 
 # Optional Postgres backends (session store + artifact metadata index). Off by
 # default so memory/local-fs users don't pull sqlx + a Postgres/TLS stack.

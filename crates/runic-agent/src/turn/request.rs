@@ -19,30 +19,7 @@ fn spec_to_def(spec: ToolSpec) -> ToolDefinition {
 
 impl Runner {
     pub(crate) fn prepare_request(&mut self) -> CompletionRequest {
-        let mut messages = self.state.messages_for_provider().to_vec();
-
-        // Swap summarized tool results for their full output, for this call
-        // only; the overlay is consumed here.
-        let mut overlay = std::mem::take(&mut self.transient_tool_outputs);
-        if !overlay.is_empty() {
-            for msg in messages.iter_mut().rev() {
-                let runic_types::MessageContent::Blocks(blocks) = &mut msg.content else {
-                    continue;
-                };
-                for block in blocks.iter_mut().rev() {
-                    if let runic_types::ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        ..
-                    } = block
-                        && let Some(queue) = overlay.get_mut(tool_use_id)
-                        && let Some(full) = queue.pop()
-                    {
-                        *content = runic_types::ToolResultPayload::Inline(full);
-                    }
-                }
-            }
-        }
+        let messages = self.state.messages_for_provider().to_vec();
 
         let mut tools: Vec<ToolDefinition> = self
             .tools

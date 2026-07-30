@@ -2,14 +2,10 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic::ability::ability;
-use runic::builtin::SearchChatsTool;
 use runic::tool::{Tool, ToolContext, ToolResult};
 use runic::{Agent, Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::{
-    ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
-};
+use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -104,16 +100,16 @@ async fn session_persists_and_hydrates_across_runs() {
     );
 }
 
-struct SpillingTool;
+struct Probe(&'static str);
 
 #[async_trait]
-impl Tool for SpillingTool {
+impl Tool for Probe {
     fn name(&self) -> &str {
-        "dump"
+        self.0
     }
 
     fn description(&self) -> &str {
-        "returns a large blob that spills to the artifact store"
+        "a tool a store handed to the agent"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -125,35 +121,8 @@ impl Tool for SpillingTool {
         _args: serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::ok("x".repeat(4096)).spill())
+        Ok(ToolResult::ok("ran"))
     }
-}
-
-#[tokio::test]
-async fn a_threads_artifact_store_receives_the_spilled_tool_output() {
-    let provider = ScriptedProvider::new(vec![
-        call("c1", "dump", serde_json::json!({})),
-        text("done"),
-    ]);
-    let artifacts: Arc<MemoryArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-
-    let agent =
-        Agent::new(Llm::new(provider, "test-model")).with(ability("dumper").tool(SpillingTool));
-
-    let out = runic::session(store.clone(), "tenant", "t1")
-        .artifacts(artifacts.clone() as Arc<dyn ArtifactStore>)
-        .run(&agent, "go")
-        .await
-        .unwrap();
-    assert_eq!(out.text, "done");
-
-    let listed = artifacts.list("tenant", "t1").await.unwrap();
-    assert_eq!(
-        listed.len(),
-        1,
-        "the spilled tool output landed in the artifact store"
-    );
 }
 
 fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionResponse {
@@ -270,42 +239,6 @@ async fn one_thread_can_be_answered_by_different_agents() {
 }
 
 #[tokio::test]
-async fn the_threads_artifact_store_wins_over_the_agents() {
-    let thread_artifacts: Arc<MemoryArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let agent_artifacts: Arc<MemoryArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-
-    let provider = ScriptedProvider::new(vec![
-        call("c1", "dump", serde_json::json!({})),
-        text("done"),
-    ]);
-    let agent = Agent::new(Llm::new(provider, "test-model"))
-        .with(ability("dumper").tool(SpillingTool))
-        .artifacts(agent_artifacts.clone() as Arc<dyn ArtifactStore>);
-
-    runic::session(store.clone(), "tenant", "t1")
-        .artifacts(thread_artifacts.clone() as Arc<dyn ArtifactStore>)
-        .run(&agent, "go")
-        .await
-        .unwrap();
-
-    assert_eq!(
-        thread_artifacts.list("tenant", "t1").await.unwrap().len(),
-        1,
-        "the spill landed in the thread's store"
-    );
-    assert!(
-        agent_artifacts
-            .list("tenant", "t1")
-            .await
-            .unwrap()
-            .is_empty(),
-        "…and not in the store the agent was carrying, so two agents on one \
-         thread cannot write refs the other cannot resolve"
-    );
-}
-
-#[tokio::test]
 async fn a_store_contributes_only_the_tools_it_was_given() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
@@ -319,13 +252,10 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     let offered = provider.requests().last().unwrap().tools.len();
     assert_eq!(offered, 0, "a store with no tools contributes nothing");
 
-    // Same store, a search tool handed to it.
+    // Same store, a tool handed to it.
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let sessions = runic::substrate::sessions_memory();
-    let searchable = sessions
-        .clone()
-        .tool(SearchChatsTool::new(sessions.store()));
+    let searchable = runic::substrate::sessions_memory().tool(Probe("search_chats"));
     runic::session(searchable, "tenant", "t1")
         .run(&agent, "go")
         .await
@@ -343,29 +273,6 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
 }
 
 #[tokio::test]
-async fn a_store_tool_can_be_renamed_and_reworded() {
-    let provider = ScriptedProvider::new(vec![text("done")]);
-    let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-
-    let sessions = runic::substrate::sessions_memory();
-    let configured = sessions.clone().tool(
-        SearchChatsTool::new(sessions.store())
-            .name("find_tickets")
-            .description("Search this customer's earlier tickets.")
-            .default_limit(3),
-    );
-
-    runic::session(configured, "tenant", "t1")
-        .run(&agent, "go")
-        .await
-        .unwrap();
-
-    let spec = provider.requests().last().unwrap().tools[0].clone();
-    assert_eq!(spec.name, "find_tickets");
-    assert_eq!(spec.description, "Search this customer's earlier tickets.");
-}
-
-#[tokio::test]
 async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
@@ -378,14 +285,12 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
         .unwrap();
     assert!(
         provider.requests().last().unwrap().tools.is_empty(),
-        "a store is wired for spill and media, but grants no tool on its own"
+        "a store is wired for media resolution, but grants no tool on its own"
     );
 
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let readable = blobs
-        .clone()
-        .tool(runic::builtin::ReadThreadArtifactTool::new(blobs.store()));
+    let readable = blobs.clone().tool(Probe("read_thread_artifact"));
 
     runic::session(runic::substrate::sessions_memory(), "tenant", "t1")
         .artifacts(readable)
@@ -402,4 +307,58 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
         .map(|spec| spec.name.clone())
         .collect();
     assert_eq!(names, vec!["read_thread_artifact".to_string()]);
+}
+
+struct Stamp(&'static str);
+
+#[async_trait]
+impl runic::hook::WriteHook for Stamp {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn points(&self) -> &'static [runic::hook::HookLifecycle] {
+        &[runic::hook::HookLifecycle::BeforeModel]
+    }
+    async fn before_model(
+        &self,
+        _state: &mut runic::state::AgentState,
+        request: &mut CompletionRequest,
+    ) -> runic::hook::HookOutcome {
+        request.messages.push(runic_types::Message::user(self.0));
+        runic::hook::HookOutcome::Continue
+    }
+}
+
+#[tokio::test]
+async fn a_store_contributes_the_hooks_it_was_given() {
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
+
+    let sessions = runic::substrate::sessions_memory().hook(Stamp("from-sessions"));
+    let blobs = runic::substrate::blobs_memory().hook(Stamp("from-blobs"));
+
+    runic::session(sessions, "tenant", "t1")
+        .artifacts(blobs)
+        .run(&agent, "go")
+        .await
+        .unwrap();
+
+    let stamps: Vec<String> = provider
+        .requests()
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .filter_map(|message| match &message.content {
+            runic_types::MessageContent::Text(text) if text.starts_with("from-") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stamps,
+        vec!["from-blobs".to_string(), "from-sessions".to_string()],
+        "both stores' hooks must reach the loop"
+    );
 }

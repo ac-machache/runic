@@ -1,8 +1,8 @@
 //! `ArtifactStore` contract — guarantees every artifact backend must uphold.
 //!
 //! Note on scope: `get`/`head`/`delete` are keyed by opaque id alone (no
-//! tenant) by design — tenant ownership is enforced one layer up
-//! (`ReadThreadArtifactTool`). So isolation here is asserted through `list`,
+//! tenant) by design — tenant ownership is enforced one layer up, by whatever
+//! tool reads artifacts back. So isolation here is asserted through `list`,
 //! which IS tenant/session scoped.
 
 use chrono::{Duration, Utc};

@@ -1,6 +1,6 @@
 //! Property tests over the real loop: whatever the (bounded, random) shape of a
 //! run, the structural invariants hold — bookended events, turn/usage counting,
-//! terminal state, and the persistence-summary guarantee.
+//! and terminal state.
 
 mod harness;
 
@@ -10,9 +10,6 @@ use harness::*;
 use proptest::prelude::*;
 use runic_agent::{AgentEvent, CancelToken, RunContext, Runner};
 
-const FULL: &str = "FULL_SECRET_BYTES";
-const SUMMARY: &str = "summary; content omitted from log";
-
 /// Build a run script: `tool_turns` tool calls (distinct args, so the loop
 /// guard never interferes) followed by a final text answer.
 fn script(tool_turns: usize) -> Vec<runic_provider::CompletionResponse> {
@@ -20,7 +17,7 @@ fn script(tool_turns: usize) -> Vec<runic_provider::CompletionResponse> {
     for i in 0..tool_turns {
         responses.push(tool_use_response(
             &format!("c{i}"),
-            "summary_tool",
+            "probe",
             serde_json::json!({ "i": i }),
         ));
     }
@@ -39,15 +36,14 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     /// For any number of tool turns: one RunStart, one RunEnd, the run ends
-    /// non-in-flight, turns/requests/turn-boundaries all agree, and the full
-    /// tool bytes never land in the persisted message view.
+    /// non-in-flight, and turns/requests/turn-boundaries all agree.
     #[test]
     fn loop_structural_invariants(tool_turns in 0usize..8) {
         rt().block_on(async move {
             let provider = Arc::new(ScriptedProvider::new(script(tool_turns)));
             let mut agent = Runner::builder(provider.clone(), "u", "s")
                 .model("test")
-                .tool(Arc::new(SummaryTool::new(FULL, SUMMARY)))
+                .tool(Arc::new(RecordingTool::new("probe", "ran")))
                 .build();
             let mut events = capture_session_events(&mut agent);
 
@@ -80,12 +76,9 @@ proptest! {
             // Terminal: nothing left in flight.
             prop_assert!(agent.state().current_run_id().is_none());
 
-            // Persistence-summary safety holds for every executed tool turn.
+            // Every executed tool call left its result in the transcript.
             let persisted = tool_result_contents(agent.state().messages_for_provider());
-            prop_assert!(!persisted.iter().any(|c| c.contains("SECRET")));
-            if tool_turns > 0 {
-                prop_assert!(persisted.iter().any(|c| c.contains("omitted from log")));
-            }
+            prop_assert_eq!(persisted.len(), tool_turns);
             Ok(())
         })?;
     }

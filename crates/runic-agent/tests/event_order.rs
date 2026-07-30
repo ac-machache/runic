@@ -45,8 +45,8 @@ async fn every_hook_execution_leaves_a_hookfired_entry() {
             "Message",      // assistant (tool_use)
             "TurnEnd",      // turn 1 — durable even if after_model had failed
             "HookFired",    // before_tool (substitute)
+            "HookFired",    // after_tool (continue) — fires before the result is recorded
             "ToolFinished", // substituted disposition (no ToolStarted — never ran)
-            "HookFired",    // after_tool (continue)
             "Message",      // substituted tool result
             "HookFired",    // before_model (continue)
             "HookFired",    // after_model (continue)

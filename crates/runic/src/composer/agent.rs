@@ -18,7 +18,6 @@ pub struct Agent {
     pub(crate) abilities: Vec<Arc<dyn ToAbility>>,
     pub(crate) output_schema: Option<serde_json::Value>,
     pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
-    pub(crate) auto_spill_over: Option<usize>,
 }
 
 impl Agent {
@@ -29,7 +28,6 @@ impl Agent {
             abilities: Vec::new(),
             output_schema: None,
             artifact_store: None,
-            auto_spill_over: None,
         }
     }
 
@@ -84,11 +82,6 @@ impl Agent {
 
     pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
-        self
-    }
-
-    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
-        self.auto_spill_over = Some(bytes);
         self
     }
 

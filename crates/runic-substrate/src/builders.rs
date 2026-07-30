@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use runic_hook::WriteHook;
 use runic_tool::Tool;
 
 use crate::{
@@ -14,10 +15,7 @@ use crate::{
 /// In-memory session store — ephemeral, for tests / single-run use.
 pub fn sessions_memory() -> Sessions {
     tracing::info!("using in-memory session store (ephemeral)");
-    Sessions {
-        store: Arc::new(MemorySessionStore::new()),
-        tools: Vec::new(),
-    }
+    Sessions::from(Arc::new(MemorySessionStore::new()) as Arc<dyn SessionStore>)
 }
 
 /// Connect a Postgres session store (runs migrations). Fails closed: returns the
@@ -26,10 +24,7 @@ pub fn sessions_memory() -> Sessions {
 pub async fn sessions_postgres(database_url: &str) -> crate::Result<Sessions> {
     let store = crate::PostgresSessionStore::connect(database_url).await?;
     tracing::info!("connected to postgres session store");
-    Ok(Sessions {
-        store: Arc::new(store),
-        tools: Vec::new(),
-    })
+    Ok(Sessions::from(Arc::new(store) as Arc<dyn SessionStore>))
 }
 
 /// Dev/demo only: Postgres if it connects, else an ephemeral in-memory store.
@@ -49,6 +44,7 @@ pub async fn sessions_postgres_or_memory(database_url: &str) -> Sessions {
 pub struct Sessions {
     store: Arc<dyn SessionStore>,
     tools: Vec<Arc<dyn Tool>>,
+    hooks: Vec<Arc<dyn WriteHook>>,
 }
 
 impl Sessions {
@@ -64,6 +60,15 @@ impl Sessions {
         self.tools.push(Arc::new(tool));
         self
     }
+
+    pub fn hooks(&self) -> &[Arc<dyn WriteHook>] {
+        &self.hooks
+    }
+
+    pub fn hook(mut self, hook: impl WriteHook + 'static) -> Self {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
 }
 
 impl From<Arc<dyn SessionStore>> for Sessions {
@@ -71,6 +76,7 @@ impl From<Arc<dyn SessionStore>> for Sessions {
         Self {
             store,
             tools: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 }
@@ -80,20 +86,14 @@ impl From<Arc<dyn SessionStore>> for Sessions {
 /// In-memory artifact store — ephemeral, for tests.
 pub fn blobs_memory() -> Blobs {
     tracing::info!("using in-memory artifact store (ephemeral)");
-    Blobs {
-        store: Arc::new(MemoryArtifactStore::new()),
-        tools: Vec::new(),
-    }
+    Blobs::from(Arc::new(MemoryArtifactStore::new()) as Arc<dyn ArtifactStore>)
 }
 
 /// Filesystem artifact store rooted at `root` (bytes + per-session index).
 pub fn blobs_local(root: impl Into<PathBuf>) -> Blobs {
     let root = root.into();
     tracing::info!(root = %root.display(), "using local artifact store");
-    Blobs {
-        store: Arc::new(LocalArtifactStore::new(root)),
-        tools: Vec::new(),
-    }
+    Blobs::from(Arc::new(LocalArtifactStore::new(root)) as Arc<dyn ArtifactStore>)
 }
 
 /// Postgres metadata index + bytes on the local filesystem under `bytes_root`.
@@ -107,10 +107,7 @@ pub async fn blobs_postgres(
     let bytes: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(bytes_root.clone()));
     let store = crate::PostgresArtifactStore::connect(database_url, bytes, "local").await?;
     tracing::info!(bytes_root = %bytes_root.display(), "connected to postgres artifact store (bytes on local fs)");
-    Ok(Blobs {
-        store: Arc::new(store),
-        tools: Vec::new(),
-    })
+    Ok(Blobs::from(Arc::new(store) as Arc<dyn ArtifactStore>))
 }
 
 /// Dev/demo only: Postgres-indexed if it connects, else local-only bytes. Do NOT
@@ -131,6 +128,7 @@ pub async fn blobs_postgres_or_local(database_url: &str, bytes_root: impl Into<P
 pub struct Blobs {
     store: Arc<dyn ArtifactStore>,
     tools: Vec<Arc<dyn Tool>>,
+    hooks: Vec<Arc<dyn WriteHook>>,
 }
 
 impl Blobs {
@@ -147,6 +145,15 @@ impl Blobs {
         self.tools.push(Arc::new(tool));
         self
     }
+
+    pub fn hooks(&self) -> &[Arc<dyn WriteHook>] {
+        &self.hooks
+    }
+
+    pub fn hook(mut self, hook: impl WriteHook + 'static) -> Self {
+        self.hooks.push(Arc::new(hook));
+        self
+    }
 }
 
 impl From<Arc<dyn ArtifactStore>> for Blobs {
@@ -154,6 +161,7 @@ impl From<Arc<dyn ArtifactStore>> for Blobs {
         Self {
             store,
             tools: Vec::new(),
+            hooks: Vec::new(),
         }
     }
 }

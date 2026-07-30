@@ -76,15 +76,16 @@ impl Session {
                         tracing::warn!(
                             tenant = %self.tenant,
                             thread = %self.session_id,
-                            "artifact store has no tool: spilled tool output and uploads are \
-                             written but the model cannot read them back — add \
-                             `.tool(ReadThreadArtifactTool::new(store))`"
+                            "artifact store has no tool: uploads are written but the model \
+                             cannot read them back — hand the store a reader tool"
                         );
                     }
                     bound = bound.artifacts(blobs.store());
                     bound = bound.tools(blobs.tools().iter().cloned());
+                    bound = bound.hooks(blobs.hooks().iter().cloned());
                 }
                 bound = bound.tools(self.sessions.tools().iter().cloned());
+                bound = bound.hooks(self.sessions.hooks().iter().cloned());
                 let mut runner = bound.build(&self.tenant, &self.session_id).await?;
                 let entries = self
                     .sessions

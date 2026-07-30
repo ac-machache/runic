@@ -275,11 +275,19 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
                 quote!(state: #state_ty, call: &mut #types::ToolCall),
                 quote!(self.#body(state, call)),
             ),
-            (HookPoint::AfterTool, _) => (
+            (HookPoint::AfterTool, HookKind::Read) => (
                 quote!(
                     state: #state_ty,
                     call: &#types::ToolCall,
                     result: &#tool::ToolResult
+                ),
+                quote!(self.#body(state, call, result)),
+            ),
+            (HookPoint::AfterTool, HookKind::Write) => (
+                quote!(
+                    state: #state_ty,
+                    call: &#types::ToolCall,
+                    result: &mut #tool::ToolResult
                 ),
                 quote!(self.#body(state, call, result)),
             ),

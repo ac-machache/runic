@@ -60,7 +60,6 @@ impl Runner {
         mut ctx: RunContext,
     ) -> Result<RunOutcome, AgentError> {
         self.state.config = std::mem::take(&mut ctx.config);
-        self.clear_transient_tool_outputs();
         self.pending_deferral = None;
         // Provider override is restored after the run.
         let saved_provider = ctx
@@ -115,15 +114,10 @@ impl Runner {
 
         self.state.set_emitter(None);
         self.sub_session = None;
-        self.clear_transient_tool_outputs();
         if let Some(p) = saved_provider {
             self.provider = p;
         }
         result
-    }
-
-    pub(crate) fn clear_transient_tool_outputs(&mut self) {
-        self.transient_tool_outputs.clear();
     }
 
     /// The turn loop proper.

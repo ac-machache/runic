@@ -6,7 +6,7 @@
 //! - **the session event log** — [`SessionStore`] persists every
 //!   [`SessionEvent`](runic_state::SessionEvent) append-only and replays it
 //!   back into an [`AgentState`](runic_state::AgentState). Plus full-text
-//!   [`SessionStore::search`] over conversations (the [`SearchChatsTool`]).
+//!   [`SessionStore::search`] over conversations.
 //! - **media artifacts** — [`ArtifactStore`] holds the bytes (a user's PDF, a
 //!   tool's screenshot); a message references them by id, the log stays lean.
 //!
@@ -17,7 +17,6 @@
 //! `PostgresArtifactStore`. This is the durable layer — separate from the
 //! agent's working filesystem (`runic-filesystem`).
 
-mod artifact_tool;
 mod artifacts;
 mod builders;
 mod event;
@@ -27,12 +26,10 @@ mod persister;
 mod replay;
 mod sessions;
 pub mod timeline;
-mod tool;
 
 #[cfg(feature = "postgres")]
 mod postgres;
 
-pub use artifact_tool::ReadThreadArtifactTool;
 pub use artifacts::{Artifact, ArtifactSource, ArtifactStore};
 pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
 pub use event::{SessionEvent, project};
@@ -48,7 +45,6 @@ pub use sessions::{
     StoredEvent,
 };
 pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
-pub use tool::SearchChatsTool;
 
 #[cfg(feature = "postgres")]
 pub use builders::{

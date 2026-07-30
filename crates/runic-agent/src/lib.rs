@@ -27,7 +27,6 @@ mod emit;
 mod external;
 mod llm;
 pub(crate) mod run;
-mod spill;
 mod turn;
 
 pub mod loop_guard;
@@ -37,7 +36,6 @@ pub use emit::{ChannelEmitter, ToolEmitter};
 pub use external::{ReminderQueue, TasksSnapshot};
 pub use llm::{Llm, LlmOutput, schema_of};
 pub use runic_state::{AgentEvent, RunOutcome};
-pub use spill::{SPILL_PREVIEW_CHARS, SpilledArtifact, ToolOutputSpill};
 
 /// Default hard cap on model turns per run — a backstop against runaway loops
 /// (the tunable policy lives in [`loop_guard`] and hooks).
@@ -188,7 +186,6 @@ pub struct AgentConfig {
     pub graceful_max_turns: bool,
     pub output_schema: Option<serde_json::Value>,
     pub thinking: Option<runic_provider::ThinkingConfig>,
-    pub auto_spill_over: Option<usize>,
 }
 
 impl Default for AgentConfig {
@@ -202,7 +199,6 @@ impl Default for AgentConfig {
             graceful_max_turns: false,
             output_schema: None,
             thinking: None,
-            auto_spill_over: None,
         }
     }
 }
@@ -268,8 +264,6 @@ pub struct Runner {
     /// activation keys; `activated` below is this agent's materialization.
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
-    pub(crate) spill: Option<Arc<dyn ToolOutputSpill>>,
-    pub(crate) transient_tool_outputs: HashMap<String, Vec<serde_json::Value>>,
     pub(crate) pending_deferral: Option<PendingDeferral>,
     pub(crate) fold_tx: mpsc::UnboundedSender<AgentEvent>,
     pub(crate) fold_rx: mpsc::UnboundedReceiver<AgentEvent>,
@@ -357,7 +351,6 @@ pub struct RunnerBuilder {
     fallbacks: Vec<FallbackProvider>,
     media_resolver: Option<Arc<dyn MediaResolver>>,
     catalog: Option<Arc<dyn ToolCatalog>>,
-    spill: Option<Arc<dyn ToolOutputSpill>>,
     config: AgentConfig,
 }
 
@@ -378,7 +371,6 @@ impl RunnerBuilder {
             fallbacks: Vec::new(),
             media_resolver: None,
             catalog: None,
-            spill: None,
             config: AgentConfig::default(),
         }
     }
@@ -442,19 +434,6 @@ impl RunnerBuilder {
         self
     }
 
-    /// Wire the artifact store used for `Retention::Artifact` tool outputs
-    /// (and `auto_spill_over` when configured).
-    pub fn artifact_spill(mut self, spill: Arc<dyn ToolOutputSpill>) -> Self {
-        self.spill = Some(spill);
-        self
-    }
-
-    /// Spill `Retention::Full` outputs above this many serialized bytes.
-    pub fn auto_spill_over(mut self, bytes: usize) -> Self {
-        self.config.auto_spill_over = Some(bytes);
-        self
-    }
-
     /// Wire the on-demand tool catalog (e.g. the deferred MCP set). An
     /// activating tool like `tool_search` records activations as state keys;
     /// the loop resolves them against this catalog each turn, so activations
@@ -510,8 +489,6 @@ impl RunnerBuilder {
             sub_session: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
-            spill: self.spill,
-            transient_tool_outputs: HashMap::new(),
             pending_deferral: None,
             fold_tx: pending_tx,
             fold_rx: pending_rx,

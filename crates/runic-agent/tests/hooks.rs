@@ -286,6 +286,36 @@ async fn write_hook_stop_at_after_tool_halts_after_the_result_is_recorded() {
         1,
         "halted before the next model call"
     );
+    let contents = tool_result_contents(agent.state().messages_for_provider());
+    assert!(
+        contents.iter().any(|text| text.starts_with("ran")),
+        "the result must reach history before the stop is honoured, or the \
+         transcript keeps a tool_use with no tool_result: {contents:?}"
+    );
+}
+
+#[tokio::test]
+async fn write_hook_replaces_the_tool_result_the_model_sees() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_use_response("t1", "rec", serde_json::json!({})),
+        text_response("done"),
+    ]));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hook = RecordWriteHook::new("redactor", log)
+        .act("after_tool", Act::Substitute("[redacted]".into()));
+    let mut agent = Runner::builder(provider, "u1", "s1")
+        .model("test")
+        .tool(Arc::new(RecordingTool::new("rec", "secret")))
+        .write_hook(Arc::new(hook))
+        .build();
+
+    agent.run("go").await.unwrap();
+
+    assert_eq!(
+        tool_result_contents(agent.state().messages_for_provider()),
+        vec!["[redacted]".to_string()],
+        "the model must see the hook's rewrite, not the tool's output"
+    );
 }
 
 #[tokio::test]

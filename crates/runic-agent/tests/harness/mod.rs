@@ -393,42 +393,6 @@ impl Tool for PanicTool {
     }
 }
 
-/// Returns a big full output plus a short persisted summary — the artifact /
-/// transient-output path.
-pub struct SummaryTool {
-    full: String,
-    summary: String,
-}
-
-impl SummaryTool {
-    pub fn new(full: &str, summary: &str) -> Self {
-        Self {
-            full: full.into(),
-            summary: summary.into(),
-        }
-    }
-}
-
-#[async_trait]
-impl Tool for SummaryTool {
-    fn name(&self) -> &str {
-        "summary_tool"
-    }
-    fn description(&self) -> &str {
-        "full output to the model, summary to the log"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({ "type": "object" })
-    }
-    async fn execute(
-        &self,
-        _args: serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::ok(self.full.clone()).with_summary(self.summary.clone()))
-    }
-}
-
 /// Flips a shared [`CancelToken`] when run — to exercise mid-run cancellation
 /// triggered from inside a tool.
 pub struct CancelTool {
@@ -647,7 +611,7 @@ impl WriteHook for RecordWriteHook {
         &self,
         _state: &mut AgentState,
         _call: &ToolCall,
-        _result: &ToolResult,
+        result: &mut ToolResult,
     ) -> HookOutcome {
         self.log
             .lock()
@@ -656,6 +620,10 @@ impl WriteHook for RecordWriteHook {
         match self.actions.get("after_tool") {
             Some(Act::Stop) => HookOutcome::Stop,
             Some(Act::Cancel(r)) => HookOutcome::Cancel(r.clone()),
+            Some(Act::Substitute(text)) => {
+                *result = ToolResult::ok(text.clone());
+                HookOutcome::Continue
+            }
             _ => HookOutcome::Continue,
         }
     }

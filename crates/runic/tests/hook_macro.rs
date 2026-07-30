@@ -218,6 +218,54 @@ async fn a_macro_written_hook_actually_fires_in_the_loop() {
     );
 }
 
+#[hook(kind = write, at = after_tool, name = "redact")]
+struct Redact;
+
+impl Redact {
+    async fn hook(
+        &self,
+        _state: &mut AgentState,
+        _call: &ToolCall,
+        result: &mut ToolResult,
+    ) -> HookOutcome {
+        *result = ToolResult::ok("[redacted]");
+        HookOutcome::Continue
+    }
+}
+
+#[tokio::test]
+async fn an_after_tool_hook_rewrites_the_result_the_model_sees() {
+    let provider = ScriptedProvider::new(vec![
+        call("echo_args", serde_json::json!({ "secret": "hunter2" })),
+        text("done"),
+    ]);
+
+    let mut agent = Agent::new(Llm::new(provider, "test-model"))
+        .tool(EchoArgs)
+        .hook(Redact)
+        .build("alice", "s1")
+        .await
+        .unwrap();
+    agent.run("go").await.unwrap();
+
+    let contents: Vec<String> = agent
+        .state()
+        .messages_for_provider()
+        .iter()
+        .filter_map(|message| match &message.content {
+            runic_types::MessageContent::Blocks(blocks) => Some(blocks),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.text()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(contents, vec!["[redacted]".to_string()]);
+}
+
 #[hook(kind = write, name = "two-points", at = [before_agent, before_tool])]
 #[derive(Default, Clone)]
 struct TwoPoints {

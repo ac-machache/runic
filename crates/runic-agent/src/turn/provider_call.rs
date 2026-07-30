@@ -59,16 +59,11 @@ impl Runner {
 
     async fn call_model_inner(
         &self,
-        mut request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<(CompletionResponse, String), AgentError> {
-        if let Some(resolver) = &self.media_resolver {
-            resolver
-                .resolve(&mut request)
-                .await
-                .map_err(AgentError::Media)?;
-        }
         // No artifact pointer may reach a provider — fail loud, never silently
-        // drop a file the model was meant to see.
+        // drop a file the model was meant to see. Resolving them into bytes is a
+        // `before_model` hook's job; this is the backstop when none did.
         if let Some(id) = first_artifact_ref(&request) {
             return Err(AgentError::Media(format!(
                 "unresolved artifact reference {id} reached the model call"

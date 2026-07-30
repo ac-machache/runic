@@ -10,7 +10,6 @@ use super::scope::PendingHooks;
 use super::view::{AbilityView, SkillInfo, SubagentInfo};
 use super::{Agent, ComposeError, Composition};
 use crate::ability::{Ability, ActivationPolicy, BuildCtx, Layer, ToAbility};
-use crate::artifact_resolver::ArtifactResolver;
 use crate::deferred::{
     AbilityRegistry, DeferredEntry, GatedTool, LOAD_ABILITY_TOOL_NAME, LoadAbilityTool,
     LoadedAbilities, delegate_subjects, skill_subjects,
@@ -376,13 +375,6 @@ impl Composer {
             for hook in hooks {
                 agent_builder = agent_builder.scoped_write_hook(hook, scope.clone());
             }
-        }
-        if let Some(store) = &self.agent.artifact_store {
-            agent_builder = agent_builder.media_resolver(Arc::new(ArtifactResolver::new(
-                store.clone(),
-                tenant,
-                session,
-            )));
         }
         if let Some(catalog) = into_catalog(composition.tool_catalogs) {
             agent_builder = agent_builder.tool_catalog(catalog);

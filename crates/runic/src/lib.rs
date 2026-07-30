@@ -1,5 +1,4 @@
 pub mod ability;
-mod artifact_resolver;
 pub mod builtin;
 pub mod composer;
 mod context;
@@ -8,9 +7,10 @@ mod models;
 pub mod output;
 
 pub use ability::{Ability, ToAbility};
-pub use artifact_resolver::ArtifactResolver;
 pub use builtin::Compaction;
-pub use composer::{Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, session};
+pub use composer::{
+    Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, Thread, session,
+};
 pub use context::Context;
 pub use runic_agent::{Llm, LlmOutput};
 

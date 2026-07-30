@@ -12,5 +12,5 @@ pub use builder::Composer;
 pub use composition::Composition;
 pub use def::AgentDef;
 pub use error::ComposeError;
-pub use session::{Session, session};
+pub use session::{Session, Thread, session};
 pub use view::{AbilityView, SkillInfo, SubagentInfo};

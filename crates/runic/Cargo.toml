@@ -42,6 +42,7 @@ tracing-subscriber = { workspace = true }
 
 [features]
 web-extract = ["dep:runic-extract"]
+postgres = ["runic-substrate/postgres"]
 anthropic = ["runic-provider/anthropic"]
 openai = ["runic-provider/openai"]
 mistral = ["runic-provider/mistral"]

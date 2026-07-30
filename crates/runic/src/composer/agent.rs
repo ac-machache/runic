@@ -3,7 +3,6 @@ use std::sync::Arc;
 use runic_agent::Llm;
 use runic_hook::WriteHook;
 use runic_skills::SkillSet;
-use runic_substrate::ArtifactStore;
 use runic_tool::Tool;
 
 use crate::ability::{Ability, ToAbility};
@@ -17,7 +16,6 @@ pub struct Agent {
     pub(crate) base: Ability,
     pub(crate) abilities: Vec<Arc<dyn ToAbility>>,
     pub(crate) output_schema: Option<serde_json::Value>,
-    pub(crate) artifact_store: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl Agent {
@@ -27,7 +25,6 @@ impl Agent {
             base: Ability::new(AGENT_BUNDLE_ID),
             abilities: Vec::new(),
             output_schema: None,
-            artifact_store: None,
         }
     }
 
@@ -77,11 +74,6 @@ impl Agent {
 
     pub fn with_arc(mut self, ability: Arc<dyn ToAbility>) -> Self {
         self.abilities.push(ability);
-        self
-    }
-
-    pub fn artifacts(mut self, store: Arc<dyn ArtifactStore>) -> Self {
-        self.artifact_store = Some(store);
         self
     }
 

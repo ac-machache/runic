@@ -18,7 +18,7 @@ use runic_substrate::{
     ArtifactStore, LocalArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
 };
 use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
-use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
+use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 use serde_json::Value;
 
 /// Build-on-demand fixture: panics if anyone tries to actually use the agent.
@@ -914,9 +914,16 @@ async fn run_with_artifact_ref_persists_only_the_reference() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_to_string(resp).await.contains("pong"));
+    // No hook resolved the ref, so the loop refuses to call the model with a
+    // dangling pointer and the stream reports it instead of a reply.
+    let stream = body_to_string(resp).await;
+    assert!(!stream.contains("pong"), "{stream}");
+    assert!(
+        stream.contains(&id),
+        "the failure names the artifact: {stream}"
+    );
 
-    let events = wait_for_stored_events(store.as_ref(), "alice", "reflike", 3).await;
+    let events = wait_for_stored_events(store.as_ref(), "alice", "reflike", 2).await;
     // The event log keeps the lean pointer …
     let kept_ref = events.iter().any(|stored| {
         matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
@@ -959,7 +966,10 @@ async fn inline_media_in_run_body_is_stored_as_a_ref() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_to_string(resp).await.contains("pong"));
+    // The stored ref is what this test is about; nothing resolves it back to
+    // bytes, so the model call itself never happens.
+    let stream = body_to_string(resp).await;
+    assert!(!stream.contains("pong"), "{stream}");
 
     let events = wait_for_stored_events(store.as_ref(), "alice", "inline", 3).await;
     let kept_ref = events.iter().any(|stored| {
@@ -1011,7 +1021,8 @@ async fn run_body_ref_persists_canonical_mime_not_the_clients_claim() {
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_to_string(resp).await.contains("pong"));
+    let stream = body_to_string(resp).await;
+    assert!(!stream.contains("pong"), "{stream}");
 
     let events = wait_for_stored_events(session.as_ref(), "alice", "mimethread", 3).await;
     let canonical = events.iter().any(|stored| {
@@ -1102,10 +1113,9 @@ impl Provider for RecordingProvider {
     }
 }
 
-/// Builds a real agent on the foundry `ArtifactResolver`, so a run through serve
-/// exercises the actual resolution path.
+/// Builds a real agent that records the request it was handed, so serve's own
+/// plumbing is exercised end to end.
 struct ResolvingFactory {
-    store: Arc<dyn ArtifactStore>,
     last: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
 }
 
@@ -1120,11 +1130,6 @@ impl AgentFactory for ResolvingFactory {
             session_id,
         )
         .system_prompt("test")
-        .media_resolver(Arc::new(runic::ArtifactResolver::new(
-            self.store.clone(),
-            tenant,
-            session_id,
-        )))
         .build())
     }
 }
@@ -1144,13 +1149,7 @@ fn resolving_setup() -> (
         session_store: session.clone(),
         artifact_store: artifacts.clone(),
         transcriber: None,
-        agents: single_agent(
-            "main",
-            Arc::new(ResolvingFactory {
-                store: artifacts.clone(),
-                last: last.clone(),
-            }),
-        ),
+        agents: single_agent("main", Arc::new(ResolvingFactory { last: last.clone() })),
         limits: Default::default(),
         workers: None,
         broker: None,
@@ -1158,60 +1157,4 @@ fn resolving_setup() -> (
         identity: None,
     });
     (app, session, artifacts, last)
-}
-
-#[tokio::test]
-async fn run_resolves_latest_artifact_ref_through_serve() {
-    let (app, _session, _artifacts, last) = resolving_setup();
-
-    create_thread(&app, "img-thread").await;
-    let png = b"\x89PNG fake png bytes";
-    let resp = app
-        .clone()
-        .oneshot(upload_request("img-thread", "image/png", "p.png", png))
-        .await
-        .unwrap();
-    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
-
-    let body = serde_json::json!({
-        "content": [
-            { "type": "text", "text": "what is in this image" },
-            { "type": "artifact_ref", "id": id, "media_type": "image/png", "filename": "p.png" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/img-thread/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let _ = body_to_string(resp).await; // drive the stream to completion
-
-    // The model layer received the RESOLVED request: an inline image, no ref.
-    let captured = last.lock().unwrap().clone().expect("a model request");
-    let user = captured
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == Role::User)
-        .expect("a user message");
-    let blocks = match &user.content {
-        MessageContent::Blocks(b) => b.clone(),
-        MessageContent::Text(_) => vec![],
-    };
-    assert!(
-        blocks
-            .iter()
-            .any(|c| matches!(c, ContentBlock::Image { media_type, data }
-        if media_type == "image/png" && !data.is_empty()))
-    );
-    assert!(
-        !blocks
-            .iter()
-            .any(|c| matches!(c, ContentBlock::ArtifactRef { .. }))
-    );
 }

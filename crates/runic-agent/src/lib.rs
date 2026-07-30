@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use runic_hook::{HookScope, ReadHook, ScopedHook, WriteHook};
-use runic_provider::{CompletionRequest, Provider, ProviderError};
+use runic_provider::{Provider, ProviderError};
 use runic_state::{AgentState, Emitter, SubSession};
 use runic_tool::{ACTIVATED_KEY_PREFIX, ActivatedToolSet, Tool, ToolCatalog, ToolSpec};
 use tokio::sync::mpsc;
@@ -226,14 +226,6 @@ pub enum AgentError {
     Build(String),
 }
 
-/// Rewrites a request before the model call (e.g. swapping `artifact_ref` for
-/// stored bytes). Applied once per call so fallback providers see it too;
-/// `Err` fails the run.
-#[async_trait::async_trait]
-pub trait MediaResolver: Send + Sync {
-    async fn resolve(&self, request: &mut CompletionRequest) -> Result<(), String>;
-}
-
 /// What one model turn produced — the orchestrator's per-iteration record.
 #[derive(Debug)]
 pub(crate) struct TurnRecord {
@@ -251,7 +243,6 @@ pub(crate) struct TurnRecord {
 pub struct Runner {
     pub(crate) provider: Arc<dyn Provider>,
     pub(crate) fallbacks: Vec<FallbackProvider>,
-    pub(crate) media_resolver: Option<Arc<dyn MediaResolver>>,
     pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
     pub(crate) read_hooks: Vec<Arc<dyn ReadHook>>,
     pub(crate) write_hooks: Vec<ScopedHook>,
@@ -349,7 +340,6 @@ pub struct RunnerBuilder {
     read_hooks: Vec<Arc<dyn ReadHook>>,
     write_hooks: Vec<ScopedHook>,
     fallbacks: Vec<FallbackProvider>,
-    media_resolver: Option<Arc<dyn MediaResolver>>,
     catalog: Option<Arc<dyn ToolCatalog>>,
     config: AgentConfig,
 }
@@ -369,7 +359,6 @@ impl RunnerBuilder {
             read_hooks: Vec::new(),
             write_hooks: Vec::new(),
             fallbacks: Vec::new(),
-            media_resolver: None,
             catalog: None,
             config: AgentConfig::default(),
         }
@@ -429,11 +418,6 @@ impl RunnerBuilder {
         self
     }
 
-    pub fn media_resolver(mut self, resolver: Arc<dyn MediaResolver>) -> Self {
-        self.media_resolver = Some(resolver);
-        self
-    }
-
     /// Wire the on-demand tool catalog (e.g. the deferred MCP set). An
     /// activating tool like `tool_search` records activations as state keys;
     /// the loop resolves them against this catalog each turn, so activations
@@ -479,7 +463,6 @@ impl RunnerBuilder {
         Runner {
             provider: self.provider,
             fallbacks: self.fallbacks,
-            media_resolver: self.media_resolver,
             tools,
             read_hooks: self.read_hooks,
             write_hooks: self.write_hooks,

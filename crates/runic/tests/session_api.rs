@@ -66,7 +66,8 @@ async fn session_persists_and_hydrates_across_runs() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
 
-    let first = runic::session(store.clone(), "tenant", "thread-1")
+    let first = runic::session(("tenant", "thread-1"))
+        .store(store.clone())
         .run(&agent, "remember my name")
         .await
         .unwrap();
@@ -78,7 +79,8 @@ async fn session_persists_and_hydrates_across_runs() {
         "the run's events are appended to the store"
     );
 
-    let second = runic::session(store.clone(), "tenant", "thread-1")
+    let second = runic::session(("tenant", "thread-1"))
+        .store(store.clone())
         .run(&agent, "what is my name")
         .await
         .unwrap();
@@ -168,7 +170,8 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
 
     let agent = Agent::new(Llm::new(parent, "main-model")).with(Researcher(child));
 
-    let out = runic::session(store.clone(), "tenant", "t1")
+    let out = runic::session(("tenant", "t1"))
+        .store(store.clone())
         .run(&agent, "go")
         .await
         .unwrap();
@@ -204,7 +207,8 @@ async fn one_thread_can_be_answered_by_different_agents() {
     let first_provider = ScriptedProvider::new(vec![text("noted")]);
     let support = Agent::new(Llm::new(first_provider, "m").instructions("you are support"));
 
-    runic::session(store.clone(), "tenant", "shared-thread")
+    runic::session(("tenant", "shared-thread"))
+        .store(store.clone())
         .run(&support, "my order id is 4417")
         .await
         .unwrap();
@@ -213,7 +217,8 @@ async fn one_thread_can_be_answered_by_different_agents() {
     let analyst =
         Agent::new(Llm::new(second_provider.clone(), "m").instructions("you are analyst"));
 
-    runic::session(store.clone(), "tenant", "shared-thread")
+    runic::session(("tenant", "shared-thread"))
+        .store(store.clone())
         .run(&analyst, "what was the order id")
         .await
         .unwrap();
@@ -245,7 +250,8 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
 
     // Plain store: no tools travel with it.
     let bare = runic::substrate::sessions_memory();
-    runic::session(bare, "tenant", "t1")
+    runic::session(("tenant", "t1"))
+        .store(bare)
         .run(&agent, "go")
         .await
         .unwrap();
@@ -256,7 +262,8 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
     let searchable = runic::substrate::sessions_memory().tool(Probe("search_chats"));
-    runic::session(searchable, "tenant", "t1")
+    runic::session(("tenant", "t1"))
+        .store(searchable)
         .run(&agent, "go")
         .await
         .unwrap();
@@ -278,7 +285,8 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
     let blobs = runic::substrate::blobs_memory();
 
-    runic::session(runic::substrate::sessions_memory(), "tenant", "t1")
+    runic::session(("tenant", "t1"))
+        .store(runic::substrate::sessions_memory())
         .artifacts(blobs.clone())
         .run(&agent, "go")
         .await
@@ -292,7 +300,8 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
     let readable = blobs.clone().tool(Probe("read_thread_artifact"));
 
-    runic::session(runic::substrate::sessions_memory(), "tenant", "t1")
+    runic::session(("tenant", "t1"))
+        .store(runic::substrate::sessions_memory())
         .artifacts(readable)
         .run(&agent, "go")
         .await
@@ -337,7 +346,8 @@ async fn a_store_contributes_the_hooks_it_was_given() {
     let sessions = runic::substrate::sessions_memory().hook(Stamp("from-sessions"));
     let blobs = runic::substrate::blobs_memory().hook(Stamp("from-blobs"));
 
-    runic::session(sessions, "tenant", "t1")
+    runic::session(("tenant", "t1"))
+        .store(sessions)
         .artifacts(blobs)
         .run(&agent, "go")
         .await

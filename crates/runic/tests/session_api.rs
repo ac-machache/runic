@@ -372,3 +372,50 @@ async fn a_store_contributes_the_hooks_it_was_given() {
         "both stores' hooks must reach the loop"
     );
 }
+
+#[tokio::test]
+async fn a_session_answers_for_its_own_thread_without_reaching_for_the_store() {
+    let provider = ScriptedProvider::new(vec![text("noted")]);
+    let agent = Agent::new(Llm::new(provider, "test-model"));
+    let sessions = runic::substrate::sessions_memory();
+
+    let chat = runic::session(("tenant", "t1")).store(sessions);
+    chat.run(&agent, "my order is 4417").await.unwrap();
+    chat.set_label(Some("order 4417")).await.unwrap();
+
+    assert_eq!(chat.label().await.unwrap().as_deref(), Some("order 4417"));
+
+    let meta = chat.meta().await.unwrap().expect("the thread exists");
+    assert_eq!(meta.run_count, 1);
+    assert!(meta.event_count > 0, "the meta row aggregates the log");
+
+    let messages = chat.messages().await.unwrap();
+    assert_eq!(messages.len(), 2, "the user turn and the reply");
+    assert_eq!(messages[0].content.text_content(), "my order is 4417");
+
+    assert!(!chat.events().await.unwrap().is_empty());
+
+    chat.delete().await.unwrap();
+    assert!(chat.meta().await.unwrap().is_none(), "the thread is gone");
+    assert!(chat.events().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn without_a_store_a_thread_has_no_history_and_cannot_be_written_to() {
+    let provider = ScriptedProvider::new(vec![text("hello")]);
+    let agent = Agent::new(Llm::new(provider, "test-model"));
+    let chat = runic::session(("tenant", "t1"));
+
+    assert_eq!(chat.run(&agent, "hi").await.unwrap().text, "hello");
+
+    assert!(chat.meta().await.unwrap().is_none());
+    assert!(chat.label().await.unwrap().is_none());
+    assert!(chat.events().await.unwrap().is_empty());
+    assert!(chat.messages().await.unwrap().is_empty());
+
+    assert!(
+        chat.set_label(Some("x")).await.is_err(),
+        "a write with nowhere to go must fail, never silently no-op"
+    );
+    assert!(chat.delete().await.is_err());
+}

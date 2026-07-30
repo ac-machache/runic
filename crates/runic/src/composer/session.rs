@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use runic_agent::RunContext;
-use runic_substrate::{Blobs, Sessions, StoreSubSession, attach_persister};
+use runic_substrate::{
+    Blobs, SessionMeta, SessionStore, Sessions, StoreSubSession, StoredEvent, attach_persister,
+    replay_messages,
+};
 use runic_types::Message;
 use tracing::Instrument;
 
@@ -73,6 +76,55 @@ impl Session {
         self.thread.id()
     }
 
+    fn require_store(&self) -> anyhow::Result<Arc<dyn SessionStore>> {
+        match &self.sessions {
+            Some(sessions) => Ok(sessions.store()),
+            None => anyhow::bail!("this session has no store: call .store(sessions)"),
+        }
+    }
+
+    pub async fn meta(&self) -> anyhow::Result<Option<SessionMeta>> {
+        let Some(sessions) = &self.sessions else {
+            return Ok(None);
+        };
+        Ok(sessions
+            .store()
+            .session_meta(self.tenant(), self.thread())
+            .await?)
+    }
+
+    pub async fn label(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.meta().await?.and_then(|meta| meta.label))
+    }
+
+    pub async fn set_label(&self, label: Option<&str>) -> anyhow::Result<()> {
+        self.require_store()?
+            .set_label(self.tenant(), self.thread(), label)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn events(&self) -> anyhow::Result<Vec<StoredEvent>> {
+        let Some(sessions) = &self.sessions else {
+            return Ok(Vec::new());
+        };
+        Ok(sessions.store().read(self.tenant(), self.thread()).await?)
+    }
+
+    pub async fn messages(&self) -> anyhow::Result<Vec<Message>> {
+        let Some(sessions) = &self.sessions else {
+            return Ok(Vec::new());
+        };
+        Ok(replay_messages(sessions.store().as_ref(), self.tenant(), self.thread()).await?)
+    }
+
+    pub async fn delete(&self) -> anyhow::Result<()> {
+        self.require_store()?
+            .delete_session(self.tenant(), self.thread())
+            .await?;
+        Ok(())
+    }
+
     pub async fn run(
         &self,
         agent: &Agent,
@@ -85,6 +137,16 @@ impl Session {
         &self,
         agent: &Agent,
         message: Message,
+    ) -> anyhow::Result<AgentOutput> {
+        self.run_message_with(agent, message, RunContext::new())
+            .await
+    }
+
+    pub async fn run_message_with(
+        &self,
+        agent: &Agent,
+        message: Message,
+        mut ctx: RunContext,
     ) -> anyhow::Result<AgentOutput> {
         let span = tracing::info_span!(
             "session_run",
@@ -130,7 +192,7 @@ impl Session {
 
             let Some(sessions) = &self.sessions else {
                 let outcome = runner
-                    .run_message(message)
+                    .run_message_with(message, ctx)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 return Ok(AgentOutput::from_run(&runner, outcome));
@@ -140,15 +202,16 @@ impl Session {
                 sessions.store(),
                 self.tenant().to_string(),
                 self.thread().to_string(),
+                ctx.events.take(),
             );
-            let sub_session = Arc::new(StoreSubSession::new(
-                sessions.store(),
-                self.tenant().to_string(),
-                self.thread().to_string(),
-            ));
-            let ctx = RunContext::new()
-                .with_events(emitter)
-                .with_sub_session(sub_session);
+            ctx.events = Some(emitter);
+            if ctx.sub_session.is_none() {
+                ctx.sub_session = Some(Arc::new(StoreSubSession::new(
+                    sessions.store(),
+                    self.tenant().to_string(),
+                    self.thread().to_string(),
+                )));
+            }
 
             let outcome = runner
                 .run_message_with(message, ctx)

@@ -1,10 +1,28 @@
 use std::io::Write;
 
+use std::sync::Arc;
+
 use base64::Engine;
 use runic::builtin::{CalculatorTool, SystemTimeTool};
 use runic::composer::Agent;
+use runic::state::{AgentEvent, Emitter};
 use runic::types::{ContentBlock, Message};
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[derive(Debug)]
+struct Printer;
+
+impl Emitter for Printer {
+    fn emit(&self, event: AgentEvent) {
+        match event {
+            AgentEvent::TextDelta(text) => {
+                print!("{text}");
+                let _ = std::io::stdout().flush();
+            }
+            other => println!("\n  {other:?}"),
+        }
+    }
+}
 
 const ARTIFACT_ROOT: &str = "./artifacts";
 const TENANT: &str = "local";
@@ -109,27 +127,25 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        let outcome = match line.strip_prefix("/file ") {
+        let message = match line.strip_prefix("/file ") {
             Some(rest) => match attachment(rest.trim()) {
-                Ok(message) => chat.run_message(&agent, message).await,
+                Ok(message) => message,
                 Err(error) => {
                     println!("\ncannot attach: {error}\n");
                     continue;
                 }
             },
-            None => chat.run(&agent, line).await,
+            None => Message::user(line),
         };
-        match outcome {
-            Ok(answer) => println!("\n{}\n", answer.text),
+
+        let ctx = runic::RunContext::new().with_events(Arc::new(Printer));
+        match chat.run_message_with(&agent, message, ctx).await {
+            Ok(answer) => println!("\n\n{}\n", answer.text),
             Err(error) => println!("\nerror: {error}\n"),
         }
 
-        let stored = store.read(TENANT, THREAD).await?;
-        for entry in &stored[seen.min(stored.len())..] {
-            println!("  {:?}", entry.event);
-        }
-        seen = stored.len();
-        println!();
+        seen = store.read(TENANT, THREAD).await?.len();
+        println!("  ({seen} events persisted on this thread)\n");
     }
 
     Ok(())

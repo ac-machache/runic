@@ -12,7 +12,7 @@ pub use composer::{
     Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, Thread, session,
 };
 pub use context::Context;
-pub use runic_agent::{Llm, LlmOutput};
+pub use runic_agent::{CancelToken, Llm, LlmOutput, RunContext};
 
 pub fn llm(spec: &str) -> Result<Llm, ComposeError> {
     let (provider, model) = models::infer(spec)?;

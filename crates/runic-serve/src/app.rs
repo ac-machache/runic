@@ -1,5 +1,3 @@
-//! `AppState` and the top-level `router()` factory.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +6,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::http::HeaderName;
 use axum::routing::{get, post};
-use runic_substrate::{ArtifactStore, SessionStore};
+use runic_substrate::{ArtifactStore, Blobs, SessionStore, Sessions};
 use runic_transcriber::SpeechToText;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
@@ -22,101 +20,78 @@ const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 #[cfg(feature = "docs-ui")]
 use utoipa::OpenApi;
 
-use crate::executor::{WorkerConfig, spawn_run_workers};
-use crate::factory::BoxedAgentFactory;
-use crate::registry::{AgentRegistry, RunLimits, RunRegistry, spawn_lease_reaper};
+use apalis_postgres::PgPool;
+
+use crate::hosts::{AgentRegistry, HostedAgents};
+use crate::queue::{RunSink, sink};
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
 
-/// Everything every handler needs. Cheap to clone (all internal data is
-/// `Arc`-wrapped); axum requires `State<S>` to be `Clone`.
 #[derive(Clone)]
 pub struct AppState {
-    pub session_store: Arc<dyn SessionStore>,
-    pub artifact_store: Arc<dyn ArtifactStore>,
-    /// Optional speech-to-text backend powering `POST /transcribe`.
+    pub sessions: Sessions,
+    pub blobs: Blobs,
+    pub pool: PgPool,
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agents: Arc<AgentRegistry>,
-    pub runs: Arc<RunRegistry>,
-    pub queue_runs: bool,
-    pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
 }
 
-/// Construction parameters — the binary fills these in and hands them to
-/// [`router`].
+impl AppState {
+    pub fn store(&self) -> Arc<dyn SessionStore> {
+        self.sessions.store()
+    }
+
+    pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
+        self.blobs.store()
+    }
+
+    pub fn queue(&self) -> RunSink {
+        sink(&self.pool)
+    }
+
+    pub fn thread(&self, tenant: &str, thread_id: &str) -> runic::Session {
+        runic::session((tenant, thread_id))
+            .store(self.sessions.clone())
+            .artifacts(self.blobs.clone())
+    }
+}
+
 pub struct ServeConfig {
-    pub session_store: Arc<dyn SessionStore>,
-    pub artifact_store: Arc<dyn ArtifactStore>,
-    /// Optional speech-to-text backend; `None` disables `POST /transcribe`.
+    pub sessions: Sessions,
+    pub blobs: Blobs,
+    pub pool: PgPool,
     pub transcriber: Option<Arc<dyn SpeechToText>>,
-    /// Named agents; run requests pick one via `"agent"` (default: `default`).
-    pub agents: HashMap<String, BoxedAgentFactory>,
-    pub limits: RunLimits,
-    /// `Some` switches background runs to queued execution: `POST .../runs`
-    /// only records the run; polling workers (this instance's and any other
-    /// instance's) claim and execute. `None` (default) executes in-process.
-    pub workers: Option<WorkerConfig>,
-    /// Cross-instance live event fan-out (e.g. [`crate::RedisBroker`]). `None`
-    /// (default) keeps live SSE attach instance-local; replay always works.
-    pub broker: Option<Arc<dyn crate::broker::EventBroker>>,
-    pub nudge: Option<Arc<dyn crate::broker::QueueNudge>>,
+    pub agents: HashMap<String, HostedAgents>,
     pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
 }
 
 impl ServeConfig {
-    pub fn new(
-        session_store: Arc<dyn SessionStore>,
-        artifact_store: Arc<dyn ArtifactStore>,
-    ) -> Self {
+    pub fn new(sessions: Sessions, blobs: Blobs, pool: PgPool) -> Self {
         Self {
-            session_store,
-            artifact_store,
+            sessions,
+            blobs,
+            pool,
             transcriber: None,
             agents: HashMap::new(),
-            limits: RunLimits::default(),
-            workers: None,
-            broker: None,
-            nudge: None,
             identity: None,
         }
     }
 
-    /// Register a `#[agent]` type. The name comes off the definition, so it
-    /// cannot drift from the one the client sends.
-    pub fn agent(mut self, def: impl runic::AgentDef + 'static) -> Self {
-        let factory = crate::factory::DefFactory::new(def);
-        self.agents
-            .insert(factory.name().to_string(), Arc::new(factory));
+    pub fn agent(mut self, name: impl Into<String>, agent: impl Into<HostedAgents>) -> Self {
+        self.agents.insert(name.into(), agent.into());
         self
     }
 
-    /// Register a hand-written [`AgentFactory`] under an explicit name.
-    pub fn factory(mut self, name: impl Into<String>, factory: BoxedAgentFactory) -> Self {
-        self.agents.insert(name.into(), factory);
-        self
+    pub async fn def(mut self, def: impl runic::AgentDef + 'static) -> anyhow::Result<Self> {
+        let name = def.name().to_string();
+        let description = def.description().map(str::to_string);
+        let agent = def.build_agent().await?;
+        self.agents
+            .insert(name, HostedAgents { agent, description });
+        Ok(self)
     }
 
     pub fn transcriber(mut self, transcriber: Option<Arc<dyn SpeechToText>>) -> Self {
         self.transcriber = transcriber;
-        self
-    }
-
-    pub fn limits(mut self, limits: RunLimits) -> Self {
-        self.limits = limits;
-        self
-    }
-
-    pub fn workers(mut self, workers: WorkerConfig) -> Self {
-        self.workers = Some(workers);
-        self
-    }
-
-    pub fn broker(mut self, broker: Arc<dyn crate::broker::EventBroker>) -> Self {
-        self.broker = Some(broker);
-        self
-    }
-
-    pub fn nudge(mut self, nudge: Arc<dyn crate::broker::QueueNudge>) -> Self {
-        self.nudge = Some(nudge);
         self
     }
 
@@ -128,36 +103,24 @@ impl ServeConfig {
 
 pub fn single_agent(
     name: impl Into<String>,
-    factory: BoxedAgentFactory,
-) -> HashMap<String, BoxedAgentFactory> {
-    HashMap::from([(name.into(), factory)])
+    agent: impl Into<HostedAgents>,
+) -> HashMap<String, HostedAgents> {
+    HashMap::from([(name.into(), agent.into())])
 }
 
-fn app_state(
-    config: ServeConfig,
-) -> (
-    AppState,
-    Option<WorkerConfig>,
-    Option<Arc<dyn crate::auth::IdentityResolver>>,
-) {
-    let mut registry = RunRegistry::with_limits(config.limits);
-    if let Some(broker) = config.broker {
-        registry = registry.with_broker(broker);
-    }
+fn app_state(config: ServeConfig) -> (AppState, Option<Arc<dyn crate::auth::IdentityResolver>>) {
     let state = AppState {
-        session_store: config.session_store,
-        artifact_store: config.artifact_store,
+        sessions: config.sessions,
+        blobs: config.blobs,
+        pool: config.pool,
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
-        runs: Arc::new(registry),
-        queue_runs: config.workers.is_some(),
-        nudge: config.nudge,
     };
-    (state, config.workers, config.identity)
+    (state, config.identity)
 }
 
 pub fn bare_router(config: ServeConfig) -> Router {
-    let (state, _, identity) = app_state(config);
+    let (state, identity) = app_state(config);
     crate::auth::apply(routes(state), identity)
 }
 
@@ -197,30 +160,13 @@ fn routes(state: AppState) -> Router {
             "/transcribe",
             post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
-        .route(
-            "/threads/{thread_id}/runs",
-            post(runs::background_run).get(runs::list_thread_runs),
-        )
+        .route("/threads/{thread_id}/runs", get(runs::list_thread_runs))
         .route(
             "/threads/{thread_id}/runs/{run_id}/timeline",
             get(runs::run_timeline),
         )
-        .route(
-            "/threads/{thread_id}/runs/stream",
-            post(runs::create_and_stream_run),
-        )
-        .route("/threads/{thread_id}/runs/wait", post(runs::wait_run))
-        .route("/threads/{thread_id}/runs/cancel", post(runs::cancel_run))
-        .route("/threads/{thread_id}/runs/steer", post(runs::steer_run))
+        .route("/threads/{thread_id}/runs/wait", post(runs::wait::wait_run))
         .route("/threads/{thread_id}/runs/{run_id}", get(runs::run_status))
-        .route(
-            "/threads/{thread_id}/runs/{run_id}/stream",
-            get(runs::replay_run),
-        )
-        .route(
-            "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
-            post(runs::submit_answer_legacy),
-        )
         .route(
             "/threads/{thread_id}/asks/{ask_id}",
             post(runs::submit_answer),
@@ -239,21 +185,11 @@ fn routes(state: AppState) -> Router {
 }
 
 pub fn router(config: ServeConfig) -> Router {
-    let reap_every = config.limits.reap_every;
-    let (state, workers, identity) = app_state(config);
+    let (state, identity) = app_state(config);
     if tokio::runtime::Handle::try_current().is_ok() {
-        spawn_lease_reaper(state.session_store.clone(), reap_every);
-        if let Some(worker_config) = workers {
-            spawn_run_workers(
-                state.session_store.clone(),
-                state.agents.clone(),
-                state.runs.clone(),
-                worker_config,
-                state.nudge.clone(),
-            );
-        }
+        crate::worker::spawn_run_worker(state.clone(), &state.pool.clone());
     } else {
-        tracing::warn!("router built outside a tokio runtime — background loops not started");
+        tracing::warn!("router built outside a tokio runtime — the run worker is not started");
     }
     crate::auth::apply(routes(state), identity)
         .layer(CorsLayer::permissive())
@@ -295,12 +231,14 @@ pub fn router(config: ServeConfig) -> Router {
 pub async fn serve(
     config: ServeConfig,
     addr: impl tokio::net::ToSocketAddrs,
-) -> std::io::Result<()> {
+) -> anyhow::Result<()> {
+    crate::queue::setup(&config.pool).await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "runic-serve listening");
     axum::serve(listener, router(config))
         .with_graceful_shutdown(shutdown_signal())
-        .await
+        .await?;
+    Ok(())
 }
 
 async fn shutdown_signal() {

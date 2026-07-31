@@ -31,5 +31,5 @@ for _ in $(seq 1 30); do
   echo -n "."; sleep 1
 done
 
-cargo nextest run -p runic-serve --features postgres --test postgres_api --profile full -- "$@"
-echo "postgres api: OK"
+cargo nextest run -p runic-serve --features postgres --profile full -- "$@"
+echo "runic-serve suite: OK"

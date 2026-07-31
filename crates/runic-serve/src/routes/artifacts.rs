@@ -21,12 +21,7 @@ use crate::tenant::Tenant;
 pub const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
 
 async fn require_thread(state: &AppState, tenant: &str, thread_id: &str) -> Result<(), ServeError> {
-    if state
-        .session_store
-        .session_meta(tenant, thread_id)
-        .await?
-        .is_none()
-    {
+    if state.thread(tenant, thread_id).meta().await?.is_none() {
         return Err(ServeError::ThreadNotFound {
             id: thread_id.to_string(),
         });
@@ -115,7 +110,7 @@ pub async fn upload_artifact(
         .map(str::to_string);
 
     let art = state
-        .artifact_store
+        .artifacts()
         .put(
             &tenant,
             &thread_id,
@@ -165,7 +160,7 @@ pub async fn list_artifacts(
     Path(thread_id): Path<String>,
 ) -> Result<Json<Vec<ArtifactMeta>>, ServeError> {
     require_thread(&state, &tenant, &thread_id).await?;
-    let arts = state.artifact_store.list(&tenant, &thread_id).await?;
+    let arts = state.artifacts().list(&tenant, &thread_id).await?;
     Ok(Json(arts.into_iter().map(ArtifactMeta::from).collect()))
 }
 
@@ -191,13 +186,13 @@ pub async fn download_artifact(
     Path((thread_id, artifact_id)): Path<(String, String)>,
 ) -> Result<impl axum::response::IntoResponse, ServeError> {
     require_thread(&state, &tenant, &thread_id).await?;
-    let arts = state.artifact_store.list(&tenant, &thread_id).await?;
+    let arts = state.artifacts().list(&tenant, &thread_id).await?;
     let Some(meta) = arts.into_iter().find(|a| a.id == artifact_id) else {
         return Err(ServeError::ArtifactNotFound {
             id: artifact_id,
             thread: thread_id,
         });
     };
-    let bytes = state.artifact_store.get(&meta.id).await?;
+    let bytes = state.artifacts().get(&meta.id).await?;
     Ok(([(header::CONTENT_TYPE, meta.mime_type)], bytes))
 }

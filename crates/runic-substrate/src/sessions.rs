@@ -39,36 +39,33 @@ pub struct StoredEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
-    Pending,
-    Queued,
+    Idle,
     Running,
-    Paused,
-    Success,
-    Error,
+    Waiting,
+    Successful,
+    Failed,
     Cancelled,
 }
 
 impl RunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
-            RunStatus::Pending => "pending",
-            RunStatus::Queued => "queued",
+            RunStatus::Idle => "idle",
             RunStatus::Running => "running",
-            RunStatus::Paused => "paused",
-            RunStatus::Success => "success",
-            RunStatus::Error => "error",
+            RunStatus::Waiting => "waiting",
+            RunStatus::Successful => "successful",
+            RunStatus::Failed => "failed",
             RunStatus::Cancelled => "cancelled",
         }
     }
 
     pub fn parse(s: &str) -> Option<RunStatus> {
         match s {
-            "pending" => Some(RunStatus::Pending),
-            "queued" => Some(RunStatus::Queued),
+            "idle" => Some(RunStatus::Idle),
             "running" => Some(RunStatus::Running),
-            "paused" => Some(RunStatus::Paused),
-            "success" => Some(RunStatus::Success),
-            "error" => Some(RunStatus::Error),
+            "waiting" => Some(RunStatus::Waiting),
+            "successful" => Some(RunStatus::Successful),
+            "failed" => Some(RunStatus::Failed),
             "cancelled" => Some(RunStatus::Cancelled),
             _ => None,
         }
@@ -77,7 +74,7 @@ impl RunStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunStatus::Success | RunStatus::Error | RunStatus::Cancelled
+            RunStatus::Successful | RunStatus::Failed | RunStatus::Cancelled
         )
     }
 }
@@ -91,31 +88,20 @@ pub struct RunRecord {
     pub status: RunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lease_expires_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context: Option<serde_json::Value>,
     #[serde(default)]
-    pub cancel_requested: bool,
+    pub to_cancel: bool,
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct RunSignals {
-    pub cancel_requested: bool,
+    pub to_cancel: bool,
     pub steering: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RunInput {
-    pub input: Option<serde_json::Value>,
-    pub context: Option<serde_json::Value>,
-    pub queued: bool,
 }
 
 /// Per-session metadata, for listing without scanning the log.
@@ -379,7 +365,6 @@ pub trait SessionStore: Send + Sync {
         _session_id: &str,
         _run_id: &str,
         _agent: &str,
-        _input: &RunInput,
     ) -> Result<()> {
         Err(Error::Unsupported("create_run".into()))
     }
@@ -405,22 +390,12 @@ pub trait SessionStore: Send + Sync {
         Err(Error::Unsupported("set_run_status".into()))
     }
 
-    async fn claim_run(
-        &self,
-        _run_id: &str,
-        _claimed_by: &str,
-        _lease: chrono::Duration,
-    ) -> Result<bool> {
-        Err(Error::Unsupported("claim_run".into()))
+    async fn try_start_run(&self, _tenant: &str, _run_id: &str) -> Result<bool> {
+        Err(Error::Unsupported("try_start_run".into()))
     }
 
-    async fn heartbeat_run(
-        &self,
-        _run_id: &str,
-        _claimed_by: &str,
-        _lease: chrono::Duration,
-    ) -> Result<Option<RunSignals>> {
-        Err(Error::Unsupported("heartbeat_run".into()))
+    async fn take_signals(&self, _tenant: &str, _run_id: &str) -> Result<RunSignals> {
+        Err(Error::Unsupported("take_signals".into()))
     }
 
     async fn request_cancel_run(&self, _tenant: &str, _run_id: &str) -> Result<bool> {
@@ -429,51 +404,6 @@ pub trait SessionStore: Send + Sync {
 
     async fn push_steering(&self, _tenant: &str, _run_id: &str, _text: &str) -> Result<bool> {
         Err(Error::Unsupported("push_steering".into()))
-    }
-
-    async fn claim_thread(
-        &self,
-        _tenant: &str,
-        _session_id: &str,
-        _claimed_by: &str,
-        _lease: chrono::Duration,
-    ) -> Result<bool> {
-        Err(Error::Unsupported("claim_thread".into()))
-    }
-
-    async fn extend_thread_lease(
-        &self,
-        _tenant: &str,
-        _session_id: &str,
-        _claimed_by: &str,
-        _lease: chrono::Duration,
-    ) -> Result<bool> {
-        Err(Error::Unsupported("extend_thread_lease".into()))
-    }
-
-    async fn release_thread(
-        &self,
-        _tenant: &str,
-        _session_id: &str,
-        _claimed_by: &str,
-    ) -> Result<()> {
-        Err(Error::Unsupported("release_thread".into()))
-    }
-
-    async fn reap_expired_runs(&self) -> Result<Vec<RunRecord>> {
-        Err(Error::Unsupported("reap_expired_runs".into()))
-    }
-
-    async fn claim_next_queued_run(
-        &self,
-        _claimed_by: &str,
-        _lease: chrono::Duration,
-    ) -> Result<Option<RunRecord>> {
-        Err(Error::Unsupported("claim_next_queued_run".into()))
-    }
-
-    async fn release_run(&self, _run_id: &str, _claimed_by: &str) -> Result<()> {
-        Err(Error::Unsupported("release_run".into()))
     }
 
     async fn resume_run(&self, _tenant: &str, _run_id: &str) -> Result<bool> {
@@ -489,7 +419,7 @@ pub trait SessionStore: Send + Sync {
         let Some(rec) = self.get_run(tenant, run_id).await? else {
             return Ok(false);
         };
-        if rec.status != crate::RunStatus::Paused {
+        if rec.status != crate::RunStatus::Waiting {
             return Ok(false);
         }
         self.append(tenant, &rec.session_id, event).await?;

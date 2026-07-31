@@ -1,20 +1,16 @@
+mod common;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use serde_json::json;
+use axum::http::StatusCode;
 use tower::ServiceExt;
 
-use runic::Llm;
-use runic::agent::Runner;
-use runic::composer::Agent;
 use runic::subagent::{DelegateTool, Subagent};
+use runic::{Agent, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore};
+use runic_substrate::SessionEvent;
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -48,7 +44,7 @@ fn text_response(text: &str) -> CompletionResponse {
 }
 
 fn delegate_background_response() -> CompletionResponse {
-    let input = json!({
+    let input = serde_json::json!({
         "action": "delegate",
         "agent": "scout",
         "prompt": "dig",
@@ -71,67 +67,45 @@ fn delegate_background_response() -> CompletionResponse {
     }
 }
 
-struct DelegatingFactory;
-
-#[async_trait]
-impl AgentFactory for DelegatingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        let provider = Arc::new(ScriptedProvider {
-            responses: Mutex::new(
-                vec![delegate_background_response(), text_response("spawned")].into(),
-            ),
-        });
-        let roster = vec![Subagent::new(
-            "scout",
-            "research",
-            Agent::new(
-                Llm::new(
-                    Arc::new(ScriptedProvider {
-                        responses: Mutex::new(vec![text_response("dug it up")].into()),
-                    }),
-                    "child-model",
-                )
-                .instructions("dig"),
-            ),
-        )];
-        Ok(Runner::builder(provider, tenant, session_id)
-            .system_prompt("sys")
-            .tool(Arc::new(DelegateTool::new(roster)))
-            .build())
-    }
+fn agent_with_delegate() -> Agent {
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(
+            vec![delegate_background_response(), text_response("spawned")].into(),
+        ),
+    });
+    let roster = vec![Subagent::new(
+        "scout",
+        "research",
+        Agent::new(
+            Llm::new(
+                Arc::new(ScriptedProvider {
+                    responses: Mutex::new(vec![text_response("dug it up")].into()),
+                }),
+                "child-model",
+            )
+            .instructions("dig"),
+        ),
+    )];
+    Agent::new(Llm::new(provider, "test-model").instructions("sys")).tool(DelegateTool::new(roster))
 }
 
 #[tokio::test]
 async fn a_background_task_is_durable_without_another_run() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(DelegatingFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(agent_with_delegate());
+    let thread = common::uid("t");
 
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads/t1/runs/wait")
-                .header("content-type", "application/json")
-                .body(Body::from(json!({ "message": "go" }).to_string()))
-                .unwrap(),
-        )
+        .oneshot(common::wait_request(&thread, &h.tenant, "go"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let mut finished = None;
     for _ in 0..100 {
-        let events = store.read("default", "t1").await.unwrap();
+        let events = h.store().read(&h.tenant, &thread).await.unwrap();
         finished = events.into_iter().find_map(|s| match s.event {
             SessionEvent::TaskFinished { status, result, .. } => Some((status, result)),
             _ => None,
@@ -139,7 +113,7 @@ async fn a_background_task_is_durable_without_another_run() {
         if finished.is_some() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     let (status, result) =
@@ -147,7 +121,7 @@ async fn a_background_task_is_durable_without_another_run() {
     assert_eq!(status, runic_state::TaskStatus::Completed);
     assert_eq!(result.as_deref(), Some("dug it up"));
 
-    let events = store.read("default", "t1").await.unwrap();
+    let events = h.store().read(&h.tenant, &thread).await.unwrap();
     assert!(
         events
             .iter()

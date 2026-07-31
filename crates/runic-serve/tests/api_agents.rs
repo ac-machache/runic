@@ -1,29 +1,24 @@
-use std::collections::HashMap;
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+use axum::http::Request;
+use axum::http::StatusCode;
+use serde_json::json;
 use tower::ServiceExt;
 
 use runic::ability::ability;
-use runic::composer::Agent;
-use runic::composer::Composer;
 use runic::subagent::Subagent;
-use runic::{Llm, agent};
-use runic_agent::Runner;
+use runic::{Agent, Llm, agent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::routes::agents::{
-    AbilityOverview, AgentOverview, SkillOverview, SubagentOverview, ToolOverview,
-};
-use runic_serve::{AgentFactory, BoxedAgentFactory, ServeConfig, router};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_serve::{HostedAgents, router};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
-const TENANT: &str = "alice";
+use common::Harness;
 
 struct EchoProvider {
     reply: &'static str,
@@ -56,41 +51,6 @@ impl Provider for EchoProvider {
             tool_calls: vec![],
             usage: TokenUsage::default(),
         })
-    }
-}
-
-struct EchoFactory {
-    provider: Arc<EchoProvider>,
-    description: &'static str,
-}
-
-#[async_trait]
-impl AgentFactory for EchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(self.provider.clone(), tenant, session_id)
-            .system_prompt("test")
-            .build())
-    }
-
-    fn describe(&self) -> Option<&str> {
-        Some(self.description)
-    }
-}
-
-struct StatelessEchoFactory {
-    provider: Arc<EchoProvider>,
-}
-
-#[async_trait]
-impl AgentFactory for StatelessEchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(self.provider.clone(), tenant, session_id)
-            .system_prompt("test")
-            .build())
-    }
-
-    fn stateless(&self) -> bool {
-        true
     }
 }
 
@@ -150,181 +110,70 @@ async fn billing_skills() -> Arc<runic::skills::SkillSet> {
     Arc::new(runic::skills::SkillSet::load_dir("billing", dir.path()).await)
 }
 
-async fn rich_composer(provider: Arc<EchoProvider>) -> Composer {
-    Composer::new(
-        runic::composer::Agent::new(Llm::new(provider, "test-model").instructions("root"))
-            .with(
-                ability("core")
-                    .describe("always-on core tools")
-                    .tool(AddTool),
-            )
-            .with(
-                ability("billing")
-                    .describe("invoices and refunds")
-                    .deferred()
-                    .tool(RefundTool)
-                    .skills(billing_skills().await)
-                    .subagent(Subagent::new(
-                        "billing-worker",
-                        "handles billing disputes",
-                        Agent::new(
-                            Llm::new(EchoProvider::new("child done"), "child-model")
-                                .instructions("you are a billing worker")
-                                .max_turns(3),
-                        ),
-                    )),
-            ),
-    )
-}
-
-fn map_overview(name: &str, views: Vec<runic::composer::AbilityView>) -> AgentOverview {
-    AgentOverview {
-        name: name.to_string(),
-        model: None,
-        max_turns: None,
-        abilities: views
-            .into_iter()
-            .map(|view| AbilityOverview {
-                id: view.id,
-                name: view.name,
-                description: view.description,
-                deferred: view.deferred,
-                activated: view.activated,
-                tools: view
-                    .tools
-                    .into_iter()
-                    .map(|spec| ToolOverview {
-                        name: spec.name,
-                        description: spec.description,
-                        parameters: spec.parameters,
-                    })
-                    .collect(),
-                skills: view
-                    .skills
-                    .into_iter()
-                    .map(|skill| SkillOverview {
-                        id: skill.id,
-                        description: skill.description,
-                    })
-                    .collect(),
-                subagents: view
-                    .subagents
-                    .into_iter()
-                    .map(|subagent| SubagentOverview {
-                        name: subagent.name,
-                        description: subagent.description,
-                    })
-                    .collect(),
-                hooks: view.hooks,
-            })
-            .collect(),
-    }
-}
-
-struct RichFactory {
-    provider: Arc<EchoProvider>,
-}
-
-#[async_trait]
-impl AgentFactory for RichFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(rich_composer(self.provider.clone())
-            .await
-            .build(tenant, session_id)
-            .await?)
-    }
-
-    async fn overview(&self, tenant: &str, session_id: &str) -> Option<AgentOverview> {
-        let views = rich_composer(self.provider.clone())
-            .await
-            .describe(tenant, session_id)
-            .await
-            .ok()?;
-        Some(map_overview("rich", views))
-    }
+async fn rich_agent(provider: Arc<EchoProvider>) -> Agent {
+    Agent::new(Llm::new(provider, "test-model").instructions("root"))
+        .with(
+            ability("core")
+                .describe("always-on core tools")
+                .tool(AddTool),
+        )
+        .with(
+            ability("billing")
+                .describe("invoices and refunds")
+                .deferred()
+                .tool(RefundTool)
+                .skills(billing_skills().await)
+                .subagent(Subagent::new(
+                    "billing-worker",
+                    "handles billing disputes",
+                    Agent::new(
+                        Llm::new(EchoProvider::new("child done"), "child-model")
+                            .instructions("you are a billing worker")
+                            .max_turns(3),
+                    ),
+                )),
+        )
 }
 
 struct Fixture {
     app: Router,
-    coral: Arc<EchoProvider>,
     scout: Arc<EchoProvider>,
-    store: Arc<dyn SessionStore>,
 }
 
-fn fixture() -> Fixture {
+fn fixture(h: &Harness) -> Fixture {
     let coral = EchoProvider::new("from-coral");
     let scout = EchoProvider::new("from-scout");
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let mut agents: HashMap<String, BoxedAgentFactory> = HashMap::new();
-    agents.insert(
-        "coral".into(),
-        Arc::new(EchoFactory {
-            provider: coral.clone(),
-            description: "support agent",
-        }),
+    let app = router(
+        h.config()
+            .agent(
+                "coral",
+                HostedAgents::new(common::agent(coral)).describe("support agent"),
+            )
+            .agent(
+                "scout",
+                HostedAgents::new(common::agent(scout.clone())).describe("research agent"),
+            ),
     );
-    agents.insert(
-        "scout".into(),
-        Arc::new(EchoFactory {
-            provider: scout.clone(),
-            description: "research agent",
-        }),
-    );
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents,
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    Fixture {
-        app,
-        coral,
-        scout,
-        store,
-    }
+    Fixture { app, scout }
 }
 
-fn wait_request(thread: &str, agent: Option<&str>, message: &str) -> Request<Body> {
-    let mut body = json!({ "message": message });
-    if let Some(agent) = agent {
-        body["agent"] = json!(agent);
-    }
-    Request::builder()
-        .method("POST")
-        .uri(format!("/threads/{thread}/runs/wait"))
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", TENANT)
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+fn get_agent(name: &str, tenant: &str) -> Request<Body> {
+    common::get(&format!("/agents/{name}"), tenant)
 }
 
 #[tokio::test]
 async fn list_agents_returns_the_registry_sorted() {
-    let f = fixture();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
     let resp = f
         .app
-        .oneshot(
-            Request::builder()
-                .uri("/agents")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/agents", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(
         body,
         json!({
@@ -338,45 +187,77 @@ async fn list_agents_returns_the_registry_sorted() {
 
 #[tokio::test]
 async fn run_routes_to_the_named_agent() {
-    let f = fixture();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let t1 = common::uid("t");
     let resp = f
         .app
         .clone()
-        .oneshot(wait_request("t1", Some("coral"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &t1,
+            &h.tenant,
+            Some("coral"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["text"], "from-coral");
+    assert_eq!(common::body_json(resp).await["text"], "from-coral");
 
+    let t2 = common::uid("t");
     let resp = f
         .app
-        .oneshot(wait_request("t2", Some("scout"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &t2,
+            &h.tenant,
+            Some("scout"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["text"], "from-scout");
+    assert_eq!(common::body_json(resp).await["text"], "from-scout");
 }
 
 #[tokio::test]
 async fn unknown_agent_is_404() {
-    let f = fixture();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let thread = common::uid("t");
     let resp = f
         .app
-        .oneshot(wait_request("t1", Some("ghost"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &thread,
+            &h.tenant,
+            Some("ghost"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["error"], "not_found");
     assert!(body["message"].as_str().unwrap().contains("ghost"));
 }
 
 #[tokio::test]
 async fn missing_agent_on_a_multi_agent_server_is_400_listing_the_roster() {
-    let f = fixture();
-    let resp = f.app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let thread = common::uid("t");
+    let resp = f
+        .app
+        .oneshot(common::wait_request(&thread, &h.tenant, "hi"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["error"], "bad_request");
     let message = body["message"].as_str().unwrap();
     assert!(message.contains("coral") && message.contains("scout"));
@@ -384,97 +265,39 @@ async fn missing_agent_on_a_multi_agent_server_is_400_listing_the_roster() {
 
 #[tokio::test]
 async fn missing_agent_on_a_single_agent_server_routes_to_it() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
     let coral = EchoProvider::new("from-coral");
-    let app = router(ServeConfig {
-        session_store: Arc::new(runic_substrate::MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: runic_serve::single_agent(
-            "coral",
-            Arc::new(EchoFactory {
-                provider: coral,
-                description: "support agent",
-            }),
-        ),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    let resp = app.oneshot(wait_request("t1", None, "hi")).await.unwrap();
+    let app = h.single_router(common::agent(coral));
+    let thread = common::uid("t");
+    let resp = app
+        .oneshot(common::wait_request(&thread, &h.tenant, "hi"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["text"], "from-coral");
+    assert_eq!(common::body_json(resp).await["text"], "from-coral");
 }
 
 #[test]
 #[should_panic(expected = "at least one agent")]
 fn an_empty_roster_refuses_to_serve() {
-    runic_serve::AgentRegistry::new(HashMap::new());
-}
-
-#[tokio::test]
-async fn stateless_agent_is_rebuilt_every_run_and_persists_nothing() {
-    let provider = EchoProvider::new("flash-reply");
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: runic_serve::single_agent(
-            "flash",
-            Arc::new(StatelessEchoFactory {
-                provider: provider.clone(),
-            }),
-        ),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let first = app
-        .clone()
-        .oneshot(wait_request("t1", None, "remember me"))
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-
-    let second = app
-        .clone()
-        .oneshot(wait_request("t1", None, "what did i say?"))
-        .await
-        .unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
-
-    let seen = provider.last_request();
-    let all_text: String = seen
-        .messages
-        .iter()
-        .map(|m| m.content.text_content())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(all_text.contains("what did i say?"));
-    assert!(!all_text.contains("remember me"));
-    assert!(!all_text.contains("flash-reply"));
-
-    let persisted = store
-        .read(TENANT, "t1")
-        .await
-        .map(|events| events.len())
-        .unwrap_or(0);
-    assert_eq!(persisted, 0);
+    runic_serve::AgentRegistry::new(std::collections::HashMap::new());
 }
 
 #[tokio::test]
 async fn second_agent_sees_the_first_agents_conversation() {
-    let f = fixture();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let shared = common::uid("shared");
     let resp = f
         .app
         .clone()
-        .oneshot(wait_request(
-            "shared",
+        .oneshot(common::wait_request_agent(
+            &shared,
+            &h.tenant,
             Some("coral"),
             "remember the launch is friday",
         ))
@@ -484,11 +307,16 @@ async fn second_agent_sees_the_first_agents_conversation() {
 
     let resp = f
         .app
-        .oneshot(wait_request("shared", Some("scout"), "when is the launch?"))
+        .oneshot(common::wait_request_agent(
+            &shared,
+            &h.tenant,
+            Some("scout"),
+            "when is the launch?",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["text"], "from-scout");
+    assert_eq!(common::body_json(resp).await["text"], "from-scout");
 
     let seen = f.scout.last_request();
     let all_text: String = seen
@@ -500,20 +328,28 @@ async fn second_agent_sees_the_first_agents_conversation() {
     assert!(all_text.contains("remember the launch is friday"));
     assert!(all_text.contains("from-coral"));
     assert!(all_text.contains("when is the launch?"));
-    let _ = &f.coral;
 }
 
 #[tokio::test]
 async fn run_start_event_records_the_agent() {
-    let f = fixture();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let thread = common::uid("t");
     let resp = f
         .app
-        .oneshot(wait_request("t1", Some("coral"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &thread,
+            &h.tenant,
+            Some("coral"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let events = f.store.read(TENANT, "t1").await.unwrap();
+    let events = h.store().read(&h.tenant, &thread).await.unwrap();
     let agent = events.iter().find_map(|e| match &e.event {
         runic_substrate::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
         _ => None,
@@ -523,60 +359,39 @@ async fn run_start_event_records_the_agent() {
 
 #[tokio::test]
 async fn serve_config_builder_defaults_the_optional_infra() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let config = ServeConfig::new(store, Arc::new(MemoryArtifactStore::new())).factory(
-        "coral",
-        Arc::new(EchoFactory {
-            provider: EchoProvider::new("hi"),
-            description: "support",
-        }),
-    );
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let coral = EchoProvider::new("hi");
+    let config = h.config().agent("coral", common::agent(coral));
     assert!(config.transcriber.is_none());
-    assert!(config.workers.is_none());
-    assert!(config.broker.is_none());
-    assert!(config.nudge.is_none());
     assert!(config.identity.is_none());
 
     let app = router(config);
+    let thread = common::uid("t");
     let resp = app
-        .oneshot(wait_request("t1", Some("coral"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &thread,
+            &h.tenant,
+            Some("coral"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["text"], "hi");
-}
-
-fn get_agent(name: &str) -> Request<Body> {
-    Request::builder()
-        .uri(format!("/agents/{name}"))
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn overview_app() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: runic_serve::single_agent(
-            "rich",
-            Arc::new(RichFactory {
-                provider: EchoProvider::new("unused"),
-            }),
-        ),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+    assert_eq!(common::body_json(resp).await["text"], "hi");
 }
 
 #[tokio::test]
 async fn overview_groups_tools_skills_and_subagents_by_ability() {
-    let resp = overview_app().oneshot(get_agent("rich")).await.unwrap();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let rich = rich_agent(EchoProvider::new("unused")).await;
+    let app = router(h.config().agent("rich", rich));
+    let resp = app.oneshot(get_agent("rich", &h.tenant)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
 
     let abilities = body["abilities"].as_array().unwrap();
     assert_eq!(abilities.len(), 2);
@@ -607,24 +422,27 @@ async fn overview_groups_tools_skills_and_subagents_by_ability() {
 }
 
 #[tokio::test]
-async fn overview_falls_back_to_a_flat_view_for_a_non_composer_factory() {
-    let f = fixture();
-    let resp = f.app.oneshot(get_agent("coral")).await.unwrap();
+async fn overview_of_a_bare_agent_reports_no_abilities() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let resp = f.app.oneshot(get_agent("coral", &h.tenant)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-
-    let abilities = body["abilities"].as_array().unwrap();
-    assert_eq!(abilities.len(), 1);
-    assert_eq!(abilities[0]["name"], "agent");
-    assert!(abilities[0]["id"].is_null());
-    assert!(abilities[0]["tools"].as_array().unwrap().is_empty());
-    assert!(abilities[0]["hooks"].as_array().unwrap().is_empty());
+    let body = common::body_json(resp).await;
+    assert!(
+        body["abilities"].as_array().unwrap().is_empty(),
+        "a plain agent with no tools/hooks/skills attached carries no ability to report"
+    );
 }
 
 #[tokio::test]
 async fn overview_of_an_unknown_agent_is_404() {
-    let f = fixture();
-    let resp = f.app.oneshot(get_agent("ghost")).await.unwrap();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let f = fixture(&h);
+    let resp = f.app.oneshot(get_agent("ghost", &h.tenant)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -644,18 +462,27 @@ impl Support {
 
 #[tokio::test]
 async fn an_agent_macro_type_is_served_under_the_name_it_declares() {
-    let config = ServeConfig::new(
-        Arc::new(MemorySessionStore::new()) as Arc<dyn SessionStore>,
-        Arc::new(MemoryArtifactStore::new()),
-    )
-    .agent(Support {
-        provider: EchoProvider::new("supported"),
-    });
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let config = h
+        .config()
+        .def(Support {
+            provider: EchoProvider::new("supported"),
+        })
+        .await
+        .unwrap();
     let app = router(config);
 
+    let thread = common::uid("t");
     let resp = app
         .clone()
-        .oneshot(wait_request("t1", Some("support"), "hi"))
+        .oneshot(common::wait_request_agent(
+            &thread,
+            &h.tenant,
+            Some("support"),
+            "hi",
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -664,15 +491,10 @@ async fn an_agent_macro_type_is_served_under_the_name_it_declares() {
         "the name came off the AgentDef, not a hand-typed registry key"
     );
 
-    let listed = body_json(
-        app.oneshot(
-            Request::builder()
-                .uri("/agents")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap(),
+    let listed = common::body_json(
+        app.oneshot(common::get("/agents", &h.tenant))
+            .await
+            .unwrap(),
     )
     .await;
     let support = listed["agents"]

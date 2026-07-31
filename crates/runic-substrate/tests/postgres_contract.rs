@@ -399,7 +399,7 @@ async fn schema_has_required_columns_indexes_and_fks() {
         async move {
             sqlx::query_scalar::<_, String>(
                 "SELECT data_type FROM information_schema.columns
-                 WHERE table_name = $1 AND column_name = $2",
+                 WHERE table_schema = 'runic' AND table_name = $1 AND column_name = $2",
             )
             .bind(table)
             .bind(col)
@@ -408,18 +408,9 @@ async fn schema_has_required_columns_indexes_and_fks() {
             .unwrap()
         }
     };
-    assert_eq!(
-        col_type("session_events", "event").await.as_deref(),
-        Some("jsonb")
-    );
-    assert_eq!(
-        col_type("session_events", "seq").await.as_deref(),
-        Some("bigint")
-    );
-    assert_eq!(
-        col_type("chat_messages", "tsv").await.as_deref(),
-        Some("tsvector")
-    );
+    assert_eq!(col_type("events", "event").await.as_deref(), Some("jsonb"));
+    assert_eq!(col_type("events", "seq").await.as_deref(), Some("bigint"));
+    assert_eq!(col_type("chats", "tsv").await.as_deref(), Some("tsvector"));
     assert_eq!(
         col_type("artifacts", "size").await.as_deref(),
         Some("bigint")
@@ -427,20 +418,22 @@ async fn schema_has_required_columns_indexes_and_fks() {
 
     // the GIN full-text index the search query depends on
     let gin: Option<String> = sqlx::query_scalar(
-        "SELECT indexdef FROM pg_indexes WHERE indexname = 'chat_messages_tsv_idx'",
+        "SELECT indexdef FROM pg_indexes
+         WHERE schemaname = 'runic' AND indexname = 'chats_tsv_idx'",
     )
     .fetch_optional(&pool)
     .await
     .unwrap();
     assert!(
         gin.is_some_and(|d| d.contains("gin")),
-        "chat_messages GIN index missing"
+        "chats GIN index missing"
     );
 
     // artifacts → sessions foreign key exists
     let fk: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.table_constraints
-         WHERE table_name = 'artifacts' AND constraint_type = 'FOREIGN KEY'",
+         WHERE table_schema = 'runic' AND table_name = 'artifacts'
+           AND constraint_type = 'FOREIGN KEY'",
     )
     .fetch_one(&pool)
     .await

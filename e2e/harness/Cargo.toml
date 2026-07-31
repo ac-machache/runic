@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 runic = { path = "../../crates/runic", features = ["mistral", "postgres"] }
+runic-serve = { path = "../../crates/runic-serve", features = ["postgres"] }
 
 anyhow = "1"
 dotenvy = "0.15"

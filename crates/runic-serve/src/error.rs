@@ -44,6 +44,9 @@ pub enum ServeError {
     #[error("this instance is at its concurrent run limit ({active} active)")]
     TooBusy { active: usize },
 
+    #[error("run {run_id:?} did not finish within the wait window")]
+    Timeout { run_id: String },
+
     #[error("session store error: {0}")]
     Store(String),
 
@@ -81,6 +84,7 @@ impl IntoResponse for ServeError {
             }
             Self::PersistenceDegraded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "degraded"),
             Self::TooBusy { .. } => (StatusCode::TOO_MANY_REQUESTS, "too_busy"),
+            Self::Timeout { .. } => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
             Self::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             Self::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store"),
             Self::Runner(_) => (StatusCode::INTERNAL_SERVER_ERROR, "agent"),
@@ -96,6 +100,7 @@ impl IntoResponse for ServeError {
             Self::Upstream(_)
             | Self::NotConfigured(_)
             | Self::PersistenceDegraded { .. }
+            | Self::Timeout { .. }
             | Self::TooBusy { .. } => {
                 tracing::warn!(kind, error = %self, "request failed")
             }

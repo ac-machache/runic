@@ -1,5 +1,6 @@
+mod common;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,19 +8,19 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
-use tokio::sync::{Barrier, Notify};
 use tower::ServiceExt;
 
-use runic_agent::Runner;
+use runic::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, RunLimits, ServeConfig, WorkerConfig, router, single_agent};
-use runic_substrate::{
-    ArtifactStore, MemoryArtifactStore, MemorySessionStore, RunStatus, SessionStore,
-};
+use runic_serve::app::AppState;
+use runic_serve::hosts::AgentRegistry;
+use runic_serve::routes::runs::input::input_from_message;
+use runic_serve::{ServeError, router, single_agent};
+use runic_substrate::{MemorySessionStore, RunStatus, SessionStore};
 use runic_tool::{Tool, ToolContext, ToolResult};
 use runic_types::{ContentBlock, Message, MessageContent, StopReason, TokenUsage, ToolCall};
 
-const TENANT: &str = "alice";
+use common::Harness;
 
 struct ScriptedProvider;
 
@@ -42,38 +43,12 @@ impl Provider for ScriptedProvider {
     }
 }
 
-struct ScriptedFactory;
-
-#[async_trait]
-impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(ScriptedProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
-    }
-}
-
 struct FailingProvider;
 
 #[async_trait]
 impl Provider for FailingProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         Err(ProviderError::Http("scripted provider failure".into()))
-    }
-}
-
-struct FailingFactory;
-
-#[async_trait]
-impl AgentFactory for FailingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(FailingProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
     }
 }
 
@@ -141,88 +116,6 @@ impl Provider for AskingProvider {
     }
 }
 
-struct GatedProvider {
-    entered: Arc<Notify>,
-    gate: Arc<Notify>,
-}
-
-#[async_trait]
-impl Provider for GatedProvider {
-    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        self.entered.notify_one();
-        self.gate.notified().await;
-        Ok(CompletionResponse {
-            content: vec![ContentBlock::ToolUse {
-                id: "call-1".into(),
-                name: "noop".into(),
-                input: json!({}),
-                provider_metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            tool_calls: vec![ToolCall {
-                id: "call-1".into(),
-                name: "noop".into(),
-                input: json!({}),
-            }],
-            usage: TokenUsage::default(),
-        })
-    }
-}
-
-struct NoopTool;
-
-#[async_trait]
-impl Tool for NoopTool {
-    fn name(&self) -> &str {
-        "noop"
-    }
-    fn description(&self) -> &str {
-        "does nothing"
-    }
-    fn parameters_schema(&self) -> Value {
-        json!({ "type": "object" })
-    }
-    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> anyhow::Result<ToolResult> {
-        Ok(ToolResult::ok("ok"))
-    }
-}
-
-struct GatedFactory {
-    entered: Arc<Notify>,
-    gate: Arc<Notify>,
-}
-
-#[async_trait]
-impl AgentFactory for GatedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(
-            Arc::new(GatedProvider {
-                entered: self.entered.clone(),
-                gate: self.gate.clone(),
-            }),
-            tenant,
-            session_id,
-        )
-        .system_prompt("test")
-        .tool(Arc::new(NoopTool))
-        .build())
-    }
-}
-
-struct AskingFactory;
-
-#[async_trait]
-impl AgentFactory for AskingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(AskingProvider), tenant, session_id)
-                .system_prompt("test")
-                .tool(Arc::new(ParkTool))
-                .build(),
-        )
-    }
-}
-
 struct DeferringProvider;
 
 #[async_trait]
@@ -264,865 +157,42 @@ impl Tool for DeferTool {
     }
 }
 
-struct DeferringFactory;
+fn scripted_agent() -> Agent {
+    common::agent(Arc::new(ScriptedProvider))
+}
 
-#[async_trait]
-impl AgentFactory for DeferringFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(DeferringProvider), tenant, session_id)
-                .system_prompt("test")
-                .tool(Arc::new(DeferTool))
-                .build(),
-        )
+fn failing_agent() -> Agent {
+    common::agent(Arc::new(FailingProvider))
+}
+
+fn asking_agent() -> Agent {
+    common::agent(Arc::new(AskingProvider)).tool(ParkTool)
+}
+
+fn deferring_agent() -> Agent {
+    common::agent(Arc::new(DeferringProvider)).tool(DeferTool)
+}
+
+fn test_state(h: &Harness, agent: Agent) -> AppState {
+    AppState {
+        sessions: h.sessions.clone(),
+        blobs: h.blobs.clone(),
+        pool: h.pool.clone(),
+        transcriber: None,
+        agents: Arc::new(AgentRegistry::new(single_agent("main", agent))),
     }
 }
 
-fn scripted_router() -> Router {
-    scripted_router_with_store(Arc::new(MemorySessionStore::new()))
-}
-
-fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn scripted_router_with_artifacts() -> (Router, Arc<dyn ArtifactStore>) {
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let app = router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: artifacts.clone(),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    (app, artifacts)
-}
-
-fn failing_run_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(FailingFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn asking_router(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(AskingFactory)),
-        limits: Default::default(),
-        workers: Some(WorkerConfig {
-            max_concurrent_runs: 2,
-            poll_every: Duration::from_millis(20),
-        }),
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn deferring_router_with_store(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(DeferringFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn gated_router() -> (Router, Arc<Notify>, Arc<Notify>) {
-    let entered = Arc::new(Notify::new());
-    let gate = Arc::new(Notify::new());
-    let app = router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent(
-            "main",
-            Arc::new(GatedFactory {
-                entered: entered.clone(),
-                gate: gate.clone(),
-            }),
-        ),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    (app, entered, gate)
-}
-
-fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body))
-        .unwrap()
-}
-
-fn get_with(uri: &str, tenant: &str, headers: &[(&str, &str)]) -> Request<Body> {
-    let mut b = Request::builder().uri(uri).header("x-runic-tenant", tenant);
-    for (k, v) in headers {
-        b = b.header(*k, *v);
-    }
-    b.body(Body::empty()).unwrap()
-}
-
-fn run_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
-    post_json(
-        &format!("/threads/{thread}/runs/stream"),
-        tenant,
-        json!({ "message": message }).to_string(),
-    )
-}
-
-fn run_body(thread: &str, tenant: &str, body: Value) -> Request<Body> {
-    post_json(
-        &format!("/threads/{thread}/runs/stream"),
+fn wait_body(thread: &str, tenant: &str, body: Value) -> Request<Body> {
+    common::post_json(
+        &format!("/threads/{thread}/runs/wait"),
         tenant,
         body.to_string(),
     )
 }
 
 fn answer(uri: &str, tenant: &str, ans: &str) -> Request<Body> {
-    post_json(uri, tenant, json!({ "answer": ans }).to_string())
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-async fn body_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn sse_data(body: &str) -> Vec<Value> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|json| serde_json::from_str(json.trim()).unwrap())
-        .collect()
-}
-
-fn sse_kinds(body: &str) -> Vec<String> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("event:"))
-        .map(|k| k.trim().to_string())
-        .collect()
-}
-
-fn find_run_id(body: &str) -> Option<String> {
-    sse_data(body)
-        .into_iter()
-        .find_map(|e| (e["type"] == "run_start").then(|| e["run_id"].as_str().unwrap().to_string()))
-}
-
-async fn create_thread(app: &Router, tenant: &str, thread_id: &str) {
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads",
-            tenant,
-            json!({ "thread_id": thread_id }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-}
-
-async fn wait_for_stored_events(store: &dyn SessionStore, tenant: &str, thread: &str, min: usize) {
-    for _ in 0..50 {
-        if store.read(tenant, thread).await.unwrap().len() >= min {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("stored event count did not reach {min}");
-}
-
-#[tokio::test]
-async fn malformed_json_body_is_400() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/stream",
-            TENANT,
-            "{ not json".into(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn missing_message_and_content_is_400() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/stream", TENANT, "{}".into()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(body_json(resp).await["error"], "bad_request");
-}
-
-#[tokio::test]
-async fn empty_message_is_400() {
-    let app = scripted_router();
-    let resp = app.oneshot(run_request("t1", TENANT, "   ")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn empty_content_falls_back_to_message() {
-    let app = scripted_router();
-    let body = json!({ "message": "hello", "content": [] });
-    let resp = app.oneshot(run_body("t1", TENANT, body)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_string(resp).await.contains("pong"));
-}
-
-#[tokio::test]
-async fn invalid_base64_inline_media_is_400_and_stores_nothing() {
-    let (app, artifacts) = scripted_router_with_artifacts();
-    create_thread(&app, TENANT, "b64").await;
-    let body = json!({
-        "content": [
-            { "type": "image", "media_type": "image/png", "data": "!!!not-base64!!!" }
-        ]
-    });
-    let resp = app
-        .clone()
-        .oneshot(run_body("b64", TENANT, body))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(artifacts.list(TENANT, "b64").await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn oversize_run_body_is_rejected_by_body_limit() {
-    let app = scripted_router();
-    let big = "A".repeat(3 * 1024 * 1024);
-    let body = json!({
-        "content": [ { "type": "image", "media_type": "image/png", "data": big } ]
-    });
-    let resp = app.oneshot(run_body("big", TENANT, body)).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-}
-
-#[tokio::test]
-async fn live_stream_shape_is_stable_and_ends_with_done() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(run_request("t1", TENANT, "ping"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-
-    for e in sse_data(&body) {
-        assert!(
-            e["type"].is_string(),
-            "every data payload carries a type: {e}"
-        );
-    }
-
-    let kinds = sse_kinds(&body);
-    assert!(kinds.contains(&"run_start".to_string()));
-    assert!(kinds.contains(&"assistant_text_delta".to_string()));
-    assert!(kinds.contains(&"usage".to_string()));
-    assert_eq!(kinds.last().unwrap(), "done");
-}
-
-#[tokio::test]
-async fn provider_failure_emits_run_error_then_done() {
-    let app = failing_run_router();
-    let resp = app
-        .oneshot(run_request("t1", TENANT, "boom"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let kinds = sse_kinds(&body);
-    assert!(kinds.contains(&"run_error".to_string()), "{kinds:?}");
-    assert_eq!(kinds.last().unwrap(), "done");
-}
-
-struct BrokenFactory;
-
-#[async_trait]
-impl AgentFactory for BrokenFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
-        Err(anyhow::anyhow!("mcp backend unreachable"))
-    }
-}
-
-fn broken_router_with_store(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(BrokenFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-async fn run_status_settles(
-    store: &Arc<dyn SessionStore>,
-    tenant: &str,
-    run_id: &str,
-) -> runic_substrate::RunStatus {
-    for _ in 0..200 {
-        if let Ok(Some(rec)) = store.get_run(tenant, run_id).await
-            && rec.status.is_terminal()
-        {
-            return rec.status;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("run {run_id} never reached a terminal status");
-}
-
-#[tokio::test]
-async fn factory_build_failure_fails_the_run_and_releases_the_thread() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = broken_router_with_store(store.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(run_request("t1", TENANT, "hello"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let run_id = errored_run_id(&body).expect("stream reports the failed run");
-    let kinds = sse_kinds(&body);
-    assert!(body.contains("agent build failed"), "{body}");
-    assert_eq!(kinds.last().unwrap(), "done");
-    assert_eq!(
-        run_status_settles(&store, TENANT, &run_id).await,
-        runic_substrate::RunStatus::Error
-    );
-
-    let resp = app
-        .oneshot(run_request("t1", TENANT, "again"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let second_run = errored_run_id(&body).expect("second run starts despite first failure");
-    assert_ne!(second_run, run_id);
-    assert_eq!(
-        run_status_settles(&store, TENANT, &second_run).await,
-        runic_substrate::RunStatus::Error
-    );
-}
-
-fn errored_run_id(body: &str) -> Option<String> {
-    sse_data(body).into_iter().find_map(|e| {
-        (e["type"] == "run_error").then(|| e["run_id"].as_str().map(str::to_string))?
-    })
-}
-
-async fn accepted_run_id(app: &Router, thread: &str, message: &str) -> String {
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            &format!("/threads/{thread}/runs"),
-            TENANT,
-            json!({ "message": message }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    body_json(resp).await["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string()
-}
-
-#[tokio::test]
-async fn factory_build_failure_on_background_run_lands_in_the_run_row() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = broken_router_with_store(store.clone());
-
-    let run_id = accepted_run_id(&app, "t1", "hello").await;
-    assert_eq!(
-        run_status_settles(&store, TENANT, &run_id).await,
-        runic_substrate::RunStatus::Error
-    );
-    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-    assert!(rec.error.unwrap().contains("agent build failed"));
-
-    let second = accepted_run_id(&app, "t1", "again").await;
-    assert_ne!(second, run_id);
-    assert_eq!(
-        run_status_settles(&store, TENANT, &second).await,
-        runic_substrate::RunStatus::Error
-    );
-}
-
-#[tokio::test]
-async fn factory_build_failure_in_queued_mode_lands_in_the_run_row() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(BrokenFactory)),
-        limits: Default::default(),
-        broker: None,
-        nudge: None,
-        identity: None,
-        workers: Some(WorkerConfig {
-            max_concurrent_runs: 2,
-            poll_every: Duration::from_millis(20),
-        }),
-    });
-
-    let run_id = accepted_run_id(&app, "t1", "hello").await;
-    assert_eq!(
-        run_status_settles(&store, TENANT, &run_id).await,
-        runic_substrate::RunStatus::Error
-    );
-    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-    assert!(rec.error.unwrap().contains("agent build failed"));
-
-    let second = accepted_run_id(&app, "t1", "again").await;
-    assert_eq!(
-        run_status_settles(&store, TENANT, &second).await,
-        runic_substrate::RunStatus::Error
-    );
-}
-
-#[tokio::test]
-async fn run_list_and_timeline_endpoints_serve_the_execution_tree() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(wait_request("t1", TENANT, "ping"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let run_id = body_json(resp).await["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/threads/t1/runs")
-                .header("x-runic-tenant", TENANT)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let list = body_json(resp).await;
-    assert_eq!(list["runs"].as_array().unwrap().len(), 1);
-    assert_eq!(list["runs"][0]["run_id"], run_id.as_str());
-    assert_eq!(list["runs"][0]["status"], "success");
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/threads/t1/runs/{run_id}/timeline"))
-                .header("x-runic-tenant", TENANT)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let trace = body_json(resp).await;
-    assert_eq!(trace["run_id"], run_id.as_str());
-    assert_eq!(trace["status"], "Completed");
-    let turns = trace["turns"].as_array().unwrap();
-    assert_eq!(turns.len(), 1);
-    assert_eq!(turns[0]["complete"], true);
-    assert!(turns[0]["model"].is_string());
-    assert!(turns[0]["model_ms"].is_u64());
-}
-
-#[tokio::test]
-async fn factory_build_failure_on_overview_is_an_agent_error() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = broken_router_with_store(store);
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/agents/main")
-                .header("x-runic-tenant", TENANT)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = body_string(resp).await;
-    assert!(body.contains("mcp backend unreachable"), "{body}");
-}
-
-#[tokio::test]
-async fn factory_build_failure_on_wait_is_an_agent_error() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = broken_router_with_store(store.clone());
-
-    let resp = app
-        .oneshot(wait_request("t1", TENANT, "hello"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = body_string(resp).await;
-    assert!(body.contains("agent build failed"), "{body}");
-}
-
-#[tokio::test]
-async fn stream_run_with_deferred_tool_emits_tool_deferred_and_pauses_the_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = deferring_router_with_store(store.clone());
-
-    let resp = app
-        .oneshot(run_request("t1", TENANT, "need approval"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let run_id = find_run_id(&body).expect("stream starts a run");
-    let kinds = sse_kinds(&body);
-    assert!(
-        kinds.contains(&"tool_deferred".to_string()),
-        "stream should surface deferred tool events live: {body}"
-    );
-    let done = sse_data(&body)
-        .into_iter()
-        .find(|e| e["type"] == "done")
-        .expect("stream closes with done");
-    assert_eq!(done["stop_reason"], "suspended");
-
-    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-    assert_eq!(rec.status, runic_substrate::RunStatus::Paused);
-}
-
-fn wait_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
-    post_json(
-        &format!("/threads/{thread}/runs/wait"),
-        tenant,
-        json!({ "message": message }).to_string(),
-    )
-}
-
-#[tokio::test]
-async fn wait_run_returns_the_final_answer_as_json() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(wait_request("t1", TENANT, "ping"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["text"], "pong");
-    assert_eq!(body["stop_reason"], "end_turn");
-    assert_eq!(body["total_turns"], 1);
-    assert_eq!(body["input_tokens"], 1);
-    assert_eq!(body["output_tokens"], 2);
-    assert!(body["run_id"].as_str().unwrap().starts_with("r-"));
-}
-
-#[tokio::test]
-async fn wait_run_with_deferred_tool_pauses_the_run_and_replays_the_deferral() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = deferring_router_with_store(store.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(wait_request("t1", TENANT, "need approval"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    assert_eq!(body["stop_reason"], "suspended");
-    let run_id = body["run_id"].as_str().unwrap();
-
-    let rec = store.get_run(TENANT, run_id).await.unwrap().unwrap();
-    assert_eq!(
-        rec.status,
-        runic_substrate::RunStatus::Paused,
-        "a deferred tool suspends the HTTP run until an external resume"
-    );
-
-    let replay = app
-        .oneshot(get_with(
-            &format!("/threads/t1/runs/{run_id}/stream"),
-            TENANT,
-            &[],
-        ))
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::OK);
-    let replay = body_string(replay).await;
-    let deferred = sse_data(&replay)
-        .into_iter()
-        .find(|e| e["type"] == "tool_deferred")
-        .expect("replay exposes deferred tool event");
-    assert_eq!(deferred["call_id"], "defer-1");
-    assert_eq!(
-        deferred["tool"], "defer_to_human",
-        "the frontend keys off the same tool name every other tool event carries"
-    );
-    assert_eq!(deferred["payload"]["question"], "continue?");
-}
-
-#[tokio::test]
-async fn wait_run_provider_failure_is_500_agent_error() {
-    let app = failing_run_router();
-    let resp = app
-        .oneshot(wait_request("t1", TENANT, "boom"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body_json(resp).await["error"], "agent");
-}
-
-#[tokio::test]
-async fn wait_run_rejects_empty_body() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/wait", TENANT, "{}".into()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn wait_run_persists_the_same_lifecycle_as_streaming() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    let resp = app
-        .oneshot(wait_request("persist", TENANT, "hi"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    wait_for_stored_events(store.as_ref(), TENANT, "persist", 4).await;
-}
-
-#[tokio::test]
-async fn cancel_with_no_run_in_flight_is_409() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn cancel_stops_the_run_gracefully_and_reports_it_over_sse() {
-    let (app, entered, gate) = gated_router();
-    let thread = "t1";
-
-    let run_app = app.clone();
-    let run_task = tokio::spawn(async move {
-        let resp = run_app
-            .oneshot(run_request(thread, TENANT, "go"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-
-    entered.notified().await;
-
-    let cancel_resp = app
-        .clone()
-        .oneshot(post_json(
-            &format!("/threads/{thread}/runs/cancel"),
-            TENANT,
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(cancel_resp.status(), StatusCode::ACCEPTED);
-
-    gate.notify_one();
-
-    let body = run_task.await.unwrap();
-    let done = sse_data(&body)
-        .into_iter()
-        .find(|e| e["type"] == "done")
-        .expect("a done event");
-    assert_eq!(done["stop_reason"], "cancelled");
-
-    for _ in 0..50 {
-        let resp = app
-            .clone()
-            .oneshot(post_json(
-                &format!("/threads/{thread}/runs/cancel"),
-                TENANT,
-                String::new(),
-            ))
-            .await
-            .unwrap();
-        if resp.status() == StatusCode::CONFLICT {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("cancel token was never cleared after the run finished");
-}
-
-#[tokio::test]
-async fn streamed_lifecycle_is_persisted_for_replay() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    let resp = app
-        .oneshot(run_request("persist", TENANT, "hi"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let _ = body_string(resp).await;
-
-    wait_for_stored_events(store.as_ref(), TENANT, "persist", 4).await;
-    let events = store.read(TENANT, "persist").await.unwrap();
-    let kinds: Vec<&str> = events
-        .iter()
-        .map(|s| match &s.event {
-            runic_substrate::SessionEvent::RunStart { .. } => "run_start",
-            runic_substrate::SessionEvent::RunEnd { .. } => "run_end",
-            runic_substrate::SessionEvent::Message { .. } => "message",
-            _ => "other",
-        })
-        .collect();
-    assert!(kinds.contains(&"run_start"));
-    assert!(kinds.contains(&"run_end"));
-    assert!(kinds.iter().filter(|k| **k == "message").count() >= 2);
-}
-
-#[tokio::test]
-async fn replay_unknown_thread_is_404() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(get_with("/threads/ghost/runs/r1/stream", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn replay_unknown_run_on_known_thread_is_404() {
-    let app = scripted_router();
-    create_thread(&app, TENANT, "known").await;
-    let resp = app
-        .oneshot(get_with("/threads/known/runs/nope/stream", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn replay_bad_last_event_id_is_treated_as_zero() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    let resp = app
-        .clone()
-        .oneshot(run_request("rp", TENANT, "hi"))
-        .await
-        .unwrap();
-    let run_id = find_run_id(&body_string(resp).await).unwrap();
-    wait_for_stored_events(store.as_ref(), TENANT, "rp", 4).await;
-
-    let resp = app
-        .oneshot(get_with(
-            &format!("/threads/rp/runs/{run_id}/stream"),
-            TENANT,
-            &[("last-event-id", "not-a-number")],
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = tokio::time::timeout(Duration::from_secs(2), body_string(resp))
-        .await
-        .expect("closed run replay should finish");
-    let kinds = sse_kinds(&body);
-    assert!(kinds.contains(&"message".to_string()));
-    assert!(kinds.contains(&"run_end".to_string()));
-    assert_eq!(kinds.last().unwrap(), "done");
-}
-
-#[tokio::test]
-async fn replay_past_end_emits_only_done() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    let resp = app
-        .clone()
-        .oneshot(run_request("pe", TENANT, "hi"))
-        .await
-        .unwrap();
-    let run_id = find_run_id(&body_string(resp).await).unwrap();
-    wait_for_stored_events(store.as_ref(), TENANT, "pe", 4).await;
-
-    let resp = app
-        .oneshot(get_with(
-            &format!("/threads/pe/runs/{run_id}/stream"),
-            TENANT,
-            &[("last-event-id", "100000")],
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = tokio::time::timeout(Duration::from_secs(2), body_string(resp))
-        .await
-        .expect("replay should finish");
-    let kinds = sse_kinds(&body);
-    assert_eq!(kinds, vec!["done".to_string()]);
+    common::post_json(uri, tenant, json!({ "answer": ans }).to_string())
 }
 
 async fn wait_for_run_status(
@@ -1147,48 +217,39 @@ async fn wait_for_run_status(
     panic!("run {run_id} never reached {want:?} (last: {got:?})");
 }
 
-async fn suspend_a_run(app: &Router, store: &Arc<dyn SessionStore>, thread: &str) -> String {
+async fn suspend_a_run(app: &Router, h: &Harness, thread: &str) -> String {
     let resp = app
         .clone()
-        .oneshot(run_request(thread, TENANT, "go"))
+        .oneshot(common::wait_request(thread, &h.tenant, "go"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let run_id = find_run_id(&body).expect("run starts");
-    assert!(
-        sse_kinds(&body).contains(&"tool_deferred".to_string()),
-        "an ask_user run surfaces tool_deferred: {body}"
-    );
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Paused).await;
+    let body = common::body_json(resp).await;
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Waiting).await;
     run_id
 }
 
 async fn seed_paused_deferred_run(
     store: &dyn SessionStore,
+    tenant: &str,
     thread: &str,
     run_id: &str,
     call_id: &str,
     include_tool_use: bool,
 ) {
     store
-        .create_run(
-            TENANT,
-            thread,
-            run_id,
-            "main",
-            &runic_substrate::RunInput::default(),
-        )
+        .create_run(tenant, thread, run_id, "main")
         .await
         .unwrap();
     store
-        .set_run_status(run_id, RunStatus::Paused, None)
+        .set_run_status(run_id, RunStatus::Waiting, None)
         .await
         .unwrap();
     if include_tool_use {
         store
             .append(
-                TENANT,
+                tenant,
                 thread,
                 &runic_substrate::SessionEvent::Message {
                     run_id: run_id.to_string(),
@@ -1206,7 +267,7 @@ async fn seed_paused_deferred_run(
     }
     store
         .append(
-            TENANT,
+            tenant,
             thread,
             &runic_substrate::SessionEvent::ToolDeferred {
                 run_id: run_id.to_string(),
@@ -1221,58 +282,389 @@ async fn seed_paused_deferred_run(
 }
 
 #[tokio::test]
-async fn ask_defers_then_answer_resumes_the_run_to_completion() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "hitl").await;
-    let run_id = suspend_a_run(&app, &store, "hitl").await;
-
+async fn malformed_json_body_is_400() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
     let resp = app
-        .clone()
-        .oneshot(answer("/threads/hitl/asks/call-1", TENANT, "yes"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
-    let answered = store
-        .read(TENANT, "hitl")
-        .await
-        .unwrap()
-        .into_iter()
-        .any(|e| matches!(&e.event,
-            runic_substrate::SessionEvent::Message { msg, .. }
-                if matches!(&msg.content, MessageContent::Blocks(b)
-                    if b.iter().any(|blk| matches!(blk, ContentBlock::Text { text, .. } if text == "done")))));
-    assert!(answered, "the resumed run produced its final answer");
-}
-
-#[tokio::test]
-async fn answering_the_legacy_route_also_resumes() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "legacy").await;
-    let run_id = suspend_a_run(&app, &store, "legacy").await;
-
-    let resp = app
-        .clone()
-        .oneshot(answer(
-            &format!("/threads/legacy/runs/{run_id}/asks/call-1"),
-            TENANT,
-            "yes",
+        .oneshot(common::post_json(
+            "/threads/t1/runs/wait",
+            &h.tenant,
+            "{ not json",
         ))
         .await
         .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn missing_message_and_content_is_400() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let resp = app
+        .oneshot(common::post_json("/threads/t1/runs/wait", &h.tenant, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(common::body_json(resp).await["error"], "bad_request");
+}
+
+#[tokio::test]
+async fn empty_message_is_400() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let resp = app
+        .oneshot(common::wait_request("t1", &h.tenant, "   "))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn empty_content_falls_back_to_message() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let body = json!({ "message": "hello", "content": [] });
+    let resp = app.oneshot(wait_body("t1", &h.tenant, body)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(common::body_json(resp).await["text"], "pong");
+}
+
+#[tokio::test]
+async fn oversize_run_body_is_rejected_by_body_limit() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let big = "A".repeat(3 * 1024 * 1024);
+    let body = json!({
+        "content": [ { "type": "image", "media_type": "image/png", "data": big } ]
+    });
+    let resp = app
+        .oneshot(wait_body("big", &h.tenant, body))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn invalid_base64_inline_media_is_rejected_and_stores_nothing() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    common::create_thread(&h.single_router(scripted_agent()), &h.tenant, "b64").await;
+    let state = test_state(&h, scripted_agent());
+    let msg = Message::user_with_blocks(vec![ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: "!!!not-base64!!!".into(),
+    }]);
+    let result = input_from_message(&state, &h.tenant, "b64", msg).await;
+    assert!(matches!(result, Err(ServeError::BadRequest(_))));
+    assert!(
+        h.artifacts()
+            .list(&h.tenant, "b64")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn wait_run_returns_the_final_answer_as_json() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let resp = app
+        .oneshot(common::wait_request("t1", &h.tenant, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = common::body_json(resp).await;
+    assert_eq!(body["text"], "pong");
+    assert_eq!(body["stop_reason"], "end_turn");
+    assert_eq!(body["total_turns"], 1);
+    assert_eq!(body["input_tokens"], 1);
+    assert_eq!(body["output_tokens"], 2);
+    assert!(body["run_id"].as_str().unwrap().starts_with("r-"));
+}
+
+#[tokio::test]
+async fn wait_run_with_deferred_tool_pauses_the_run_and_replays_the_deferral() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(deferring_agent());
+
+    let resp = app
+        .clone()
+        .oneshot(common::wait_request("t1", &h.tenant, "need approval"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = common::body_json(resp).await;
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+
+    let rec = h
+        .store()
+        .get_run(&h.tenant, &run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rec.status,
+        RunStatus::Waiting,
+        "a deferred tool suspends the HTTP run until an external resume"
+    );
+
+    let resp = app
+        .oneshot(common::get("/threads/t1/events", &h.tenant))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let events = common::body_json(resp).await;
+    let deferred = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| &e["event"])
+        .find(|e| e["kind"] == "ToolDeferred")
+        .expect("events page exposes the deferred tool call");
+    assert_eq!(deferred["call_id"], "defer-1");
+    assert_eq!(
+        deferred["tool"], "defer_to_human",
+        "the frontend keys off the same tool name every other tool event carries"
+    );
+    assert_eq!(deferred["payload"]["question"], "continue?");
+}
+
+#[tokio::test]
+async fn wait_run_provider_failure_is_500_agent_error() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(failing_agent());
+    let resp = app
+        .oneshot(common::wait_request("t1", &h.tenant, "boom"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(common::body_json(resp).await["error"], "agent");
+}
+
+#[tokio::test]
+async fn wait_run_rejects_empty_body() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let resp = app
+        .oneshot(common::post_json("/threads/t1/runs/wait", &h.tenant, "{}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn wait_run_persists_events_for_thread_history() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    let resp = app
+        .oneshot(common::wait_request("persist", &h.tenant, "hi"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ok = common::poll_until(50, Duration::from_millis(10), || async {
+        h.store().read(&h.tenant, "persist").await.unwrap().len() >= 4
+    })
+    .await;
+    assert!(ok, "stored event count did not reach 4");
+}
+
+#[tokio::test]
+async fn run_list_and_timeline_endpoints_serve_the_execution_tree() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+
+    let resp = app
+        .clone()
+        .oneshot(common::wait_request("t1", &h.tenant, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_id = common::body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(common::get("/threads/t1/runs", &h.tenant))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let list = common::body_json(resp).await;
+    assert_eq!(list["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(list["runs"][0]["run_id"], run_id.as_str());
+    assert_eq!(list["runs"][0]["status"], "successful");
+
+    let resp = app
+        .oneshot(common::get(
+            &format!("/threads/t1/runs/{run_id}/timeline"),
+            &h.tenant,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let trace = common::body_json(resp).await;
+    assert_eq!(trace["run_id"], run_id.as_str());
+    assert_eq!(trace["status"], "Completed");
+    let turns = trace["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0]["complete"], true);
+    assert!(turns[0]["model"].is_string());
+    assert!(turns[0]["model_ms"].is_u64());
+}
+
+#[tokio::test]
+async fn run_status_for_an_unknown_or_foreign_run_is_404() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+    h.store()
+        .create_run(&h.tenant, "t1", "r-real", "main")
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(common::get("/threads/t1/runs/r-missing", &h.tenant))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .clone()
+        .oneshot(common::get("/threads/other/runs/r-real", &h.tenant))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let resp = app
+        .oneshot(common::get("/threads/t1/runs/r-real", "mallory"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn successful_run_rows_track_started_and_finished_timestamps() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(scripted_agent());
+
+    let resp = app
+        .oneshot(common::wait_request("t1", &h.tenant, "ping"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_id = common::body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rec = h
+        .store()
+        .get_run(&h.tenant, &run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.status, RunStatus::Successful);
+    assert_eq!(rec.agent, "main");
+    assert_eq!(rec.session_id, "t1");
+    assert!(rec.started_at.is_some());
+    assert!(rec.finished_at.is_some());
+}
+
+#[tokio::test]
+async fn failing_run_rows_land_as_failed_with_an_error() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(failing_agent());
+
+    let resp = app
+        .oneshot(common::wait_request("t2", &h.tenant, "boom"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let rec = h
+        .store()
+        .latest_run(&h.tenant, "t2")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.status, RunStatus::Failed);
+    assert!(rec.error.is_some());
+}
+
+#[tokio::test]
+async fn ask_defers_then_answer_is_accepted_and_delivers_the_tool_result() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "hitl").await;
+    let run_id = suspend_a_run(&app, &h, "hitl").await;
+
+    let resp = app
+        .clone()
+        .oneshot(answer("/threads/hitl/asks/call-1", &h.tenant, "yes"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
+    let delivered = h
+        .store()
+        .read(&h.tenant, "hitl")
+        .await
+        .unwrap()
+        .into_iter()
+        .any(|e| {
+            matches!(&e.event,
+            runic_substrate::SessionEvent::Message { msg, .. }
+                if matches!(&msg.content, MessageContent::Blocks(b)
+                    if b.iter().any(|blk| matches!(blk, ContentBlock::ToolResult { .. }))))
+        });
+    assert!(
+        delivered,
+        "the answer must land as a tool result on the paused call"
+    );
 }
 
 #[tokio::test]
 async fn answering_an_unknown_ask_is_400() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store);
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
     let resp = app
-        .oneshot(answer("/threads/nothread/asks/ghost", TENANT, "x"))
+        .oneshot(answer("/threads/nothread/asks/ghost", &h.tenant, "x"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1280,10 +672,12 @@ async fn answering_an_unknown_ask_is_400() {
 
 #[tokio::test]
 async fn answering_from_a_wrong_tenant_is_rejected_and_leaves_the_run_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "scoped").await;
-    let run_id = suspend_a_run(&app, &store, "scoped").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "scoped").await;
+    let run_id = suspend_a_run(&app, &h, "scoped").await;
 
     let wrong = app
         .clone()
@@ -1292,152 +686,169 @@ async fn answering_from_a_wrong_tenant_is_rejected_and_leaves_the_run_paused() {
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        store
-            .get_run(TENANT, &run_id)
+        h.store()
+            .get_run(&h.tenant, &run_id)
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "a rejected answer must not disturb the paused run"
     );
 
     let correct = app
-        .oneshot(answer("/threads/scoped/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/scoped/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(correct.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
 }
 
 #[tokio::test]
 async fn answering_from_a_wrong_thread_is_rejected_and_leaves_the_run_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "origin").await;
-    create_thread(&app, TENANT, "other").await;
-    let run_id = suspend_a_run(&app, &store, "origin").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "origin").await;
+    common::create_thread(&app, &h.tenant, "other").await;
+    let run_id = suspend_a_run(&app, &h, "origin").await;
 
     let wrong = app
         .clone()
-        .oneshot(answer("/threads/other/asks/call-1", TENANT, "x"))
+        .oneshot(answer("/threads/other/asks/call-1", &h.tenant, "x"))
         .await
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        store
-            .get_run(TENANT, &run_id)
+        h.store()
+            .get_run(&h.tenant, &run_id)
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "a rejected cross-thread answer must not disturb the paused run"
     );
 
     let correct = app
-        .oneshot(answer("/threads/origin/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/origin/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(correct.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
 }
 
 #[tokio::test]
 async fn answering_with_an_invalid_body_is_rejected_and_leaves_the_run_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "bad-body").await;
-    let run_id = suspend_a_run(&app, &store, "bad-body").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "bad-body").await;
+    let run_id = suspend_a_run(&app, &h, "bad-body").await;
 
     let bad = app
         .clone()
-        .oneshot(post_json(
+        .oneshot(common::post_json(
             "/threads/bad-body/asks/call-1",
-            TENANT,
-            "{}".into(),
+            &h.tenant,
+            "{}",
         ))
         .await
         .unwrap();
     assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
-        store
-            .get_run(TENANT, &run_id)
+        h.store()
+            .get_run(&h.tenant, &run_id)
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "an invalid answer body must not resume the run"
     );
 
     let correct = app
-        .oneshot(answer("/threads/bad-body/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/bad-body/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(correct.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
 }
 
 #[tokio::test]
 async fn answering_with_a_wrong_json_type_is_rejected_and_leaves_the_run_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "bad-type").await;
-    let run_id = suspend_a_run(&app, &store, "bad-type").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "bad-type").await;
+    let run_id = suspend_a_run(&app, &h, "bad-type").await;
 
     let bad = app
         .clone()
-        .oneshot(post_json(
+        .oneshot(common::post_json(
             "/threads/bad-type/asks/call-1",
-            TENANT,
+            &h.tenant,
             json!({ "answer": 42 }).to_string(),
         ))
         .await
         .unwrap();
     assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
-        store
-            .get_run(TENANT, &run_id)
+        h.store()
+            .get_run(&h.tenant, &run_id)
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "a schema-invalid answer must not resume the run"
     );
 
     let correct = app
-        .oneshot(answer("/threads/bad-type/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/bad-type/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(correct.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
 }
 
 #[tokio::test]
 async fn answering_a_deferred_call_without_matching_tool_use_is_400_and_stays_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    seed_paused_deferred_run(store.as_ref(), "orphaned", "r-orphaned", "call-1", false).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    seed_paused_deferred_run(
+        h.store().as_ref(),
+        &h.tenant,
+        "orphaned",
+        "r-orphaned",
+        "call-1",
+        false,
+    )
+    .await;
 
     let resp = app
-        .oneshot(answer("/threads/orphaned/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/orphaned/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        store
-            .get_run(TENANT, "r-orphaned")
+        h.store()
+            .get_run(&h.tenant, "r-orphaned")
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "a malformed deferral must not be resumed"
     );
-    let tool_results = store
-        .read(TENANT, "orphaned")
+    let tool_results = h
+        .store()
+        .read(&h.tenant, "orphaned")
         .await
         .unwrap()
         .into_iter()
@@ -1453,42 +864,60 @@ async fn answering_a_deferred_call_without_matching_tool_use_is_400_and_stays_pa
 
 #[tokio::test]
 async fn answering_a_deferred_call_ignores_tool_use_from_another_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    seed_paused_deferred_run(store.as_ref(), "same-thread", "r-other", "call-1", true).await;
-    store
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    seed_paused_deferred_run(
+        h.store().as_ref(),
+        &h.tenant,
+        "same-thread",
+        "r-other",
+        "call-1",
+        true,
+    )
+    .await;
+    h.store()
         .set_run_status("r-other", RunStatus::Cancelled, None)
         .await
         .unwrap();
-    seed_paused_deferred_run(store.as_ref(), "same-thread", "r-paused", "call-1", false).await;
+    seed_paused_deferred_run(
+        h.store().as_ref(),
+        &h.tenant,
+        "same-thread",
+        "r-paused",
+        "call-1",
+        false,
+    )
+    .await;
 
     let resp = app
-        .oneshot(answer("/threads/same-thread/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/same-thread/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        store
-            .get_run(TENANT, "r-paused")
+        h.store()
+            .get_run(&h.tenant, "r-paused")
             .await
             .unwrap()
             .unwrap()
             .status,
-        RunStatus::Paused,
+        RunStatus::Waiting,
         "answer resolution must not borrow a ToolUse from a different run"
     );
 }
 
 struct RacingResumeStore {
     inner: MemorySessionStore,
-    resume_barrier: Barrier,
+    resume_barrier: tokio::sync::Barrier,
 }
 
 impl RacingResumeStore {
     fn new() -> Self {
         Self {
             inner: MemorySessionStore::new(),
-            resume_barrier: Barrier::new(2),
+            resume_barrier: tokio::sync::Barrier::new(2),
         }
     }
 }
@@ -1564,10 +993,9 @@ impl SessionStore for RacingResumeStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
-        input: &runic_substrate::RunInput,
     ) -> runic_substrate::Result<()> {
         self.inner
-            .create_run(tenant, session_id, run_id, agent, input)
+            .create_run(tenant, session_id, run_id, agent)
             .await
     }
 
@@ -1605,16 +1033,34 @@ impl SessionStore for RacingResumeStore {
 
 #[tokio::test]
 async fn concurrent_answers_to_the_same_deferred_call_accept_only_one() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
     let store: Arc<dyn SessionStore> = Arc::new(RacingResumeStore::new());
-    let app = asking_router(store.clone());
-    seed_paused_deferred_run(store.as_ref(), "race-answer", "r-race", "call-1", true).await;
+    let app = router(
+        runic_serve::ServeConfig::new(
+            runic_substrate::Sessions::from(store.clone()),
+            h.blobs.clone(),
+            h.pool.clone(),
+        )
+        .agent("main", asking_agent()),
+    );
+    seed_paused_deferred_run(
+        store.as_ref(),
+        &h.tenant,
+        "race-answer",
+        "r-race",
+        "call-1",
+        true,
+    )
+    .await;
 
     let first = app
         .clone()
-        .oneshot(answer("/threads/race-answer/asks/call-1", TENANT, "yes"));
+        .oneshot(answer("/threads/race-answer/asks/call-1", &h.tenant, "yes"));
     let second = app
         .clone()
-        .oneshot(answer("/threads/race-answer/asks/call-1", TENANT, "yes"));
+        .oneshot(answer("/threads/race-answer/asks/call-1", &h.tenant, "yes"));
     let (first, second) = tokio::join!(first, second);
     let mut statuses = vec![first.unwrap().status(), second.unwrap().status()];
     statuses.sort();
@@ -1626,7 +1072,7 @@ async fn concurrent_answers_to_the_same_deferred_call_accept_only_one() {
     );
 
     let tool_results = store
-        .read(TENANT, "race-answer")
+        .read(&h.tenant, "race-answer")
         .await
         .unwrap()
         .into_iter()
@@ -1641,62 +1087,24 @@ async fn concurrent_answers_to_the_same_deferred_call_accept_only_one() {
 }
 
 #[tokio::test]
-async fn answering_after_cancelling_a_paused_run_is_400_and_does_not_resume() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "cancel-answer").await;
-    let run_id = suspend_a_run(&app, &store, "cancel-answer").await;
-
-    let cancel = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/cancel-answer/runs/cancel",
-            TENANT,
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Cancelled).await;
-
-    let late = app
-        .oneshot(answer(
-            "/threads/cancel-answer/asks/call-1",
-            TENANT,
-            "too late",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(late.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        store
-            .get_run(TENANT, &run_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        RunStatus::Cancelled,
-        "a late answer must not move a cancelled run back to active"
-    );
-}
-
-#[tokio::test]
 async fn answering_a_second_time_is_400_once_the_run_left_paused() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = asking_router(store.clone());
-    create_thread(&app, TENANT, "twice").await;
-    let run_id = suspend_a_run(&app, &store, "twice").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = h.single_router(asking_agent());
+    common::create_thread(&app, &h.tenant, "twice").await;
+    let run_id = suspend_a_run(&app, &h, "twice").await;
 
     let first = app
         .clone()
-        .oneshot(answer("/threads/twice/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/twice/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(first.status(), StatusCode::ACCEPTED);
-    wait_for_run_status(store.as_ref(), TENANT, &run_id, RunStatus::Success).await;
+    wait_for_run_status(h.store().as_ref(), &h.tenant, &run_id, RunStatus::Idle).await;
 
     let second = app
-        .oneshot(answer("/threads/twice/asks/call-1", TENANT, "yes"))
+        .oneshot(answer("/threads/twice/asks/call-1", &h.tenant, "yes"))
         .await
         .unwrap();
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
@@ -1780,20 +1188,23 @@ impl SessionStore for SlowStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
-        input: &runic_substrate::RunInput,
     ) -> runic_substrate::Result<()> {
         self.inner
-            .create_run(tenant, session_id, run_id, agent, input)
+            .create_run(tenant, session_id, run_id, agent)
             .await
     }
 
     async fn set_run_status(
         &self,
         run_id: &str,
-        status: runic_substrate::RunStatus,
+        status: RunStatus,
         error: Option<&str>,
     ) -> runic_substrate::Result<()> {
         self.inner.set_run_status(run_id, status, error).await
+    }
+
+    async fn try_start_run(&self, tenant: &str, run_id: &str) -> runic_substrate::Result<bool> {
+        self.inner.try_start_run(tenant, run_id).await
     }
 
     async fn get_run(
@@ -1811,1436 +1222,37 @@ impl SessionStore for SlowStore {
     ) -> runic_substrate::Result<Option<runic_substrate::RunRecord>> {
         self.inner.latest_run(tenant, session_id).await
     }
-
-    async fn claim_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> runic_substrate::Result<bool> {
-        self.inner.claim_run(run_id, claimed_by, lease).await
-    }
-
-    async fn heartbeat_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> runic_substrate::Result<Option<runic_substrate::RunSignals>> {
-        self.inner.heartbeat_run(run_id, claimed_by, lease).await
-    }
-
-    async fn reap_expired_runs(&self) -> runic_substrate::Result<Vec<runic_substrate::RunRecord>> {
-        self.inner.reap_expired_runs().await
-    }
 }
 
 #[tokio::test]
 async fn wait_response_implies_the_run_is_durable() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
     let store = Arc::new(SlowStore {
         inner: MemorySessionStore::new(),
         delay: Duration::from_millis(200),
     });
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
+    let app = router(
+        runic_serve::ServeConfig::new(
+            runic_substrate::Sessions::from(store.clone() as Arc<dyn SessionStore>),
+            h.blobs.clone(),
+            h.pool.clone(),
+        )
+        .agent("main", scripted_agent()),
+    );
 
     let resp = app
-        .oneshot(wait_request("t1", TENANT, "ping"))
+        .oneshot(common::wait_request("t1", &h.tenant, "ping"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let stored = store.read(TENANT, "t1").await.unwrap();
+    let stored = store.read(&h.tenant, "t1").await.unwrap();
     assert!(
         stored
             .iter()
             .any(|s| matches!(s.event, runic_substrate::SessionEvent::RunEnd { .. })),
         "RunEnd must be durable before the wait response returns"
     );
-}
-
-#[tokio::test]
-async fn stream_done_implies_the_run_is_durable() {
-    let store = Arc::new(SlowStore {
-        inner: MemorySessionStore::new(),
-        delay: Duration::from_millis(200),
-    });
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let resp = app
-        .oneshot(run_body("t1", TENANT, json!({ "message": "ping" })))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    assert_eq!(sse_kinds(&body).last().unwrap(), "done");
-
-    let stored = store.read(TENANT, "t1").await.unwrap();
-    assert!(
-        stored
-            .iter()
-            .any(|s| matches!(s.event, runic_substrate::SessionEvent::RunEnd { .. })),
-        "RunEnd must be durable before the stream's done event"
-    );
-}
-
-struct SteerableProvider {
-    entered: Arc<Notify>,
-    gate: Arc<Notify>,
-    first: AtomicBool,
-    requests: std::sync::Mutex<Vec<CompletionRequest>>,
-}
-
-#[async_trait]
-impl Provider for SteerableProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        self.requests.lock().unwrap().push(req);
-        if !self.first.swap(true, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.gate.notified().await;
-            return Ok(CompletionResponse {
-                content: vec![ContentBlock::ToolUse {
-                    id: "call-1".into(),
-                    name: "noop".into(),
-                    input: json!({}),
-                    provider_metadata: None,
-                }],
-                stop_reason: StopReason::ToolUse,
-                tool_calls: vec![ToolCall {
-                    id: "call-1".into(),
-                    name: "noop".into(),
-                    input: json!({}),
-                }],
-                usage: TokenUsage::default(),
-            });
-        }
-        Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text: "steered done".into(),
-                provider_metadata: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            tool_calls: vec![],
-            usage: TokenUsage::default(),
-        })
-    }
-}
-
-struct SteerableFactory {
-    provider: Arc<SteerableProvider>,
-}
-
-#[async_trait]
-impl AgentFactory for SteerableFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(self.provider.clone(), tenant, session_id)
-            .system_prompt("test")
-            .tool(Arc::new(NoopTool))
-            .build())
-    }
-}
-
-#[tokio::test]
-async fn steer_with_no_run_in_flight_is_409() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "hey" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn steer_lands_at_the_next_turn_boundary() {
-    let provider = Arc::new(SteerableProvider {
-        entered: Arc::new(Notify::new()),
-        gate: Arc::new(Notify::new()),
-        first: AtomicBool::new(false),
-        requests: std::sync::Mutex::new(Vec::new()),
-    });
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent(
-            "main",
-            Arc::new(SteerableFactory {
-                provider: provider.clone(),
-            }),
-        ),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let run_app = app.clone();
-    let run_task = tokio::spawn(async move {
-        let resp = run_app
-            .oneshot(run_request("t1", TENANT, "go"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-
-    provider.entered.notified().await;
-
-    let steer_resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "check the db instead" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(steer_resp.status(), StatusCode::ACCEPTED);
-
-    provider.gate.notify_one();
-
-    let body = run_task.await.unwrap();
-    assert_eq!(sse_kinds(&body).last().unwrap(), "done");
-
-    let second_texts: String = {
-        let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        requests[1]
-            .messages
-            .iter()
-            .map(|m| m.content.text_content())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    assert!(second_texts.contains("check the db instead"));
-
-    let stored = store.read(TENANT, "t1").await.unwrap();
-    assert!(stored.iter().any(|s| matches!(
-        &s.event,
-        runic_substrate::SessionEvent::Message { msg, .. }
-            if msg.content.text_content().contains("check the db instead")
-    )));
-}
-
-#[tokio::test]
-async fn steer_with_empty_text_is_400() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "  " }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn background_run_returns_202_and_completes_detached() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/t1/runs",
-            TENANT,
-            json!({ "message": "go" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let body = body_json(resp).await;
-    let run_id = body["run_id"].as_str().unwrap().to_string();
-    assert_eq!(body["status"], "pending");
-
-    let mut record = None;
-    for _ in 0..100 {
-        let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-        if rec.status.is_terminal() {
-            record = Some(rec);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let record = record.expect("background run reached a terminal status");
-    assert_eq!(record.status, runic_substrate::RunStatus::Success);
-
-    let resp = app
-        .clone()
-        .oneshot(get_with(&format!("/threads/t1/runs/{run_id}"), TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let status = body_json(resp).await;
-    assert_eq!(status["status"], "success");
-    assert_eq!(status["agent"], "main");
-
-    let resp = app
-        .oneshot(get_with(
-            &format!("/threads/t1/runs/{run_id}/stream"),
-            TENANT,
-            &[],
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    let kinds = sse_kinds(&body);
-    assert!(kinds.iter().any(|k| k == "run_start"));
-    assert!(kinds.last().is_some_and(|k| k == "done"));
-}
-
-#[tokio::test]
-async fn background_run_rejects_bad_input_before_accepting() {
-    let app = scripted_router();
-    let resp = app
-        .clone()
-        .oneshot(post_json("/threads/t1/runs", TENANT, json!({}).to_string()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs",
-            TENANT,
-            json!({ "message": "go", "agent": "ghost" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn background_run_failure_lands_in_the_run_row() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(FailingFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/t1/runs",
-            TENANT,
-            json!({ "message": "boom" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let run_id = body_json(resp).await["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    for _ in 0..100 {
-        let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-        if rec.status.is_terminal() {
-            assert_eq!(rec.status, runic_substrate::RunStatus::Error);
-            assert!(rec.error.is_some());
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("background run never reached a terminal status");
-}
-
-fn queued_router(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        broker: None,
-        nudge: None,
-        identity: None,
-        workers: Some(runic_serve::WorkerConfig {
-            max_concurrent_runs: 4,
-            poll_every: Duration::from_millis(20),
-        }),
-    })
-}
-
-async fn wait_terminal(
-    store: &Arc<MemorySessionStore>,
-    run_id: &str,
-) -> runic_substrate::RunRecord {
-    for _ in 0..200 {
-        let rec = store.get_run(TENANT, run_id).await.unwrap().unwrap();
-        if rec.status.is_terminal() {
-            return rec;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("queued run never reached a terminal status");
-}
-
-#[tokio::test]
-async fn queued_mode_executes_background_runs_via_workers() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = queued_router(store.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/t1/runs",
-            TENANT,
-            json!({ "message": "go" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let body = body_json(resp).await;
-    assert_eq!(body["status"], "queued");
-    let run_id = body["run_id"].as_str().unwrap().to_string();
-
-    let rec = wait_terminal(&store, &run_id).await;
-    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
-    assert!(rec.claimed_by.unwrap().starts_with("inst-"));
-
-    let events = store.read(TENANT, "t1").await.unwrap();
-    assert!(events.iter().any(|e| matches!(
-        &e.event,
-        runic_substrate::SessionEvent::RunEnd { run_id: r, .. } if r == &run_id
-    )));
-
-    let resp = app
-        .oneshot(wait_request("t2", TENANT, "hello"))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "wait runs still execute locally in queue mode"
-    );
-}
-
-#[tokio::test]
-async fn a_nudge_wakes_workers_without_waiting_out_the_poll_interval() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        broker: None,
-        nudge: Some(runic_serve::LocalNudge::new()),
-        identity: None,
-        workers: Some(runic_serve::WorkerConfig {
-            max_concurrent_runs: 4,
-            poll_every: Duration::from_secs(120),
-        }),
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs",
-            TENANT,
-            json!({ "message": "go" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let run_id = body_json(resp).await["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let rec = wait_terminal(&store, &run_id).await;
-    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
-}
-
-#[tokio::test]
-async fn a_burst_of_queued_runs_survives_collapsed_nudges() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        broker: None,
-        nudge: Some(runic_serve::LocalNudge::new()),
-        identity: None,
-        workers: Some(runic_serve::WorkerConfig {
-            max_concurrent_runs: 1,
-            poll_every: Duration::from_secs(120),
-        }),
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let mut run_ids = Vec::new();
-    for thread in ["t1", "t2", "t3"] {
-        let resp = app
-            .clone()
-            .oneshot(post_json(
-                &format!("/threads/{thread}/runs"),
-                TENANT,
-                json!({ "message": "go" }).to_string(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        run_ids.push(
-            body_json(resp).await["run_id"]
-                .as_str()
-                .unwrap()
-                .to_string(),
-        );
-    }
-
-    for run_id in &run_ids {
-        let rec = wait_terminal(&store, run_id).await;
-        assert_eq!(
-            rec.status,
-            runic_substrate::RunStatus::Success,
-            "every queued run in the burst must execute even when nudges collapse"
-        );
-    }
-}
-
-#[tokio::test]
-async fn a_local_nudge_fired_before_the_wait_is_not_lost() {
-    let nudge = runic_serve::LocalNudge::new();
-    runic_serve::QueueNudge::nudge(nudge.as_ref()).await;
-
-    let start = std::time::Instant::now();
-    runic_serve::QueueNudge::wait(nudge.as_ref(), Duration::from_secs(10)).await;
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "a stored permit must satisfy the next wait immediately"
-    );
-}
-
-#[tokio::test]
-async fn a_queued_run_with_bad_input_is_failed_by_the_worker() {
-    let store = Arc::new(MemorySessionStore::new());
-    let _app = queued_router(store.clone());
-
-    store
-        .create_run(
-            TENANT,
-            "t1",
-            "r-no-input",
-            "main",
-            &runic_substrate::RunInput {
-                input: None,
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .create_run(
-            TENANT,
-            "t1",
-            "r-ghost-agent",
-            "ghost",
-            &runic_substrate::RunInput {
-                input: serde_json::to_value(runic_types::Message::user("go")).ok(),
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let rec = wait_terminal(&store, "r-no-input").await;
-    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
-    assert!(rec.error.unwrap().contains("no stored input"));
-
-    let rec = wait_terminal(&store, "r-ghost-agent").await;
-    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
-    assert!(rec.error.unwrap().contains("unknown agent"));
-}
-
-#[derive(Default)]
-struct FakeBroker {
-    subs: tokio::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            Vec<tokio::sync::mpsc::UnboundedSender<runic_substrate::SessionEvent>>,
-        >,
-    >,
-}
-
-#[async_trait]
-impl runic_serve::EventBroker for FakeBroker {
-    async fn publish(&self, tenant: &str, thread_id: &str, event: &runic_substrate::SessionEvent) {
-        let key = format!("{tenant}:{thread_id}");
-        let mut subs = self.subs.lock().await;
-        if let Some(senders) = subs.get_mut(&key) {
-            senders.retain(|tx| tx.send(event.clone()).is_ok());
-        }
-    }
-
-    async fn subscribe(
-        &self,
-        tenant: &str,
-        thread_id: &str,
-    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<runic_substrate::SessionEvent>> {
-        let key = format!("{tenant}:{thread_id}");
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.subs.lock().await.entry(key).or_default().push(tx);
-        Some(rx)
-    }
-}
-
-fn replay_message(run_id: &str, text: &str) -> runic_substrate::SessionEvent {
-    runic_substrate::SessionEvent::Message {
-        run_id: run_id.into(),
-        msg: runic_types::Message::assistant(text),
-        at: chrono::Utc::now(),
-    }
-}
-
-fn replay_end(run_id: &str) -> runic_substrate::SessionEvent {
-    runic_substrate::SessionEvent::RunEnd {
-        run_id: run_id.into(),
-        status: runic_state::RunEndStatus::Completed,
-        outcome: runic_state::RunOutcome {
-            total_turns: 1,
-            stop_reason: Some("end_turn".into()),
-            usage: TokenUsage::default(),
-            structured: None,
-        },
-        at: chrono::Utc::now(),
-    }
-}
-
-fn broker_replay_router(
-    store: Arc<MemorySessionStore>,
-    broker: Arc<dyn runic_serve::EventBroker>,
-) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: Some(broker),
-        nudge: None,
-        identity: None,
-    })
-}
-
-#[tokio::test]
-async fn a_viewer_on_another_instance_gets_the_live_tail_via_the_broker() {
-    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
-    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
-    let entered = Arc::new(Notify::new());
-    let gate = Arc::new(Notify::new());
-
-    let instance = |factory: runic_serve::BoxedAgentFactory| {
-        router(ServeConfig {
-            session_store: store.clone(),
-            artifact_store: Arc::new(MemoryArtifactStore::new()),
-            transcriber: None,
-            agents: single_agent("main", factory),
-            limits: Default::default(),
-            workers: None,
-            broker: Some(broker.clone()),
-            nudge: None,
-            identity: None,
-        })
-    };
-    let executor = instance(Arc::new(GatedFactory {
-        entered: entered.clone(),
-        gate: gate.clone(),
-    }));
-    let viewer = instance(Arc::new(ScriptedFactory));
-
-    let exec_app = executor.clone();
-    let run_task = tokio::spawn(async move {
-        let resp = exec_app
-            .oneshot(run_request("t1", TENANT, "go"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-    entered.notified().await;
-
-    let mut run_id = None;
-    for _ in 0..100 {
-        if let Some(rec) = store.latest_run(TENANT, "t1").await.unwrap() {
-            run_id = Some(rec.run_id);
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let run_id = run_id.expect("run row exists");
-
-    let viewer_task = tokio::spawn({
-        let viewer = viewer.clone();
-        let run_id = run_id.clone();
-        async move {
-            let resp = viewer
-                .oneshot(get_with(
-                    &format!("/threads/t1/runs/{run_id}/stream"),
-                    TENANT,
-                    &[],
-                ))
-                .await
-                .unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            body_string(resp).await
-        }
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let cancel = executor
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
-    gate.notify_one();
-    run_task.await.unwrap();
-
-    let viewer_body = viewer_task.await.unwrap();
-    let kinds = sse_kinds(&viewer_body);
-    assert!(
-        kinds.iter().any(|k| k == "message"),
-        "live events crossed instances: {kinds:?}"
-    );
-    assert_eq!(kinds.last().map(String::as_str), Some("done"));
-    let done = sse_data(&viewer_body)
-        .into_iter()
-        .find(|e| e["type"] == "done")
-        .unwrap();
-    assert_eq!(done["stop_reason"], "cancelled");
-}
-
-#[tokio::test]
-async fn remote_replay_ignores_broker_events_for_other_runs() {
-    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
-    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
-    let app = broker_replay_router(store.clone(), broker.clone());
-
-    create_thread(&app, TENANT, "t1").await;
-    store
-        .create_run(TENANT, "t1", "r-target", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-target", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let replay_app = app.clone();
-    let replay = tokio::spawn(async move {
-        let resp = replay_app
-            .oneshot(get_with("/threads/t1/runs/r-target/stream", TENANT, &[]))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    broker
-        .publish(TENANT, "t1", &replay_message("r-other", "wrong run"))
-        .await;
-    broker
-        .publish(TENANT, "t1", &replay_message("r-target", "right run"))
-        .await;
-    broker.publish(TENANT, "t1", &replay_end("r-target")).await;
-
-    let body = replay.await.unwrap();
-    assert!(body.contains("right run"), "{body}");
-    assert!(!body.contains("wrong run"), "{body}");
-    assert_eq!(sse_kinds(&body).last().map(String::as_str), Some("done"));
-}
-
-#[tokio::test]
-async fn remote_replay_deduplicates_persisted_and_broker_overlap() {
-    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
-    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
-    let app = broker_replay_router(store.clone(), broker.clone());
-    let event = replay_message("r-dupe", "dupe-once");
-
-    create_thread(&app, TENANT, "t1").await;
-    store
-        .create_run(TENANT, "t1", "r-dupe", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-dupe", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-    store.append(TENANT, "t1", &event).await.unwrap();
-
-    let replay_app = app.clone();
-    let replay = tokio::spawn(async move {
-        let resp = replay_app
-            .oneshot(get_with("/threads/t1/runs/r-dupe/stream", TENANT, &[]))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    broker.publish(TENANT, "t1", &event).await;
-    broker.publish(TENANT, "t1", &replay_end("r-dupe")).await;
-
-    let body = replay.await.unwrap();
-    assert_eq!(body.matches("dupe-once").count(), 1, "{body}");
-    assert_eq!(sse_kinds(&body).last().map(String::as_str), Some("done"));
-}
-
-#[tokio::test]
-async fn remote_replay_refuses_a_run_from_another_thread() {
-    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
-    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
-    let app = broker_replay_router(store.clone(), broker);
-
-    create_thread(&app, TENANT, "t1").await;
-    create_thread(&app, TENANT, "t2").await;
-    store
-        .create_run(TENANT, "t2", "r-on-t2", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-on-t2", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(get_with("/threads/t1/runs/r-on-t2/stream", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn remote_replay_refuses_a_run_from_another_tenant() {
-    let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
-    let broker: Arc<dyn runic_serve::EventBroker> = Arc::new(FakeBroker::default());
-    let app = broker_replay_router(store.clone(), broker);
-
-    create_thread(&app, TENANT, "t1").await;
-    create_thread(&app, "mallory", "t1").await;
-    store
-        .create_run("mallory", "t1", "r-foreign", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-foreign", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(get_with("/threads/t1/runs/r-foreign/stream", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn cancel_and_steer_fall_back_to_run_row_signals() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = queued_router(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-remote", "inst-other", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let resp = app
-        .clone()
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let rec = store.get_run(TENANT, "r-remote").await.unwrap().unwrap();
-    assert!(rec.cancel_requested);
-    assert_eq!(rec.status, runic_substrate::RunStatus::Running);
-
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "change course" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let signals = store
-        .heartbeat_run("r-remote", "inst-other", chrono::Duration::seconds(60))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(signals.steering, ["change course"]);
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/ghost/runs/cancel",
-            TENANT,
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-}
-
-#[tokio::test]
-async fn remote_cancel_is_tenant_scoped() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/cancel",
-            "mallory",
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-
-    let rec = store.get_run(TENANT, "r-remote").await.unwrap().unwrap();
-    assert!(!rec.cancel_requested);
-}
-
-#[tokio::test]
-async fn remote_steer_is_tenant_scoped() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-remote", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            "mallory",
-            json!({ "text": "foreign steer" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-
-    let signals = store
-        .heartbeat_run("r-remote", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(signals.steering.is_empty());
-}
-
-#[tokio::test]
-async fn cancel_prefers_the_running_run_over_a_newer_queued_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store
-        .create_run(
-            TENANT,
-            "t1",
-            "r-queued",
-            "main",
-            &runic_substrate::RunInput {
-                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let running = store.get_run(TENANT, "r-running").await.unwrap().unwrap();
-    assert_eq!(running.status, runic_substrate::RunStatus::Running);
-    assert!(running.cancel_requested);
-
-    let queued = store.get_run(TENANT, "r-queued").await.unwrap().unwrap();
-    assert_eq!(queued.status, runic_substrate::RunStatus::Queued);
-    assert!(!queued.cancel_requested);
-}
-
-#[tokio::test]
-async fn cancel_prefers_the_running_run_over_a_newer_terminal_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store
-        .create_run(TENANT, "t1", "r-done", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .set_run_status("r-done", runic_substrate::RunStatus::Success, None)
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let running = store.get_run(TENANT, "r-running").await.unwrap().unwrap();
-    assert_eq!(running.status, runic_substrate::RunStatus::Running);
-    assert!(running.cancel_requested);
-}
-
-#[tokio::test]
-async fn queued_cancel_is_tenant_scoped() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    store
-        .create_run(
-            "mallory",
-            "t1",
-            "r-mallory",
-            "main",
-            &runic_substrate::RunInput {
-                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let resp = app
-        .clone()
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        store
-            .get_run("mallory", "r-mallory")
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        runic_substrate::RunStatus::Queued
-    );
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/cancel",
-            "mallory",
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    assert_eq!(
-        store
-            .get_run("mallory", "r-mallory")
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        runic_substrate::RunStatus::Cancelled
-    );
-}
-
-#[tokio::test]
-async fn steer_prefers_the_running_run_over_a_newer_queued_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store
-        .create_run(
-            TENANT,
-            "t1",
-            "r-queued",
-            "main",
-            &runic_substrate::RunInput {
-                input: serde_json::to_value(runic_types::Message::user("later")).ok(),
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "interrupt the active run" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let signals = store
-        .heartbeat_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(signals.steering, ["interrupt the active run"]);
-
-    let queued = store.get_run(TENANT, "r-queued").await.unwrap().unwrap();
-    assert_eq!(queued.status, runic_substrate::RunStatus::Queued);
-    assert!(!queued.cancel_requested);
-}
-
-#[tokio::test]
-async fn steer_prefers_the_running_run_over_a_newer_terminal_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    store
-        .create_run(TENANT, "t1", "r-running", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .claim_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store
-        .create_run(TENANT, "t1", "r-done", "main", &Default::default())
-        .await
-        .unwrap();
-    store
-        .set_run_status("r-done", runic_substrate::RunStatus::Success, None)
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/steer",
-            TENANT,
-            json!({ "text": "still running" }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let signals = store
-        .heartbeat_run("r-running", "inst-remote", chrono::Duration::seconds(60))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(signals.steering, ["still running"]);
-}
-
-#[tokio::test]
-async fn cancelling_a_queued_run_before_pickup_drops_it() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    store
-        .create_run(
-            TENANT,
-            "t1",
-            "r-waiting",
-            "main",
-            &runic_substrate::RunInput {
-                input: serde_json::to_value(runic_types::Message::user("go")).ok(),
-                context: None,
-                queued: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    let resp = app
-        .oneshot(post_json("/threads/t1/runs/cancel", TENANT, String::new()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    assert_eq!(
-        store
-            .get_run(TENANT, "r-waiting")
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        runic_substrate::RunStatus::Cancelled
-    );
-}
-
-#[tokio::test]
-async fn run_status_for_an_unknown_or_foreign_run_is_404() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    store
-        .create_run(TENANT, "t1", "r-real", "main", &Default::default())
-        .await
-        .unwrap();
-
-    let resp = app
-        .clone()
-        .oneshot(get_with("/threads/t1/runs/r-missing", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    let resp = app
-        .clone()
-        .oneshot(get_with("/threads/other/runs/r-real", TENANT, &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-    let resp = app
-        .oneshot(get_with("/threads/t1/runs/r-real", "mallory", &[]))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn over_the_concurrent_run_cap_is_429_until_a_slot_frees() {
-    let entered = Arc::new(Notify::new());
-    let gate = Arc::new(Notify::new());
-    let app = router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent(
-            "main",
-            Arc::new(GatedFactory {
-                entered: entered.clone(),
-                gate: gate.clone(),
-            }),
-        ),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-        limits: RunLimits {
-            max_concurrent_runs: 1,
-            ..Default::default()
-        },
-    });
-
-    let run_app = app.clone();
-    let busy = tokio::spawn(async move {
-        let resp = run_app
-            .oneshot(run_request("busy", TENANT, "go"))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        body_string(resp).await
-    });
-    entered.notified().await;
-
-    let resp = app
-        .clone()
-        .oneshot(wait_request("other", TENANT, "hi"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-    let body = body_json(resp).await;
-    assert_eq!(body["error"], "too_busy");
-
-    let cancel = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/busy/runs/cancel",
-            TENANT,
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
-    gate.notify_one();
-    busy.await.unwrap();
-
-    let admitted_app = app.clone();
-    let admitted = tokio::spawn(async move {
-        let resp = admitted_app
-            .oneshot(wait_request("other", TENANT, "hi"))
-            .await
-            .unwrap();
-        assert_ne!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
-    });
-    entered.notified().await;
-    let cancel = app
-        .clone()
-        .oneshot(post_json(
-            "/threads/other/runs/cancel",
-            TENANT,
-            String::new(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
-    gate.notify_one();
-    admitted.await.unwrap();
-}
-
-#[tokio::test]
-async fn run_rows_track_the_lifecycle_over_http() {
-    let store = Arc::new(MemorySessionStore::new());
-    let app = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-
-    let resp = app
-        .clone()
-        .oneshot(wait_request("t1", TENANT, "ping"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let run_id = body_json(resp).await["run_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let rec = store.get_run(TENANT, &run_id).await.unwrap().unwrap();
-    assert_eq!(rec.status, runic_substrate::RunStatus::Success);
-    assert_eq!(rec.agent, "main");
-    assert_eq!(rec.session_id, "t1");
-    assert!(rec.claimed_by.unwrap().starts_with("inst-"));
-    assert!(rec.lease_expires_at.is_some());
-
-    let failing = router(ServeConfig {
-        session_store: store.clone(),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(FailingFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    let resp = failing
-        .oneshot(wait_request("t2", TENANT, "boom"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    let rec = store.latest_run(TENANT, "t2").await.unwrap().unwrap();
-    assert_eq!(rec.status, runic_substrate::RunStatus::Error);
-    assert!(rec.error.is_some());
 }

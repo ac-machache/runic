@@ -15,10 +15,6 @@ use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
 use crate::tenant::Tenant;
 
-fn thread(state: &AppState, tenant: &str, thread_id: &str) -> runic::Session {
-    runic::session((tenant, thread_id)).store(state.session_store.clone())
-}
-
 /// One thread's current shape.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct Thread {
@@ -56,10 +52,8 @@ pub struct ThreadEventsResponse {
     pub has_more: bool,
 }
 
-/// `GET /threads/{id}/state` — the agent's view of the thread. When a run is in
-/// flight the slot is locked, so `busy` is true and `system_prompt`
-/// are null (unreadable without the lock); `messages` is reconstructed from the
-/// store.
+/// `GET /threads/{id}/state` — the agent's view of the thread, folded from the
+/// store. `busy` reports whether a run is in flight.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ThreadStateResponse {
     pub thread_id: String,
@@ -266,21 +260,14 @@ pub async fn create_thread(
 
     // Materialize the metadata row so the thread is distinguishable from one
     // that never existed — without clobbering an existing label on re-create.
-    let existed = state
-        .session_store
-        .session_meta(&tenant, &thread_id)
-        .await?
-        .is_some();
+    let thread = state.thread(&tenant, &thread_id);
+    let existed = thread.meta().await?.is_some();
     if label.is_some() || !existed {
-        state
-            .session_store
-            .set_label(&tenant, &thread_id, label.as_deref())
-            .await?;
+        thread.set_label(label.as_deref()).await?;
     }
 
-    let meta = state
-        .session_store
-        .session_meta(&tenant, &thread_id)
+    let meta = thread
+        .meta()
         .await?
         .ok_or_else(|| ServeError::Internal("thread metadata not materialized".into()))?;
     Ok((StatusCode::CREATED, Json(thread_from_meta(tenant, meta))))
@@ -312,7 +299,7 @@ pub async fn list_threads(
         None => None,
     };
     let mut metas = state
-        .session_store
+        .store()
         .list_sessions_page(
             &tenant,
             after,
@@ -356,8 +343,8 @@ pub async fn list_thread_children(
     Query(q): Query<ListThreadsQuery>,
 ) -> Result<Json<ThreadList>, ServeError> {
     state
-        .session_store
-        .session_meta(&tenant, &thread_id)
+        .thread(&tenant, &thread_id)
+        .meta()
         .await?
         .ok_or_else(|| ServeError::ThreadNotFound {
             id: thread_id.clone(),
@@ -372,7 +359,7 @@ pub async fn list_thread_children(
         None => None,
     };
     let mut metas = state
-        .session_store
+        .store()
         .list_sessions_page(
             &tenant,
             after,
@@ -411,15 +398,15 @@ pub async fn get_thread(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Thread>, ServeError> {
-    let meta = thread(&state, &tenant, &thread_id)
+    let meta = state
+        .thread(&tenant, &thread_id)
         .meta()
         .await?
         .ok_or(ServeError::ThreadNotFound { id: thread_id })?;
     Ok(Json(thread_from_meta(tenant, meta)))
 }
 
-/// `PATCH /threads/:id` — update thread metadata. The DB metadata row is the
-/// source of truth; a warm agent mirrors the label after the write succeeds.
+/// `PATCH /threads/:id` — update thread metadata.
 #[utoipa::path(
     patch,
     path = "/threads/{thread_id}",
@@ -441,7 +428,7 @@ pub async fn update_thread(
     Json(req): Json<UpdateThreadRequest>,
 ) -> Result<Json<Thread>, ServeError> {
     // PATCH updates an existing thread; it never creates one.
-    let thread = thread(&state, &tenant, &thread_id);
+    let thread = state.thread(&tenant, &thread_id);
     if thread.meta().await?.is_none() {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     }
@@ -480,7 +467,7 @@ pub async fn thread_events(
     Path(thread_id): Path<String>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<ThreadEventsResponse>, ServeError> {
-    let thread = thread(&state, &tenant, &thread_id);
+    let thread = state.thread(&tenant, &thread_id);
     if thread.meta().await?.is_none() {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     }
@@ -504,10 +491,8 @@ pub async fn thread_events(
     }))
 }
 
-/// `GET /threads/:id/state` — agent state for inspection: the system prompt,
-/// the message list as sent to the model, and run / event counts. Reads the
-/// warm agent when idle; if a run is in flight (slot locked) it reports `busy`
-/// and reconstructs the message list from the event store.
+/// `GET /threads/:id/state` — the thread as the agent would see it: the message
+/// list, run / event counts, and whether a run is in flight.
 #[utoipa::path(
     get,
     path = "/threads/{thread_id}/state",
@@ -528,7 +513,7 @@ pub async fn thread_state(
 ) -> Result<Json<ThreadStateResponse>, ServeError> {
     // Authoritative label + event_count from metadata; 404 if the thread was
     // never created (don't build a warm agent for a phantom thread).
-    let thread = thread(&state, &tenant, &thread_id);
+    let thread = state.thread(&tenant, &thread_id);
     let Some(meta) = thread.meta().await? else {
         return Err(ServeError::ThreadNotFound { id: thread_id });
     };
@@ -537,7 +522,7 @@ pub async fn thread_state(
 
     let messages = thread.messages().await.unwrap_or_default();
     let stats = thread.stats().await.unwrap_or_default();
-    let busy = state.runs.is_busy(&tenant, &thread_id).await;
+    let busy = active_run(&state, &tenant, &thread_id).await.is_some();
     Ok(Json(ThreadStateResponse {
         thread_id,
         tenant,
@@ -550,8 +535,7 @@ pub async fn thread_state(
     }))
 }
 
-/// `DELETE /threads/:id` — drop the thread's session AND its in-pool Runner so
-/// the next run starts fresh.
+/// `DELETE /threads/:id` — drop the thread, its descendants, and their artifacts.
 #[utoipa::path(
     delete,
     path = "/threads/{thread_id}",
@@ -561,7 +545,7 @@ pub async fn thread_state(
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
-        (status = 204, description = "Thread, artifacts, and warm agent dropped"),
+        (status = 204, description = "Thread, descendants, and artifacts dropped"),
         (status = 409, description = "A run is active on this thread; cancel it first", body = ErrorBody)
     )
 )]
@@ -570,48 +554,43 @@ pub async fn delete_thread(
     Tenant(tenant): Tenant,
     Path(thread_id): Path<String>,
 ) -> Result<StatusCode, ServeError> {
-    let delete_owner = format!("delete:{}", state.runs.instance_id());
-    let lease = crate::registry::as_chrono(state.runs.limits().run_lease);
-    match state
-        .session_store
-        .claim_thread(&tenant, &thread_id, &delete_owner, lease)
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => return Err(ServeError::ThreadBusy { thread_id }),
-        Err(runic_substrate::Error::Unsupported(_)) => {}
-        Err(e) => return Err(e.into()),
+    if active_run(&state, &tenant, &thread_id).await.is_some() {
+        return Err(ServeError::ThreadBusy { thread_id });
     }
-
-    let deleted = delete_tree(&state, &tenant, &thread_id).await;
-    if deleted.is_err() {
-        let _ = state
-            .session_store
-            .release_thread(&tenant, &thread_id, &delete_owner)
-            .await;
-    }
-    deleted?;
+    delete_tree(&state, &tenant, &thread_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(crate) async fn active_run(
+    state: &AppState,
+    tenant: &str,
+    thread_id: &str,
+) -> Option<runic_substrate::RunRecord> {
+    state
+        .store()
+        .latest_active_run(tenant, thread_id)
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn delete_tree(state: &AppState, tenant: &str, thread_id: &str) -> Result<(), ServeError> {
-    let order = thread(state, tenant, thread_id).descendants().await?;
+    let order = state.thread(tenant, thread_id).descendants().await?;
     let descendant_count = order.len() - 1;
     let mut artifact_count = 0usize;
     for session in order.iter().rev() {
-        state.runs.forget_thread(tenant, session).await;
         artifact_count += state
-            .artifact_store
+            .artifacts()
             .delete_session_artifacts(tenant, session)
             .await?;
-        state.session_store.delete_session(tenant, session).await?;
+        state.store().delete_session(tenant, session).await?;
     }
 
-    match state.session_store.delete_orphan_children(tenant).await {
+    match state.store().delete_orphan_children(tenant).await {
         Ok(reaped) => {
             for orphan in &reaped {
                 if let Err(e) = state
-                    .artifact_store
+                    .artifacts()
                     .delete_session_artifacts(tenant, orphan)
                     .await
                 {

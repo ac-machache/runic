@@ -1,5 +1,6 @@
-//! Postgres-backed [`ArtifactStore`]: **metadata in the `artifacts` table**
-//! (FK → `sessions`), **bytes delegated to an inner byte store** (Local/S3).
+//! Postgres-backed [`ArtifactStore`]: **metadata in the `runic.artifacts`
+//! table** (FK → `runic.sessions`), **bytes delegated to an inner byte store**
+//! (Local/S3).
 //!
 //! `put` writes bytes to the inner store, then records the metadata row; the
 //! row is the index + session ownership, the bytes live wherever the inner
@@ -87,7 +88,7 @@ impl ArtifactStore for PostgresArtifactStore {
         // Ensure the sessions row exists so the FK holds (artifacts can arrive
         // before any conversation event).
         sqlx::query(
-            "INSERT INTO sessions (tenant, session_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            "INSERT INTO runic.sessions (tenant, session_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         )
         .bind(tenant)
         .bind(session_id)
@@ -102,7 +103,7 @@ impl ArtifactStore for PostgresArtifactStore {
             .await?;
 
         sqlx::query(
-            "INSERT INTO artifacts
+            "INSERT INTO runic.artifacts
                (artifact_id, tenant, session_id, mime_type, size, source, storage, storage_key, created_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
@@ -130,7 +131,7 @@ impl ArtifactStore for PostgresArtifactStore {
     async fn head(&self, id: &str) -> Result<Artifact> {
         let row = sqlx::query(
             "SELECT artifact_id, mime_type, size, source, created_at
-             FROM artifacts WHERE artifact_id = $1",
+             FROM runic.artifacts WHERE artifact_id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -143,7 +144,7 @@ impl ArtifactStore for PostgresArtifactStore {
     async fn list(&self, tenant: &str, session_id: &str) -> Result<Vec<Artifact>> {
         let rows = sqlx::query(
             "SELECT artifact_id, mime_type, size, source, created_at
-             FROM artifacts WHERE tenant = $1 AND session_id = $2
+             FROM runic.artifacts WHERE tenant = $1 AND session_id = $2
              ORDER BY created_at DESC",
         )
         .bind(tenant)
@@ -159,7 +160,7 @@ impl ArtifactStore for PostgresArtifactStore {
             Ok(()) | Err(Error::NotFound(_)) => {}
             Err(e) => return Err(e),
         }
-        sqlx::query("DELETE FROM artifacts WHERE artifact_id = $1")
+        sqlx::query("DELETE FROM runic.artifacts WHERE artifact_id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
@@ -179,7 +180,7 @@ impl ArtifactStore for PostgresArtifactStore {
     ) -> Result<usize> {
         let stored = self.bytes.list(tenant, session_id).await?;
         let indexed: Vec<String> = sqlx::query_scalar(
-            "SELECT artifact_id FROM artifacts WHERE tenant = $1 AND session_id = $2",
+            "SELECT artifact_id FROM runic.artifacts WHERE tenant = $1 AND session_id = $2",
         )
         .bind(tenant)
         .bind(session_id)
@@ -227,7 +228,7 @@ impl ArtifactStore for PostgresArtifactStore {
                 }
             }
         }
-        sqlx::query("DELETE FROM artifacts WHERE tenant = $1 AND session_id = $2")
+        sqlx::query("DELETE FROM runic.artifacts WHERE tenant = $1 AND session_id = $2")
             .bind(tenant)
             .bind(session_id)
             .execute(&self.pool)

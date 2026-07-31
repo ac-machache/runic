@@ -26,6 +26,10 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1"
+apalis = "1.0.0-rc.9"
+apalis-cron = "1.0.0-rc.8"
+apalis-postgres = "1.0.0-rc.8"
+apalis-sql = "1.0.0-rc.9"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"

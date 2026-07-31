@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,35 +9,25 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use runic_agent::Runner;
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore};
+use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 
-struct PanicFactory;
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         panic!("openapi tests never drive the agent");
     }
 }
 
-fn app() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+async fn app() -> Option<Router> {
+    let h = common::harness().await?;
+    Some(h.single_router(common::agent(Arc::new(PanicProvider))))
 }
 
-async fn spec() -> Value {
-    let resp = app()
+async fn spec() -> Option<Value> {
+    let app = app().await?;
+    let resp = app
         .oneshot(
             Request::builder()
                 .uri("/openapi.json")
@@ -48,35 +40,37 @@ async fn spec() -> Value {
     let bytes = axum::body::to_bytes(resp.into_body(), 4_000_000)
         .await
         .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    Some(serde_json::from_slice(&bytes).unwrap())
 }
 
 #[tokio::test]
 async fn openapi_json_serves_and_parses() {
-    let spec = spec().await;
+    let Some(spec) = spec().await else { return };
     assert_eq!(spec["openapi"].as_str().unwrap().chars().next(), Some('3'));
     assert_eq!(spec["info"]["title"], "runic-serve");
 }
 
 #[tokio::test]
 async fn every_route_and_method_is_documented() {
-    let spec = spec().await;
+    let Some(spec) = spec().await else { return };
     let paths = &spec["paths"];
     let expect: &[(&str, &[&str])] = &[
         ("/healthz", &["get"]),
+        ("/agents", &["get"]),
+        ("/agents/{name}", &["get"]),
         ("/threads", &["get", "post"]),
         ("/threads/{thread_id}", &["get", "patch", "delete"]),
+        ("/threads/{thread_id}/children", &["get"]),
         ("/threads/{thread_id}/events", &["get"]),
         ("/threads/{thread_id}/state", &["get"]),
         ("/threads/{thread_id}/artifacts", &["get", "post"]),
+        ("/threads/{thread_id}/artifacts/{artifact_id}", &["get"]),
         ("/transcribe", &["post"]),
-        ("/threads/{thread_id}/runs/stream", &["post"]),
-        ("/threads/{thread_id}/runs/{run_id}/stream", &["get"]),
+        ("/threads/{thread_id}/runs", &["get"]),
+        ("/threads/{thread_id}/runs/{run_id}", &["get"]),
+        ("/threads/{thread_id}/runs/{run_id}/timeline", &["get"]),
+        ("/threads/{thread_id}/runs/wait", &["post"]),
         ("/threads/{thread_id}/asks/{ask_id}", &["post"]),
-        (
-            "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
-            &["post"],
-        ),
     ];
     for (path, methods) in expect {
         let item = &paths[path];
@@ -91,11 +85,35 @@ async fn every_route_and_method_is_documented() {
 }
 
 #[tokio::test]
+async fn deleted_endpoints_are_not_documented() {
+    let Some(spec) = spec().await else { return };
+    let paths = &spec["paths"];
+    for path in [
+        "/threads/{thread_id}/runs/stream",
+        "/threads/{thread_id}/runs",
+        "/threads/{thread_id}/runs/cancel",
+        "/threads/{thread_id}/runs/steer",
+        "/threads/{thread_id}/runs/{run_id}/stream",
+        "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
+    ] {
+        if let Some(item) = paths.get(path) {
+            assert!(
+                item.get("post").is_none(),
+                "{path} POST should no longer be documented"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn important_schemas_and_error_body_exist() {
-    let spec = spec().await;
+    let Some(spec) = spec().await else { return };
     let schemas = &spec["components"]["schemas"];
     for name in [
         "HealthResponse",
+        "AgentInfo",
+        "AgentList",
+        "AgentOverview",
         "Thread",
         "ThreadSummary",
         "ThreadList",
@@ -108,6 +126,10 @@ async fn important_schemas_and_error_body_exist() {
         "ArtifactMeta",
         "TranscriptResponse",
         "RunMessageRequest",
+        "WaitRunResponse",
+        "RunStatusResponse",
+        "RunSummary",
+        "RunListResponse",
         "AnswerRequest",
         "WireEvent",
         "ErrorBody",
@@ -120,40 +142,18 @@ async fn important_schemas_and_error_body_exist() {
 }
 
 #[tokio::test]
-async fn sse_endpoints_are_marked_event_stream() {
-    let spec = spec().await;
-    for (path, method) in [
-        ("/threads/{thread_id}/runs/stream", "post"),
-        ("/threads/{thread_id}/runs/{run_id}/stream", "get"),
-    ] {
-        let content = &spec["paths"][path][method]["responses"]["200"]["content"];
-        assert!(
-            content.get("text/event-stream").is_some(),
-            "{path} {method} 200 is not text/event-stream: {content}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn tenant_and_resume_headers_are_documented() {
-    let spec = spec().await;
+async fn tenant_header_is_documented_on_list_threads() {
+    let Some(spec) = spec().await else { return };
     let list_params = &spec["paths"]["/threads"]["get"]["parameters"];
     assert!(
         has_header(list_params, "X-Runic-Tenant"),
         "X-Runic-Tenant not documented on GET /threads"
     );
-
-    let replay_params =
-        &spec["paths"]["/threads/{thread_id}/runs/{run_id}/stream"]["get"]["parameters"];
-    assert!(
-        has_header(replay_params, "Last-Event-ID"),
-        "Last-Event-ID not documented on replay"
-    );
 }
 
 #[tokio::test]
 async fn error_responses_reference_the_error_body_schema() {
-    let spec = spec().await;
+    let Some(spec) = spec().await else { return };
     let schema = &spec["paths"]["/threads/{thread_id}"]["get"]["responses"]["404"]["content"]["application/json"]
         ["schema"]["$ref"];
     assert_eq!(schema, "#/components/schemas/ErrorBody");
@@ -162,7 +162,9 @@ async fn error_responses_reference_the_error_body_schema() {
 #[cfg(feature = "docs-ui")]
 #[tokio::test]
 async fn swagger_ui_mounts_without_route_overlap() {
-    let public = app()
+    let Some(app) = app().await else { return };
+    let public = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/openapi.json")
@@ -173,7 +175,7 @@ async fn swagger_ui_mounts_without_route_overlap() {
         .unwrap();
     assert_eq!(public.status(), StatusCode::OK);
 
-    let internal = app()
+    let internal = app
         .oneshot(
             Request::builder()
                 .uri("/docs/openapi.json")

@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -5,17 +7,14 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{
-    AgentFactory, Identity, IdentityError, IdentityResolver, ServeConfig, bare_router, router,
-    single_agent,
-};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_serve::{Identity, IdentityError, IdentityResolver, bare_router, router};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
+
+use common::Harness;
 
 struct EchoProvider;
 
@@ -34,18 +33,9 @@ impl Provider for EchoProvider {
     }
 }
 
-struct EchoFactory;
-
-#[async_trait]
-impl AgentFactory for EchoFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(Arc::new(EchoProvider), tenant, session_id)
-            .system_prompt("test")
-            .build())
-    }
+struct BearerResolver {
+    alice_tenant: String,
 }
-
-struct BearerResolver;
 
 #[async_trait]
 impl IdentityResolver for BearerResolver {
@@ -57,7 +47,7 @@ impl IdentityResolver for BearerResolver {
             .ok_or(IdentityError::MissingCredentials)?;
         match header.strip_prefix("Bearer ") {
             Some("token-alice") => Ok(Identity {
-                tenant: "alice".into(),
+                tenant: self.alice_tenant.clone(),
             }),
             Some("token-boom") => Err(IdentityError::Internal("resolver exploded".into())),
             Some(_) => Err(IdentityError::InvalidCredentials("unknown token".into())),
@@ -66,25 +56,6 @@ impl IdentityResolver for BearerResolver {
             )),
         }
     }
-}
-
-fn config(store: Arc<dyn SessionStore>) -> ServeConfig {
-    ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(EchoFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: Some(Arc::new(BearerResolver)),
-    }
-}
-
-fn app() -> (Router, Arc<dyn SessionStore>) {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    (router(config(store.clone())), store)
 }
 
 fn wait_request(auth: Option<&str>, spoofed_tenant: Option<&str>) -> Request<Body> {
@@ -103,39 +74,49 @@ fn wait_request(auth: Option<&str>, spoofed_tenant: Option<&str>) -> Request<Bod
         .unwrap()
 }
 
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+fn authed_config(h: &Harness) -> runic_serve::ServeConfig {
+    h.config()
+        .agent("main", common::agent(Arc::new(EchoProvider)))
+        .identity(Arc::new(BearerResolver {
+            alice_tenant: h.tenant.clone(),
+        }))
 }
 
 #[tokio::test]
 async fn missing_credentials_is_401() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     let resp = app.oneshot(wait_request(None, None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["error"], "unauthorized");
     assert_eq!(body["message"], "missing credentials");
 }
 
 #[tokio::test]
 async fn invalid_credentials_is_401() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     let resp = app
         .oneshot(wait_request(Some("Bearer token-mallory"), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["error"], "unauthorized");
     assert!(body["message"].as_str().unwrap().contains("unknown token"));
 }
 
 #[tokio::test]
 async fn non_bearer_scheme_is_401() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     let resp = app
         .oneshot(wait_request(Some("Basic dXNlcjpwdw=="), None))
         .await
@@ -145,26 +126,34 @@ async fn non_bearer_scheme_is_401() {
 
 #[tokio::test]
 async fn resolver_failure_is_500() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     let resp = app
         .oneshot(wait_request(Some("Bearer token-boom"), None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = body_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["error"], "internal");
 }
 
 #[tokio::test]
 async fn the_verified_tenant_wins_over_a_spoofed_header() {
-    let (app, store) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let store = h.store();
+    let tenant = h.tenant.clone();
+    let app = router(authed_config(&h));
     let resp = app
         .oneshot(wait_request(Some("Bearer token-alice"), Some("mallory")))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let alice_events = store.read("alice", "t1").await.unwrap();
+    let alice_events = store.read(&tenant, "t1").await.unwrap();
     assert!(!alice_events.is_empty());
     let mallory_events = store.read("mallory", "t1").await.unwrap();
     assert!(mallory_events.is_empty());
@@ -172,7 +161,10 @@ async fn the_verified_tenant_wins_over_a_spoofed_header() {
 
 #[tokio::test]
 async fn healthz_stays_open_without_credentials() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     let resp = app
         .oneshot(
             Request::builder()
@@ -187,7 +179,10 @@ async fn healthz_stays_open_without_credentials() {
 
 #[tokio::test]
 async fn every_other_route_requires_credentials() {
-    let (app, _) = app();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = router(authed_config(&h));
     for path in [
         "/agents",
         "/threads",
@@ -213,18 +208,21 @@ async fn every_other_route_requires_credentials() {
 
 #[tokio::test]
 async fn bare_router_applies_the_resolver_too() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = bare_router(config(store));
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app: Router = bare_router(authed_config(&h));
     let resp = app.oneshot(wait_request(None, None)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn without_a_resolver_the_header_is_trusted_as_before() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let mut config = config(store.clone());
-    config.identity = None;
-    let app = router(config);
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let store = h.store();
+    let app = h.single_router(common::agent(Arc::new(EchoProvider)));
     let resp = app.oneshot(wait_request(None, Some("bob"))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(!store.read("bob", "t1").await.unwrap().is_empty());

@@ -166,11 +166,6 @@ impl Summary {
     }
 }
 
-struct ThreadLease {
-    claimed_by: String,
-    expires_at: DateTime<Utc>,
-}
-
 /// In-RAM [`SessionStore`] — the event log in a map. Tests / ephemeral mode;
 /// nothing survives a restart.
 #[derive(Default)]
@@ -178,7 +173,6 @@ pub struct MemorySessionStore {
     sessions: RwLock<HashMap<(String, String), SessionRec>>,
     runs: RwLock<HashMap<String, crate::RunRecord>>,
     steering: RwLock<HashMap<String, Vec<String>>>,
-    thread_leases: RwLock<HashMap<(String, String), ThreadLease>>,
 }
 
 impl MemorySessionStore {
@@ -361,10 +355,6 @@ impl SessionStore for MemorySessionStore {
         for run_id in dropped {
             steering.remove(&run_id);
         }
-        self.thread_leases
-            .write()
-            .await
-            .remove(&(tenant.to_string(), session_id.to_string()));
         Ok(())
     }
 
@@ -374,7 +364,6 @@ impl SessionStore for MemorySessionStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
-        input: &crate::RunInput,
     ) -> Result<()> {
         let now = Utc::now();
         self.sessions
@@ -389,18 +378,12 @@ impl SessionStore for MemorySessionStore {
                 tenant: tenant.to_string(),
                 session_id: session_id.to_string(),
                 agent: agent.to_string(),
-                status: if input.queued {
-                    crate::RunStatus::Queued
-                } else {
-                    crate::RunStatus::Pending
-                },
+                status: crate::RunStatus::Idle,
                 error: None,
-                claimed_by: None,
-                lease_expires_at: None,
-                input: input.input.clone(),
-                context: input.context.clone(),
-                cancel_requested: false,
+                to_cancel: false,
                 created_at: now,
+                started_at: None,
+                finished_at: None,
                 updated_at: now,
             },
         );
@@ -417,64 +400,72 @@ impl SessionStore for MemorySessionStore {
         let Some(rec) = runs.get_mut(run_id) else {
             return Err(Error::NotFound(format!("run {run_id}")));
         };
+        let now = Utc::now();
         rec.status = status;
         rec.error = error.map(str::to_string);
-        rec.updated_at = Utc::now();
+        if status.is_terminal() {
+            rec.finished_at = Some(now);
+        }
+        rec.updated_at = now;
         Ok(())
     }
 
-    async fn claim_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
+    async fn try_start_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let mut runs = self.runs.write().await;
-        let Some(rec) = runs.get_mut(run_id) else {
-            return Ok(false);
+        let Some(rec) = runs.get(run_id) else {
+            return Err(Error::NotFound(format!("run {run_id}")));
         };
+        if rec.tenant != tenant {
+            return Err(Error::NotFound(format!("run {run_id}")));
+        }
         if !matches!(
             rec.status,
-            crate::RunStatus::Pending | crate::RunStatus::Queued
-        ) || rec.claimed_by.is_some()
-        {
+            crate::RunStatus::Idle | crate::RunStatus::Waiting
+        ) {
+            return Ok(false);
+        }
+        let session_id = rec.session_id.clone();
+        let turn = (rec.created_at, rec.run_id.clone());
+        let blocked = runs.values().any(|other| {
+            let sibling =
+                other.run_id != run_id && other.tenant == tenant && other.session_id == session_id;
+            let running = other.status == crate::RunStatus::Running;
+            let earlier = other.status == crate::RunStatus::Idle
+                && (other.created_at, other.run_id.clone()) < turn;
+            sibling && (running || earlier)
+        });
+        if blocked {
             return Ok(false);
         }
         let now = Utc::now();
+        let rec = runs.get_mut(run_id).expect("run exists");
         rec.status = crate::RunStatus::Running;
-        rec.claimed_by = Some(claimed_by.to_string());
-        rec.lease_expires_at = Some(now + lease);
+        rec.started_at = Some(now);
         rec.updated_at = now;
         Ok(true)
     }
 
-    async fn heartbeat_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<Option<crate::RunSignals>> {
-        let mut runs = self.runs.write().await;
-        let Some(rec) = runs.get_mut(run_id) else {
-            return Ok(None);
+    async fn take_signals(&self, tenant: &str, run_id: &str) -> Result<crate::RunSignals> {
+        let to_cancel = {
+            let runs = self.runs.read().await;
+            let Some(rec) = runs.get(run_id) else {
+                return Err(Error::NotFound(format!("run {run_id}")));
+            };
+            if rec.tenant != tenant {
+                return Err(Error::NotFound(format!("run {run_id}")));
+            }
+            rec.to_cancel
         };
-        if rec.status != crate::RunStatus::Running || rec.claimed_by.as_deref() != Some(claimed_by)
-        {
-            return Ok(None);
-        }
-        let now = Utc::now();
-        rec.lease_expires_at = Some(now + lease);
-        rec.updated_at = now;
         let steering = self
             .steering
             .write()
             .await
             .remove(run_id)
             .unwrap_or_default();
-        Ok(Some(crate::RunSignals {
-            cancel_requested: rec.cancel_requested,
+        Ok(crate::RunSignals {
+            to_cancel,
             steering,
-        }))
+        })
     }
 
     async fn request_cancel_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
@@ -485,14 +476,18 @@ impl SessionStore for MemorySessionStore {
         if rec.tenant != tenant || rec.status.is_terminal() {
             return Ok(false);
         }
-        let dormant = rec.status == crate::RunStatus::Paused
-            || (rec.status == crate::RunStatus::Queued && rec.claimed_by.is_none());
+        let dormant = matches!(
+            rec.status,
+            crate::RunStatus::Idle | crate::RunStatus::Waiting
+        );
+        let now = Utc::now();
         if dormant {
             rec.status = crate::RunStatus::Cancelled;
+            rec.finished_at = Some(now);
         } else {
-            rec.cancel_requested = true;
+            rec.to_cancel = true;
         }
-        rec.updated_at = Utc::now();
+        rec.updated_at = now;
         Ok(true)
     }
 
@@ -513,136 +508,15 @@ impl SessionStore for MemorySessionStore {
         Ok(true)
     }
 
-    async fn claim_thread(
-        &self,
-        tenant: &str,
-        session_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
-        let now = Utc::now();
-        let mut leases = self.thread_leases.write().await;
-        let key = (tenant.to_string(), session_id.to_string());
-        match leases.get(&key) {
-            Some(l) if l.claimed_by != claimed_by && l.expires_at > now => Ok(false),
-            _ => {
-                leases.insert(
-                    key,
-                    ThreadLease {
-                        claimed_by: claimed_by.to_string(),
-                        expires_at: now + lease,
-                    },
-                );
-                Ok(true)
-            }
-        }
-    }
-
-    async fn extend_thread_lease(
-        &self,
-        tenant: &str,
-        session_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
-        let mut leases = self.thread_leases.write().await;
-        let key = (tenant.to_string(), session_id.to_string());
-        match leases.get_mut(&key) {
-            Some(l) if l.claimed_by == claimed_by => {
-                l.expires_at = Utc::now() + lease;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    async fn release_thread(&self, tenant: &str, session_id: &str, claimed_by: &str) -> Result<()> {
-        let mut leases = self.thread_leases.write().await;
-        let key = (tenant.to_string(), session_id.to_string());
-        if leases.get(&key).is_some_and(|l| l.claimed_by == claimed_by) {
-            leases.remove(&key);
-        }
-        Ok(())
-    }
-
-    async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
-        let now = Utc::now();
-        let mut reaped = Vec::new();
-        {
-            let mut runs = self.runs.write().await;
-            for rec in runs.values_mut() {
-                if rec.status == crate::RunStatus::Running
-                    && rec.lease_expires_at.is_some_and(|at| at < now)
-                {
-                    rec.status = crate::RunStatus::Error;
-                    rec.error = Some("lease expired".into());
-                    rec.updated_at = now;
-                    reaped.push(rec.clone());
-                }
-            }
-        }
-        let mut sessions = self.sessions.write().await;
-        for run in &reaped {
-            if let Some(rec) = sessions.get_mut(&(run.tenant.clone(), run.session_id.clone()))
-                && rec.summary.last_run_status.as_deref() == Some("running")
-                && rec
-                    .summary
-                    .last_run_at
-                    .is_some_and(|at| at <= run.created_at)
-            {
-                rec.summary.last_run_status = Some("failed".to_string());
-            }
-        }
-        Ok(reaped)
-    }
-
-    async fn claim_next_queued_run(
-        &self,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<Option<crate::RunRecord>> {
-        let now = Utc::now();
-        let mut runs = self.runs.write().await;
-        let next = runs
-            .values()
-            .filter(|r| r.status == crate::RunStatus::Queued && r.claimed_by.is_none())
-            .min_by_key(|r| r.created_at)
-            .map(|r| r.run_id.clone());
-        let Some(run_id) = next else {
-            return Ok(None);
-        };
-        let rec = runs.get_mut(&run_id).unwrap();
-        rec.status = crate::RunStatus::Running;
-        rec.claimed_by = Some(claimed_by.to_string());
-        rec.lease_expires_at = Some(now + lease);
-        rec.updated_at = now;
-        Ok(Some(rec.clone()))
-    }
-
-    async fn release_run(&self, run_id: &str, claimed_by: &str) -> Result<()> {
-        let mut runs = self.runs.write().await;
-        if let Some(rec) = runs.get_mut(run_id)
-            && rec.claimed_by.as_deref() == Some(claimed_by)
-        {
-            rec.status = crate::RunStatus::Queued;
-            rec.claimed_by = None;
-            rec.lease_expires_at = None;
-            rec.updated_at = Utc::now();
-        }
-        Ok(())
-    }
-
     async fn resume_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let mut runs = self.runs.write().await;
         let Some(rec) = runs.get_mut(run_id) else {
             return Ok(false);
         };
-        if rec.tenant != tenant || rec.status != crate::RunStatus::Paused {
+        if rec.tenant != tenant || rec.status != crate::RunStatus::Waiting {
             return Ok(false);
         }
-        rec.status = crate::RunStatus::Queued;
-        rec.claimed_by = None;
-        rec.lease_expires_at = None;
+        rec.status = crate::RunStatus::Idle;
         rec.updated_at = Utc::now();
         Ok(true)
     }
@@ -657,7 +531,7 @@ impl SessionStore for MemorySessionStore {
         let Some(rec) = runs.get_mut(run_id) else {
             return Ok(false);
         };
-        if rec.tenant != tenant || rec.status != crate::RunStatus::Paused {
+        if rec.tenant != tenant || rec.status != crate::RunStatus::Waiting {
             return Ok(false);
         }
         let session_id = rec.session_id.clone();
@@ -674,9 +548,7 @@ impl SessionStore for MemorySessionStore {
                 event: event.clone(),
             });
         }
-        rec.status = crate::RunStatus::Queued;
-        rec.claimed_by = None;
-        rec.lease_expires_at = None;
+        rec.status = crate::RunStatus::Idle;
         rec.updated_at = Utc::now();
         Ok(true)
     }

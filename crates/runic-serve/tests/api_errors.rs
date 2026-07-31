@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,21 +9,20 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{
-    MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionMeta, SessionStore, StoredEvent,
-};
+use runic_serve::router;
+use runic_substrate::{SessionEvent, SessionMeta, SessionStore, StoredEvent};
 use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
+
+use common::Harness;
 
 const TENANT: &str = "alice";
 
-struct PanicFactory;
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         panic!("agent path must not run here");
     }
 }
@@ -32,19 +33,6 @@ struct FailingProvider;
 impl Provider for FailingProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         Err(ProviderError::Http("upstream model down".into()))
-    }
-}
-
-struct FailingAgentFactory;
-
-#[async_trait]
-impl AgentFactory for FailingAgentFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(FailingProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
     }
 }
 
@@ -123,60 +111,21 @@ impl SpeechToText for FailingTranscriber {
     }
 }
 
-fn crud_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+fn crud_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(PanicProvider)))
 }
 
-fn failing_store_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(FailingSessionStore),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+fn failing_store_router(h: &Harness) -> Router {
+    let sessions =
+        runic_substrate::Sessions::from(Arc::new(FailingSessionStore) as Arc<dyn SessionStore>);
+    router(
+        runic_serve::ServeConfig::new(sessions, h.blobs.clone(), h.pool.clone())
+            .agent("main", common::agent(Arc::new(PanicProvider))),
+    )
 }
 
-fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn failing_agent_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(FailingAgentFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+fn failing_agent_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(FailingProvider)))
 }
 
 fn get(uri: &str, tenant: &str) -> Request<Body> {
@@ -184,16 +133,6 @@ fn get(uri: &str, tenant: &str) -> Request<Body> {
         .uri(uri)
         .header("x-runic-tenant", tenant)
         .body(Body::empty())
-        .unwrap()
-}
-
-fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body))
         .unwrap()
 }
 
@@ -215,13 +154,6 @@ async fn status_json(resp: axum::response::Response) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
-async fn body_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
 fn assert_error_shape(body: &Value, kind: &str) {
     assert_eq!(body["error"], kind, "unexpected error kind: {body}");
     assert!(
@@ -232,7 +164,10 @@ fn assert_error_shape(body: &Value, kind: &str) {
 
 #[tokio::test]
 async fn not_found_shape() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let (status, body) =
         status_json(app.oneshot(get("/threads/ghost", TENANT)).await.unwrap()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -241,9 +176,12 @@ async fn not_found_shape() {
 
 #[tokio::test]
 async fn bad_request_shape() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(post_json("/threads/t1/runs/stream", TENANT, "{}".into()))
+        .oneshot(common::post_json("/threads/t1/runs/wait", TENANT, "{}"))
         .await
         .unwrap();
     let (status, body) = status_json(resp).await;
@@ -253,7 +191,10 @@ async fn bad_request_shape() {
 
 #[tokio::test]
 async fn store_error_shape() {
-    let app = failing_store_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = failing_store_router(&h);
     let (status, body) =
         status_json(app.oneshot(get("/threads/anything", TENANT)).await.unwrap()).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -262,7 +203,14 @@ async fn store_error_shape() {
 
 #[tokio::test]
 async fn upstream_error_shape() {
-    let app = transcribe_router(Some(Arc::new(FailingTranscriber)));
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let config = h
+        .config()
+        .agent("main", common::agent(Arc::new(PanicProvider)))
+        .transcriber(Some(Arc::new(FailingTranscriber)));
+    let app = router(config);
     let (status, body) =
         status_json(app.oneshot(transcribe("audio/wav", b"x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -271,7 +219,10 @@ async fn upstream_error_shape() {
 
 #[tokio::test]
 async fn not_configured_error_shape() {
-    let app = transcribe_router(None);
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let (status, body) =
         status_json(app.oneshot(transcribe("audio/wav", b"x")).await.unwrap()).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
@@ -279,17 +230,20 @@ async fn not_configured_error_shape() {
 }
 
 #[tokio::test]
-async fn agent_failure_surfaces_as_run_error_not_an_http_error_body() {
-    let app = failing_agent_router();
+async fn agent_failure_surfaces_as_a_500_agent_error() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = failing_agent_router(&h);
     let resp = app
-        .oneshot(post_json(
-            "/threads/t1/runs/stream",
+        .oneshot(common::post_json(
+            "/threads/t1/runs/wait",
             TENANT,
             json!({ "message": "hi" }).to_string(),
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_string(resp).await;
-    assert!(body.contains("event: run_error"), "{body}");
+    let (status, body) = status_json(resp).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_error_shape(&body, "agent");
 }

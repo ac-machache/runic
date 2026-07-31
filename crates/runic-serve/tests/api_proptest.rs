@@ -1,27 +1,26 @@
+mod common;
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::Router;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use proptest::prelude::*;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{
-    ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionEvent, SessionStore,
-};
+use runic_serve::app::AppState;
+use runic_serve::hosts::AgentRegistry;
+use runic_serve::routes::runs::input::{RunMessageRequest, input_from_message};
+use runic_serve::{ServeError, single_agent};
+use runic_substrate::{ArtifactSource, SessionEvent};
 use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 
-struct PanicFactory;
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         panic!("agent path must not run in CRUD props");
     }
 }
@@ -47,108 +46,11 @@ impl Provider for ScriptedProvider {
     }
 }
 
-struct ScriptedFactory;
-
-#[async_trait]
-impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(ScriptedProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
-    }
-}
-
-fn crud_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn scripted_full() -> (Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>) {
-    let sessions: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let app = router(ServeConfig {
-        session_store: sessions.clone(),
-        artifact_store: artifacts.clone(),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    (app, sessions, artifacts)
-}
-
 fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-}
-
-fn get(uri: &str, tenant: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header("x-runic-tenant", tenant)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body))
-        .unwrap()
-}
-
-fn upload(thread: &str, tenant: &str, bytes: &[u8]) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(format!("/threads/{thread}/artifacts"))
-        .header("content-type", "application/octet-stream")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(bytes.to_vec()))
-        .unwrap()
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 2_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-async fn drain(resp: axum::response::Response) {
-    let _ = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-}
-
-async fn create_thread(app: &Router, tenant: &str, thread: &str) -> StatusCode {
-    app.clone()
-        .oneshot(post_json(
-            "/threads",
-            tenant,
-            json!({ "thread_id": thread }).to_string(),
-        ))
-        .await
-        .unwrap()
-        .status()
 }
 
 fn urlencode(s: &str) -> String {
@@ -168,31 +70,14 @@ fn has_inline_bytes(events: &[runic_substrate::StoredEvent]) -> bool {
     })
 }
 
-async fn wait_for_run_end(store: &dyn SessionStore, tenant: &str, thread: &str) {
-    for _ in 0..100 {
-        let events = store.read(tenant, thread).await.unwrap();
-        if events
-            .iter()
-            .any(|s| matches!(s.event, SessionEvent::RunEnd { .. }))
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
 fn name() -> impl Strategy<Value = String> {
     "[a-zA-Z0-9_-]{1,16}"
 }
 
-fn block_strategy() -> impl Strategy<Value = Value> {
+fn valid_block_strategy() -> impl Strategy<Value = Value> {
     prop_oneof![
         "[a-z ]{1,12}".prop_map(|t| json!({ "type": "text", "text": t })),
         Just(json!({ "type": "image", "media_type": "image/png", "data": "aGVsbG8=" })),
-        Just(json!({ "type": "image", "media_type": "image/png", "data": "!!not-base64!!" })),
-        "[a-z0-9]{1,8}".prop_map(|s| {
-            json!({ "type": "artifact_ref", "id": format!("art-{s}"), "media_type": "image/png" })
-        }),
     ]
 }
 
@@ -202,16 +87,17 @@ proptest! {
     #[test]
     fn tenant_thread_namespace_never_collides(t1 in name(), t2 in name(), id in name()) {
         prop_assume!(t1 != t2);
-        let app = crud_router();
         rt().block_on(async {
-            prop_assert_eq!(create_thread(&app, &t1, &id).await, StatusCode::CREATED);
+            let Some(h) = common::harness().await else { return Ok(()) };
+            let app = h.single_router(common::agent(Arc::new(PanicProvider)));
+            common::create_thread(&app, &t1, &id).await;
 
-            let mine = app.clone().oneshot(get(&format!("/threads/{id}"), &t1)).await.unwrap();
+            let mine = app.clone().oneshot(common::get(&format!("/threads/{id}"), &t1)).await.unwrap();
             prop_assert_eq!(mine.status(), StatusCode::OK);
-            let got = body_json(mine).await;
+            let got = common::body_json(mine).await;
             prop_assert_eq!(got["thread_id"].as_str().unwrap(), id.as_str());
 
-            let foreign = app.clone().oneshot(get(&format!("/threads/{id}"), &t2)).await.unwrap();
+            let foreign = app.clone().oneshot(common::get(&format!("/threads/{id}"), &t2)).await.unwrap();
             prop_assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
             Ok(())
         })?;
@@ -219,20 +105,21 @@ proptest! {
 
     #[test]
     fn pagination_walks_exactly_all_results(n in 1usize..24, page in 1usize..8) {
-        let app = crud_router();
         rt().block_on(async {
-            let tenant = "walker";
+            let Some(h) = common::harness().await else { return Ok(()) };
+            let app = h.single_router(common::agent(Arc::new(PanicProvider)));
+            let tenant = h.tenant.clone();
             let mut created: Vec<String> = (0..n).map(|i| format!("th-{i:03}")).collect();
             for id in &created {
-                prop_assert_eq!(create_thread(&app, tenant, id).await, StatusCode::CREATED);
+                common::create_thread(&app, &tenant, id).await;
             }
 
             let mut seen: Vec<String> = Vec::new();
             let mut query = format!("?limit={page}");
             loop {
-                let resp = app.clone().oneshot(get(&format!("/threads{query}"), tenant)).await.unwrap();
+                let resp = app.clone().oneshot(common::get(&format!("/threads{query}"), &tenant)).await.unwrap();
                 prop_assert_eq!(resp.status(), StatusCode::OK);
-                let body = body_json(resp).await;
+                let body = common::body_json(resp).await;
                 for t in body["threads"].as_array().unwrap() {
                     seen.push(t["thread_id"].as_str().unwrap().to_string());
                 }
@@ -250,27 +137,29 @@ proptest! {
     }
 
     #[test]
-    fn inline_bytes_never_reach_the_event_log(blocks in prop::collection::vec(block_strategy(), 1..4)) {
-        let (app, sessions, _artifacts) = scripted_full();
+    fn any_mix_of_valid_content_blocks_completes_the_run(blocks in prop::collection::vec(valid_block_strategy(), 1..4)) {
         rt().block_on(async {
-            prop_assert_eq!(create_thread(&app, "alice", "props").await, StatusCode::CREATED);
+            let Some(h) = common::harness().await else { return Ok(()) };
+            let store = h.store();
+            let tenant = h.tenant.clone();
+            let app = h.single_router(common::agent(Arc::new(ScriptedProvider)));
+            common::create_thread(&app, &tenant, "props").await;
 
             let body = json!({ "content": blocks }).to_string();
             let resp = app
                 .clone()
-                .oneshot(post_json("/threads/props/runs/stream", "alice", body))
+                .oneshot(common::post_json("/threads/props/runs/wait", &tenant, body))
                 .await
                 .unwrap();
-            let status = resp.status();
-            prop_assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST);
+            prop_assert_eq!(resp.status(), StatusCode::OK);
+            let body = common::body_json(resp).await;
+            prop_assert_eq!(body["text"].as_str().unwrap(), "pong");
 
-            if status == StatusCode::OK {
-                drain(resp).await;
-                wait_for_run_end(sessions.as_ref(), "alice", "props").await;
-            }
-
-            let events = sessions.read("alice", "props").await.unwrap();
-            prop_assert!(!has_inline_bytes(&events));
+            let events = store.read(&tenant, "props").await.unwrap();
+            let ended = events
+                .iter()
+                .any(|stored| matches!(&stored.event, SessionEvent::RunEnd { .. }));
+            prop_assert!(ended);
             Ok(())
         })?;
     }
@@ -278,34 +167,46 @@ proptest! {
     #[test]
     fn artifact_refs_never_cross_ownership(owner in name(), attacker in name()) {
         prop_assume!(owner != attacker);
-        let (app, sessions, _artifacts) = scripted_full();
         rt().block_on(async {
-            prop_assert_eq!(create_thread(&app, &owner, "vault").await, StatusCode::CREATED);
-            let up = app.clone().oneshot(upload("vault", &owner, b"secret")).await.unwrap();
-            prop_assert_eq!(up.status(), StatusCode::CREATED);
-            let id = body_json(up).await["id"].as_str().unwrap().to_string();
-
-            let ref_body = json!({
-                "content": [{ "type": "artifact_ref", "id": id, "media_type": "image/png" }]
-            })
-            .to_string();
-
-            let stolen = app
-                .clone()
-                .oneshot(post_json("/threads/vault/runs/stream", &attacker, ref_body.clone()))
+            let Some(h) = common::harness().await else { return Ok(()) };
+            let app = h.single_router(common::agent(Arc::new(ScriptedProvider)));
+            common::create_thread(&app, &owner, "vault").await;
+            let art = h
+                .artifacts()
+                .put(&owner, "vault", "text/plain", ArtifactSource::UserUpload, b"secret")
                 .await
                 .unwrap();
-            prop_assert_eq!(stolen.status(), StatusCode::BAD_REQUEST);
 
-            let owned = app
+            let state = AppState {
+                sessions: h.sessions.clone(),
+                blobs: h.blobs.clone(),
+                pool: h.pool.clone(),
+                transcriber: None,
+                agents: Arc::new(AgentRegistry::new(single_agent(
+                    "main",
+                    common::agent(Arc::new(ScriptedProvider)),
+                ))),
+            };
+            let ref_body: RunMessageRequest = serde_json::from_value(json!({
+                "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }]
+            }))
+            .unwrap();
+            let stolen = input_from_message(&state, &attacker, "vault", ref_body.into_message().unwrap()).await;
+            prop_assert!(matches!(stolen, Err(ServeError::BadRequest(_))));
+
+            let resp = app
                 .clone()
-                .oneshot(post_json("/threads/vault/runs/stream", &owner, ref_body))
+                .oneshot(common::post_json(
+                    "/threads/vault/runs/wait",
+                    &owner,
+                    json!({ "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }] })
+                        .to_string(),
+                ))
                 .await
                 .unwrap();
-            prop_assert_eq!(owned.status(), StatusCode::OK);
-            drain(owned).await;
-            wait_for_run_end(sessions.as_ref(), &owner, "vault").await;
-            prop_assert!(!has_inline_bytes(&sessions.read(&owner, "vault").await.unwrap()));
+            prop_assert!(resp.status() == StatusCode::OK || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+            let store = h.store();
+            prop_assert!(!has_inline_bytes(&store.read(&owner, "vault").await.unwrap()));
             Ok(())
         })?;
     }

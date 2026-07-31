@@ -1,22 +1,23 @@
 #![cfg(feature = "postgres")]
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
+use runic_serve::{ServeConfig, router};
 use runic_substrate::{
-    ArtifactStore, LocalArtifactStore, PostgresArtifactStore, PostgresSessionStore, SessionStore,
+    ArtifactStore, Blobs, LocalArtifactStore, PostgresArtifactStore, PostgresSessionStore,
+    SessionStore, Sessions,
 };
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
@@ -41,102 +42,30 @@ impl Provider for ScriptedProvider {
     }
 }
 
-struct ScriptedFactory;
-
-#[async_trait]
-impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(ScriptedProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
-    }
-}
-
-async fn pg_stores(root: &Path) -> Option<(Arc<dyn SessionStore>, Arc<dyn ArtifactStore>)> {
-    let Ok(url) = std::env::var("RUNIC_TEST_DATABASE_URL") else {
-        static NOTED: AtomicBool = AtomicBool::new(false);
-        if !NOTED.swap(true, Ordering::Relaxed) {
-            eprintln!(
-                "\n⚠  RUNIC_TEST_DATABASE_URL not set — postgres_api tests SKIPPED (NOT verified). \
-                 Run scripts/test-postgres.sh to verify.\n"
-            );
-        }
-        return None;
-    };
-    let sessions = PostgresSessionStore::connect(&url)
+async fn pg_router(root: &Path) -> Option<(Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>)> {
+    let pool = common::test_pool().await?;
+    runic_serve::queue::setup(&pool)
+        .await
+        .expect("apalis queue schema setup");
+    let sessions = PostgresSessionStore::from_pool(pool.clone())
         .await
         .expect("connect session store");
     let bytes: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root));
-    let artifacts = PostgresArtifactStore::connect(&url, bytes, "local")
+    let artifacts = PostgresArtifactStore::from_pool(pool.clone(), bytes, "local")
         .await
         .expect("connect artifact store");
-    Some((Arc::new(sessions), Arc::new(artifacts)))
-}
 
-fn make_router(sessions: Arc<dyn SessionStore>, artifacts: Arc<dyn ArtifactStore>) -> Router {
-    router(ServeConfig {
-        session_store: sessions,
-        artifact_store: artifacts,
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn get(uri: &str, tenant: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header("x-runic-tenant", tenant)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body))
-        .unwrap()
-}
-
-fn upload(thread: &str, tenant: &str, bytes: &[u8]) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(format!("/threads/{thread}/artifacts"))
-        .header("content-type", "text/plain")
-        .header("x-runic-tenant", tenant)
-        .header("x-runic-filename", "note.txt")
-        .body(Body::from(bytes.to_vec()))
-        .unwrap()
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-async fn body_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn find_run_id(body: &str) -> Option<String> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .filter_map(|j| serde_json::from_str::<Value>(j.trim()).ok())
-        .find_map(|e| (e["type"] == "run_start").then(|| e["run_id"].as_str().unwrap().to_string()))
+    let sessions: Arc<dyn SessionStore> = Arc::new(sessions);
+    let artifacts: Arc<dyn ArtifactStore> = Arc::new(artifacts);
+    let app = router(
+        ServeConfig::new(
+            Sessions::from(sessions.clone()),
+            Blobs::from(artifacts.clone()),
+            pool,
+        )
+        .agent("main", common::agent(Arc::new(ScriptedProvider))),
+    );
+    Some((app, sessions, artifacts))
 }
 
 async fn wait_for_events(store: &dyn SessionStore, tenant: &str, thread: &str, min: usize) {
@@ -149,63 +78,58 @@ async fn wait_for_events(store: &dyn SessionStore, tenant: &str, thread: &str, m
     panic!("stored event count did not reach {min}");
 }
 
-async fn create_thread(app: &Router, tenant: &str, thread: &str) {
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads",
-            tenant,
-            json!({ "thread_id": thread }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-}
-
 #[tokio::test]
 async fn full_lifecycle_on_postgres() {
     let root = tempfile::tempdir().unwrap();
-    let Some((sessions, artifacts)) = pg_stores(root.path()).await else {
+    let Some((app, sessions, artifacts)) = pg_router(root.path()).await else {
         return;
     };
-    let app = make_router(sessions.clone(), artifacts.clone());
-    let tenant = uuid::Uuid::new_v4().to_string();
-    let thread = uuid::Uuid::new_v4().to_string();
+    let tenant = common::uid("tenant");
+    let thread = common::uid("thread");
 
-    create_thread(&app, &tenant, &thread).await;
+    common::create_thread(&app, &tenant, &thread).await;
 
     let resp = app
         .clone()
-        .oneshot(upload(&thread, &tenant, b"blob bytes"))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/threads/{thread}/artifacts"))
+                .header("content-type", "text/plain")
+                .header("x-runic-tenant", &tenant)
+                .header("x-runic-filename", "note.txt")
+                .body(Body::from("blob bytes"))
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let art_id = body_json(resp).await["id"].as_str().unwrap().to_string();
+    let art_id = common::body_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(root.path().join("blobs").join(&art_id).exists());
 
     let resp = app
         .clone()
-        .oneshot(post_json(
-            &format!("/threads/{thread}/runs/stream"),
-            &tenant,
-            json!({ "message": "hello" }).to_string(),
-        ))
+        .oneshot(common::wait_request(&thread, &tenant, "hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let run_body = body_string(resp).await;
-    assert!(run_body.contains("pong"), "{run_body}");
-    let run_id = find_run_id(&run_body).expect("run_start in stream");
+    let body: Value = common::body_json(resp).await;
+    assert_eq!(body["text"], "pong");
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+
     wait_for_events(sessions.as_ref(), &tenant, &thread, 4).await;
 
     let resp = app
         .clone()
-        .oneshot(get(&format!("/threads/{thread}/events"), &tenant))
+        .oneshot(common::get(&format!("/threads/{thread}/events"), &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        !body_json(resp).await["events"]
+        !common::body_json(resp).await["events"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -213,29 +137,19 @@ async fn full_lifecycle_on_postgres() {
 
     let resp = app
         .clone()
-        .oneshot(get(
-            &format!("/threads/{thread}/runs/{run_id}/stream"),
+        .oneshot(common::get(
+            &format!("/threads/{thread}/runs/{run_id}/timeline"),
             &tenant,
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let replay = tokio::time::timeout(Duration::from_secs(5), body_string(resp))
-        .await
-        .expect("replay finishes for a closed run");
-    assert!(replay.contains("event: run_end"), "{replay}");
-    assert!(replay.contains("event: done"));
+    let trace = common::body_json(resp).await;
+    assert_eq!(trace["run_id"], run_id.as_str());
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri(format!("/threads/{thread}"))
-                .header("x-runic-tenant", &tenant)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::delete(&format!("/threads/{thread}"), &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -254,25 +168,24 @@ async fn full_lifecycle_on_postgres() {
 #[tokio::test]
 async fn tenant_isolation_on_postgres() {
     let root = tempfile::tempdir().unwrap();
-    let Some((sessions, artifacts)) = pg_stores(root.path()).await else {
+    let Some((app, _sessions, _artifacts)) = pg_router(root.path()).await else {
         return;
     };
-    let app = make_router(sessions, artifacts);
-    let tenant_a = uuid::Uuid::new_v4().to_string();
-    let tenant_b = uuid::Uuid::new_v4().to_string();
-    let thread_a = uuid::Uuid::new_v4().to_string();
-    let thread_b = uuid::Uuid::new_v4().to_string();
+    let tenant_a = common::uid("tenant");
+    let tenant_b = common::uid("tenant");
+    let thread_a = common::uid("thread");
+    let thread_b = common::uid("thread");
 
-    create_thread(&app, &tenant_a, &thread_a).await;
-    create_thread(&app, &tenant_b, &thread_b).await;
+    common::create_thread(&app, &tenant_a, &thread_a).await;
+    common::create_thread(&app, &tenant_b, &thread_b).await;
 
     let resp = app
         .clone()
-        .oneshot(get("/threads", &tenant_a))
+        .oneshot(common::get("/threads", &tenant_a))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ids: Vec<String> = body_json(resp).await["threads"]
+    let ids: Vec<String> = common::body_json(resp).await["threads"]
         .as_array()
         .unwrap()
         .iter()
@@ -283,4 +196,27 @@ async fn tenant_isolation_on_postgres() {
         !ids.contains(&thread_b),
         "tenant A leaked tenant B's thread"
     );
+}
+
+#[tokio::test]
+async fn wait_run_persists_the_full_lifecycle_on_postgres() {
+    let root = tempfile::tempdir().unwrap();
+    let Some((app, sessions, _artifacts)) = pg_router(root.path()).await else {
+        return;
+    };
+    let tenant = common::uid("tenant");
+    let thread = common::uid("thread");
+
+    let resp = app
+        .oneshot(common::wait_request(&thread, &tenant, "hi"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    wait_for_events(sessions.as_ref(), &tenant, &thread, 4).await;
+    let events = sessions.read(&tenant, &thread).await.unwrap();
+    assert!(events.iter().any(|stored| {
+        matches!(&stored.event, runic_substrate::SessionEvent::RunEnd { outcome, .. }
+            if outcome.stop_reason.as_deref() == Some("end_turn"))
+    }));
 }

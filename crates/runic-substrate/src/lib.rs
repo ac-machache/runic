@@ -41,8 +41,7 @@ pub use persister::{
 };
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{
-    ChatHit, RunInput, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore,
-    StoredEvent,
+    ChatHit, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore, StoredEvent,
 };
 pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 

@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,18 +9,14 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use runic_agent::Runner;
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore};
+use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
 
-const TENANT: &str = "alice";
-
-struct PanicFactory;
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         panic!("agent path must not run here");
     }
 }
@@ -39,25 +37,20 @@ impl SpeechToText for EchoFilenameTranscriber {
     }
 }
 
-fn transcribe_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: Some(Arc::new(EchoFilenameTranscriber)),
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+async fn transcribe_router() -> Option<Router> {
+    let h = common::harness().await?;
+    let config = h
+        .config()
+        .agent("main", common::agent(Arc::new(PanicProvider)))
+        .transcriber(Some(Arc::new(EchoFilenameTranscriber)));
+    Some(runic_serve::router(config))
 }
 
 fn request(content_type: Option<&str>, filename: Option<&str>, bytes: &[u8]) -> Request<Body> {
     let mut b = Request::builder()
         .method("POST")
         .uri("/transcribe")
-        .header("x-runic-tenant", TENANT);
+        .header("x-runic-tenant", "alice");
     if let Some(ct) = content_type {
         b = b.header("content-type", ct);
     }
@@ -76,7 +69,9 @@ async fn body_json(resp: axum::response::Response) -> Value {
 
 #[tokio::test]
 async fn content_type_is_case_insensitive() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(Some("Audio/WAV"), Some("clip.wav"), b"bytes"))
         .await
@@ -86,7 +81,9 @@ async fn content_type_is_case_insensitive() {
 
 #[tokio::test]
 async fn content_type_with_charset_is_accepted() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(
             Some("audio/wav; charset=binary"),
@@ -100,7 +97,9 @@ async fn content_type_with_charset_is_accepted() {
 
 #[tokio::test]
 async fn missing_content_type_is_rejected() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(None, Some("clip.wav"), b"bytes"))
         .await
@@ -110,7 +109,9 @@ async fn missing_content_type_is_rejected() {
 
 #[tokio::test]
 async fn non_audio_content_type_is_rejected() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(Some("text/plain"), Some("clip.wav"), b"bytes"))
         .await
@@ -120,7 +121,9 @@ async fn non_audio_content_type_is_rejected() {
 
 #[tokio::test]
 async fn filename_path_segments_are_stripped() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(
             Some("audio/wav"),
@@ -135,7 +138,9 @@ async fn filename_path_segments_are_stripped() {
 
 #[tokio::test]
 async fn empty_body_is_rejected() {
-    let app = transcribe_router();
+    let Some(app) = transcribe_router().await else {
+        return;
+    };
     let resp = app
         .oneshot(request(Some("audio/wav"), Some("clip.wav"), b""))
         .await

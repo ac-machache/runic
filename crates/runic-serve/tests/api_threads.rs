@@ -1,26 +1,25 @@
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{MemoryArtifactStore, MemorySessionStore, SessionStore};
+use runic_substrate::{RunStatus, SessionStore};
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
-const TENANT: &str = "alice";
+use common::Harness;
 
-struct PanicFactory;
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
         panic!("agent path must not run in CRUD tests");
     }
 }
@@ -46,119 +45,23 @@ impl Provider for ScriptedProvider {
     }
 }
 
-struct ScriptedFactory;
-
-#[async_trait]
-impl AgentFactory for ScriptedFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(ScriptedProvider), tenant, session_id)
-                .system_prompt("test")
-                .build(),
-        )
-    }
+fn crud_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(PanicProvider)))
 }
 
-fn crud_router() -> Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
+fn scripted_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(ScriptedProvider)))
 }
 
-fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn get(uri: &str, tenant: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .header("x-runic-tenant", tenant)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn post_json(uri: &str, tenant: &str, body: String) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body))
-        .unwrap()
-}
-
-fn patch_json(uri: &str, tenant: &str, body: &str) -> Request<Body> {
-    Request::builder()
-        .method("PATCH")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", tenant)
-        .body(Body::from(body.to_string()))
-        .unwrap()
-}
-
-fn run_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
-    post_json(
-        &format!("/threads/{thread}/runs/stream"),
-        tenant,
-        json!({ "message": message }).to_string(),
-    )
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-async fn body_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-async fn create_thread(app: &Router, tenant: &str, thread_id: &str) {
-    let resp = app
-        .clone()
-        .oneshot(post_json(
-            "/threads",
-            tenant,
-            json!({ "thread_id": thread_id }).to_string(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-}
-
-async fn create_labeled(app: &Router, id: &str, label: Value) -> Value {
+async fn create_labeled(app: &Router, tenant: &str, id: &str, label: Value) -> Value {
     let body = json!({ "thread_id": id, "label": label }).to_string();
     let resp = app
         .clone()
-        .oneshot(post_json("/threads", TENANT, body))
+        .oneshot(common::post_json("/threads", tenant, body))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    body_json(resp).await
+    common::body_json(resp).await
 }
 
 async fn wait_for_stored_events(
@@ -179,11 +82,11 @@ async fn wait_for_stored_events(
 async fn list(app: &Router, tenant: &str, query: &str) -> Value {
     let resp = app
         .clone()
-        .oneshot(get(&format!("/threads{query}"), tenant))
+        .oneshot(common::get(&format!("/threads{query}"), tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    body_json(resp).await
+    common::body_json(resp).await
 }
 
 fn page_ids(page: &Value) -> Vec<String> {
@@ -206,47 +109,59 @@ fn urlencode(s: &str) -> String {
 
 #[tokio::test]
 async fn list_limit_clamps_to_upper_bound_of_200() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     for i in 0..205 {
-        create_thread(&app, TENANT, &format!("t{i:03}")).await;
+        common::create_thread(&app, &h.tenant, &format!("t{i:03}")).await;
     }
-    let page = list(&app, TENANT, "?limit=1000").await;
+    let page = list(&app, &h.tenant, "?limit=1000").await;
     assert_eq!(page["threads"].as_array().unwrap().len(), 200);
     assert!(page["next_cursor"].is_string());
 }
 
 #[tokio::test]
 async fn list_limit_clamps_to_lower_bound_of_1() {
-    let app = crud_router();
-    create_thread(&app, TENANT, "a").await;
-    create_thread(&app, TENANT, "b").await;
-    let page = list(&app, TENANT, "?limit=0").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    common::create_thread(&app, &h.tenant, "a").await;
+    common::create_thread(&app, &h.tenant, "b").await;
+    let page = list(&app, &h.tenant, "?limit=0").await;
     assert_eq!(page["threads"].as_array().unwrap().len(), 1);
     assert!(page["next_cursor"].is_string());
 }
 
 #[tokio::test]
 async fn next_cursor_absent_when_page_exhausts_results() {
-    let app = crud_router();
-    create_thread(&app, TENANT, "only-a").await;
-    create_thread(&app, TENANT, "only-b").await;
-    let page = list(&app, TENANT, "?limit=50").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    common::create_thread(&app, &h.tenant, "only-a").await;
+    common::create_thread(&app, &h.tenant, "only-b").await;
+    let page = list(&app, &h.tenant, "?limit=50").await;
     assert_eq!(page["threads"].as_array().unwrap().len(), 2);
     assert!(page["next_cursor"].is_null());
 }
 
 #[tokio::test]
 async fn walking_cursor_covers_every_thread_once() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let mut created: Vec<String> = (0..25).map(|i| format!("t{i:02}")).collect();
     for id in &created {
-        create_thread(&app, TENANT, id).await;
+        common::create_thread(&app, &h.tenant, id).await;
     }
 
     let mut seen: Vec<String> = Vec::new();
     let mut query = "?limit=7".to_string();
     loop {
-        let page = list(&app, TENANT, &query).await;
+        let page = list(&app, &h.tenant, &query).await;
         seen.extend(page_ids(&page));
         match page["next_cursor"].as_str() {
             Some(cursor) => query = format!("?limit=7&cursor={}", urlencode(cursor)),
@@ -261,29 +176,37 @@ async fn walking_cursor_covers_every_thread_once() {
 
 #[tokio::test]
 async fn listing_is_newest_active_first() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     for id in ["oldest", "middle", "newest"] {
-        create_thread(&app, TENANT, id).await;
+        common::create_thread(&app, &h.tenant, id).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let page = list(&app, TENANT, "?limit=50").await;
+    let page = list(&app, &h.tenant, "?limit=50").await;
     assert_eq!(page_ids(&page), vec!["newest", "middle", "oldest"]);
 }
 
 #[tokio::test]
 async fn cursor_is_tenant_scoped_and_cannot_leak_foreign_threads() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    let alice = format!("{}-alice", h.tenant);
+    let bob = format!("{}-bob", h.tenant);
     for i in 0..5 {
-        create_thread(&app, "alice", &format!("alice-{i}")).await;
-        create_thread(&app, "bob", &format!("bob-{i}")).await;
+        common::create_thread(&app, &alice, &format!("alice-{i}")).await;
+        common::create_thread(&app, &bob, &format!("bob-{i}")).await;
     }
 
-    let alice_page = list(&app, "alice", "?limit=2").await;
+    let alice_page = list(&app, &alice, "?limit=2").await;
     let cursor = alice_page["next_cursor"].as_str().unwrap();
 
     let bob_page = list(
         &app,
-        "bob",
+        &bob,
         &format!("?limit=50&cursor={}", urlencode(cursor)),
     )
     .await;
@@ -296,118 +219,148 @@ async fn cursor_is_tenant_scoped_and_cannot_leak_foreign_threads() {
 
 #[tokio::test]
 async fn create_trims_label_whitespace() {
-    let app = crud_router();
-    let body = create_labeled(&app, "trim", json!("  spaced  ")).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    let body = create_labeled(&app, &h.tenant, "trim", json!("  spaced  ")).await;
     assert_eq!(body["label"], "spaced");
 }
 
 #[tokio::test]
 async fn create_whitespace_label_becomes_null() {
-    let app = crud_router();
-    let body = create_labeled(&app, "blank", json!("   ")).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    let body = create_labeled(&app, &h.tenant, "blank", json!("   ")).await;
     assert!(body["label"].is_null());
 }
 
 #[tokio::test]
 async fn recreate_without_label_preserves_existing() {
-    let app = crud_router();
-    create_labeled(&app, "keepme", json!("original")).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    create_labeled(&app, &h.tenant, "keepme", json!("original")).await;
     let resp = app
         .clone()
-        .oneshot(post_json(
+        .oneshot(common::post_json(
             "/threads",
-            TENANT,
+            &h.tenant,
             json!({ "thread_id": "keepme" }).to_string(),
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    assert_eq!(body_json(resp).await["label"], "original");
+    assert_eq!(common::body_json(resp).await["label"], "original");
 }
 
 #[tokio::test]
 async fn recreate_with_label_updates_it() {
-    let app = crud_router();
-    create_labeled(&app, "reup", json!("first")).await;
-    let body = create_labeled(&app, "reup", json!("second")).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    create_labeled(&app, &h.tenant, "reup", json!("first")).await;
+    let body = create_labeled(&app, &h.tenant, "reup", json!("second")).await;
     assert_eq!(body["label"], "second");
 }
 
 #[tokio::test]
 async fn patch_sets_clears_and_leaves_label_unchanged() {
-    let app = crud_router();
-    create_labeled(&app, "patchme", json!("start")).await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    create_labeled(&app, &h.tenant, "patchme", json!("start")).await;
 
     let resp = app
         .clone()
-        .oneshot(patch_json(
+        .oneshot(common::patch_json(
             "/threads/patchme",
-            TENANT,
+            &h.tenant,
             r#"{"label":"renamed"}"#,
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["label"], "renamed");
+    assert_eq!(common::body_json(resp).await["label"], "renamed");
 
     let resp = app
         .clone()
-        .oneshot(patch_json("/threads/patchme", TENANT, "{}"))
+        .oneshot(common::patch_json("/threads/patchme", &h.tenant, "{}"))
         .await
         .unwrap();
-    assert_eq!(body_json(resp).await["label"], "renamed");
+    assert_eq!(common::body_json(resp).await["label"], "renamed");
 
     let resp = app
         .clone()
-        .oneshot(patch_json("/threads/patchme", TENANT, r#"{"label":null}"#))
+        .oneshot(common::patch_json(
+            "/threads/patchme",
+            &h.tenant,
+            r#"{"label":null}"#,
+        ))
         .await
         .unwrap();
-    assert!(body_json(resp).await["label"].is_null());
+    assert!(common::body_json(resp).await["label"].is_null());
 }
 
 #[tokio::test]
 async fn patch_unknown_thread_is_404() {
-    let app = crud_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(patch_json("/threads/ghost", TENANT, r#"{"label":"x"}"#))
+        .oneshot(common::patch_json(
+            "/threads/ghost",
+            &h.tenant,
+            r#"{"label":"x"}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-async fn seed_run_events(store: Arc<dyn SessionStore>) -> Router {
-    let app = scripted_router_with_store(store.clone());
+async fn seed_run_events(h: &Harness) -> Router {
+    let app = scripted_router(h);
     let resp = app
         .clone()
-        .oneshot(run_request("evthread", TENANT, "hello"))
+        .oneshot(common::wait_request("evthread", &h.tenant, "hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let _ = body_string(resp).await;
-    wait_for_stored_events(store.as_ref(), TENANT, "evthread", 5).await;
+    wait_for_stored_events(h.store().as_ref(), &h.tenant, "evthread", 4).await;
     app
 }
 
-async fn events_page(app: &Router, query: &str) -> Value {
+async fn events_page(app: &Router, tenant: &str, query: &str) -> Value {
     let resp = app
         .clone()
-        .oneshot(get(&format!("/threads/evthread/events{query}"), TENANT))
+        .oneshot(common::get(
+            &format!("/threads/evthread/events{query}"),
+            tenant,
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    body_json(resp).await
+    common::body_json(resp).await
 }
 
 #[tokio::test]
 async fn events_pagination_walks_all_seqs_without_gaps() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = seed_run_events(store.clone()).await;
-    let total = store.read(TENANT, "evthread").await.unwrap().len();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = seed_run_events(&h).await;
+    let total = h.store().read(&h.tenant, "evthread").await.unwrap().len();
 
     let mut seqs: Vec<u64> = Vec::new();
     let mut after = 0u64;
     loop {
-        let page = events_page(&app, &format!("?after_seq={after}&limit=2")).await;
+        let page = events_page(&app, &h.tenant, &format!("?after_seq={after}&limit=2")).await;
         for e in page["events"].as_array().unwrap() {
             seqs.push(e["seq"].as_u64().unwrap());
         }
@@ -424,36 +377,41 @@ async fn events_pagination_walks_all_seqs_without_gaps() {
 
 #[tokio::test]
 async fn events_has_more_and_next_after_seq_are_consistent() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = seed_run_events(store.clone()).await;
-    let total = store.read(TENANT, "evthread").await.unwrap().len();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = seed_run_events(&h).await;
+    let total = h.store().read(&h.tenant, "evthread").await.unwrap().len();
 
-    let first = events_page(&app, "?limit=2").await;
+    let first = events_page(&app, &h.tenant, "?limit=2").await;
     assert_eq!(first["events"].as_array().unwrap().len(), 2);
     assert_eq!(first["has_more"], true);
     assert!(first["next_after_seq"].is_u64());
 
-    let all = events_page(&app, &format!("?limit={}", total + 10)).await;
+    let all = events_page(&app, &h.tenant, &format!("?limit={}", total + 10)).await;
     assert_eq!(all["events"].as_array().unwrap().len(), total);
     assert_eq!(all["has_more"], false);
 }
 
 #[tokio::test]
 async fn events_limit_clamps_to_lower_bound_of_1() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = seed_run_events(store.clone()).await;
-    let page = events_page(&app, "?limit=0").await;
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = seed_run_events(&h).await;
+    let page = events_page(&app, &h.tenant, "?limit=0").await;
     assert_eq!(page["events"].as_array().unwrap().len(), 1);
     assert_eq!(page["has_more"], true);
 }
 
 #[tokio::test]
 async fn events_for_wrong_tenant_is_404_not_foreign_events() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let _ = seed_run_events(store.clone()).await;
-    let app = scripted_router_with_store(store);
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = seed_run_events(&h).await;
     let resp = app
-        .oneshot(get("/threads/evthread/events", "mallory"))
+        .oneshot(common::get("/threads/evthread/events", "mallory"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -461,18 +419,22 @@ async fn events_for_wrong_tenant_is_404_not_foreign_events() {
 
 #[tokio::test]
 async fn children_are_listed_separately_and_deleted_with_the_parent() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let store = h.store();
+    let app = scripted_router(&h);
+    let tenant = h.tenant.clone();
 
-    create_thread(&app, TENANT, "parent-1").await;
+    common::create_thread(&app, &tenant, "parent-1").await;
     for (child, grandchild) in [("chd-a", None), ("chd-b", Some("chd-b-1"))] {
         store
-            .create_child_session(TENANT, child, "parent-1", "scout")
+            .create_child_session(&tenant, child, "parent-1", "scout")
             .await
             .unwrap();
         store
             .append(
-                TENANT,
+                &tenant,
                 child,
                 &runic_substrate::SessionEvent::RunStart {
                     run_id: format!("r-{child}"),
@@ -485,15 +447,19 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
             .unwrap();
         if let Some(grandchild) = grandchild {
             store
-                .create_child_session(TENANT, grandchild, child, "scribe")
+                .create_child_session(&tenant, grandchild, child, "scribe")
                 .await
                 .unwrap();
         }
     }
 
-    let resp = app.clone().oneshot(get("/threads", TENANT)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(common::get("/threads", &tenant))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let listed = body_json(resp).await;
+    let listed = common::body_json(resp).await;
     let ids: Vec<&str> = listed["threads"]
         .as_array()
         .unwrap()
@@ -508,11 +474,11 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 
     let resp = app
         .clone()
-        .oneshot(get("/threads/parent-1/children", TENANT))
+        .oneshot(common::get("/threads/parent-1/children", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let children = body_json(resp).await;
+    let children = common::body_json(resp).await;
     let rows = children["threads"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     for row in rows {
@@ -522,7 +488,7 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 
     let resp = app
         .clone()
-        .oneshot(get("/threads/parent-1/children", "mallory"))
+        .oneshot(common::get("/threads/parent-1/children", "mallory"))
         .await
         .unwrap();
     assert_eq!(
@@ -533,68 +499,63 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 
     let resp = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/threads/parent-1")
-                .header("x-runic-tenant", TENANT)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::delete("/threads/parent-1", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     for session in ["parent-1", "chd-a", "chd-b", "chd-b-1"] {
         assert!(
-            store.session_meta(TENANT, session).await.unwrap().is_none(),
+            store
+                .session_meta(&tenant, session)
+                .await
+                .unwrap()
+                .is_none(),
             "{session} must be gone after recursive delete"
         );
     }
 }
 
 #[tokio::test]
-async fn delete_is_refused_while_a_run_holds_the_thread_lease() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-    create_thread(&app, TENANT, "busy").await;
-
-    assert!(
-        store
-            .claim_thread(
-                TENANT,
-                "busy",
-                "other-instance",
-                chrono::Duration::seconds(30)
-            )
-            .await
-            .unwrap()
-    );
-
-    let delete_req = || {
-        Request::builder()
-            .method("DELETE")
-            .uri("/threads/busy")
-            .header("x-runic-tenant", TENANT)
-            .body(Body::empty())
-            .unwrap()
+async fn delete_is_refused_while_a_run_is_active_on_the_thread() {
+    let Some(h) = common::harness().await else {
+        return;
     };
-    let resp = app.clone().oneshot(delete_req()).await.unwrap();
+    let store = h.store();
+    let app = scripted_router(&h);
+    let tenant = h.tenant.clone();
+    common::create_thread(&app, &tenant, "busy").await;
+
+    let run_id = common::uid("run");
+    store
+        .create_run(&tenant, "busy", &run_id, "main")
+        .await
+        .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(common::delete("/threads/busy", &tenant))
+        .await
+        .unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::CONFLICT,
-        "delete must be refused while a run holds the thread lease"
+        "delete must be refused while a run is active on the thread"
     );
     assert!(
-        store.session_meta(TENANT, "busy").await.unwrap().is_some(),
+        store.session_meta(&tenant, "busy").await.unwrap().is_some(),
         "the refused delete must not touch the thread"
     );
 
     store
-        .release_thread(TENANT, "busy", "other-instance")
+        .set_run_status(&run_id, RunStatus::Successful, None)
         .await
         .unwrap();
-    let resp = app.clone().oneshot(delete_req()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(common::delete("/threads/busy", &tenant))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert!(store.session_meta(TENANT, "busy").await.unwrap().is_none());
+    assert!(store.session_meta(&tenant, "busy").await.unwrap().is_none());
 }

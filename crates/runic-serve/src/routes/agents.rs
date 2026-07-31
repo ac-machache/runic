@@ -87,39 +87,45 @@ pub struct AgentOverview {
     pub abilities: Vec<AbilityOverview>,
 }
 
-fn fallback_overview(name: &str, agent: &runic_agent::Runner) -> AgentOverview {
-    let tools = agent
-        .tool_specs()
-        .into_iter()
-        .map(|spec| ToolOverview {
-            name: spec.name,
-            description: spec.description,
-            parameters: spec.parameters,
-        })
-        .collect();
-    AgentOverview {
-        name: name.to_string(),
-        model: Some(agent.model().to_string()),
-        max_turns: Some(agent.max_turns()),
-        abilities: vec![AbilityOverview {
-            id: None,
-            name: "agent".to_string(),
-            description: None,
-            deferred: false,
-            activated: true,
-            tools,
-            skills: Vec::new(),
-            subagents: Vec::new(),
-            hooks: agent.write_hook_names(),
-        }],
+fn ability_overview(view: runic::composer::AbilityView) -> AbilityOverview {
+    AbilityOverview {
+        id: view.id,
+        name: view.name,
+        description: view.description,
+        deferred: view.deferred,
+        activated: view.activated,
+        tools: view
+            .tools
+            .into_iter()
+            .map(|spec| ToolOverview {
+                name: spec.name,
+                description: spec.description,
+                parameters: spec.parameters,
+            })
+            .collect(),
+        skills: view
+            .skills
+            .into_iter()
+            .map(|skill| SkillOverview {
+                id: skill.id,
+                description: skill.description,
+            })
+            .collect(),
+        subagents: view
+            .subagents
+            .into_iter()
+            .map(|subagent| SubagentOverview {
+                name: subagent.name,
+                description: subagent.description,
+            })
+            .collect(),
+        hooks: view.hooks,
     }
 }
 
-/// `GET /agents/{name}` — structural view of a named agent: abilities and the
-/// tools/skills/subagents/hooks each to_abilitys. Builds a throwaway instance
-/// from the factory; nothing persisted, no pool entry. Ability-grouped when
-/// the factory implements [`crate::AgentFactory::overview`]; otherwise a
-/// single ungrouped bucket built from the agent's flat tool/hook list.
+/// `GET /agents/{name}` — structural view of a named agent: its abilities and
+/// the tools/skills/subagents/hooks each carries. Resolves a throwaway instance
+/// to read them; nothing is persisted.
 #[utoipa::path(
     get,
     path = "/agents/{name}",
@@ -134,19 +140,21 @@ pub async fn agent_overview(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentOverview>, ServeError> {
-    let factory = state.agents.factory(&name)?.clone();
-    let overview = match factory
-        .overview(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
+    let hosted = state.agents.get(&name)?.clone();
+    let views = runic::Composer::new(hosted.agent.clone())
+        .describe(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
         .await
-    {
-        Some(overview) => overview,
-        None => {
-            let agent = factory
-                .build(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
-                .await
-                .map_err(|e| ServeError::Runner(e.to_string()))?;
-            fallback_overview(&name, &agent)
-        }
-    };
-    Ok(Json(overview))
+        .map_err(|error| ServeError::Runner(error.to_string()))?;
+    let runner = hosted
+        .agent
+        .build(INTROSPECTION_TENANT, INTROSPECTION_SESSION)
+        .await
+        .map_err(|error| ServeError::Runner(error.to_string()))?;
+
+    Ok(Json(AgentOverview {
+        name,
+        model: Some(runner.model().to_string()),
+        max_turns: Some(runner.max_turns()),
+        abilities: views.into_iter().map(ability_overview).collect(),
+    }))
 }

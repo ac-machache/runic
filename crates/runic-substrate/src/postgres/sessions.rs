@@ -1,8 +1,8 @@
 //! Postgres-backed [`SessionStore`].
 //!
-//! Event log in `session_events` (append-only, `(tenant, session_id, seq)`),
-//! per-session counter + metadata in `sessions`, and a full-text projection of
-//! conversational messages in `chat_messages` (for `search`).
+//! Event log in `runic.events` (append-only, `(tenant, session_id, seq)`),
+//! per-session counter + metadata in `runic.sessions`, and a full-text
+//! projection of conversational messages in `runic.chats` (for `search`).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -71,8 +71,8 @@ fn rows_to_events(rows: Vec<sqlx::postgres::PgRow>) -> Result<Vec<StoredEvent>> 
     Ok(out)
 }
 
-const RUN_COLUMNS: &str = "run_id, tenant, session_id, agent, status, error, claimed_by, \
-     lease_expires_at, input, context, cancel_requested, created_at, updated_at";
+const RUN_COLUMNS: &str = "run_id, tenant, session_id, agent, status, error, to_cancel, \
+     created_at, started_at, finished_at, updated_at";
 
 fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
     let status: String = row.try_get("status").map_err(db)?;
@@ -84,12 +84,10 @@ fn row_to_run(row: sqlx::postgres::PgRow) -> Result<crate::RunRecord> {
         status: crate::RunStatus::parse(&status)
             .ok_or_else(|| crate::Error::Serde(format!("unknown run status {status:?}")))?,
         error: row.try_get("error").map_err(db)?,
-        claimed_by: row.try_get("claimed_by").map_err(db)?,
-        lease_expires_at: row.try_get("lease_expires_at").map_err(db)?,
-        input: row.try_get("input").map_err(db)?,
-        context: row.try_get("context").map_err(db)?,
-        cancel_requested: row.try_get("cancel_requested").map_err(db)?,
+        to_cancel: row.try_get("to_cancel").map_err(db)?,
         created_at: row.try_get("created_at").map_err(db)?,
+        started_at: row.try_get("started_at").map_err(db)?,
+        finished_at: row.try_get("finished_at").map_err(db)?,
         updated_at: row.try_get("updated_at").map_err(db)?,
     })
 }
@@ -127,7 +125,7 @@ async fn write_event(
     let delta = crate::sessions::summary_delta(event);
 
     let seq: i64 = sqlx::query_scalar(
-        "INSERT INTO sessions (tenant, session_id, last_seq, event_count, last_activity,
+        "INSERT INTO runic.sessions (tenant, session_id, last_seq, event_count, last_activity,
                                run_count, errored_runs, input_tokens, output_tokens,
                                last_run_status, last_run_at)
          VALUES ($1, $2, 1, 1, $3, $4, $5, $6, $7, $8, $9)
@@ -157,7 +155,7 @@ async fn write_event(
     .map_err(db)?;
 
     sqlx::query(
-        "INSERT INTO session_events (tenant, session_id, seq, kind, run_id, at, event)
+        "INSERT INTO runic.events (tenant, session_id, seq, kind, run_id, at, event)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(tenant)
@@ -181,7 +179,7 @@ async fn write_event(
             let text = msg.content.text_content();
             if !text.trim().is_empty() {
                 sqlx::query(
-                    "INSERT INTO chat_messages (tenant, session_id, seq, role, text, at)
+                    "INSERT INTO runic.chats (tenant, session_id, seq, role, text, at)
                      VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING",
                 )
                 .bind(tenant)
@@ -237,7 +235,7 @@ impl SessionStore for PostgresSessionStore {
         }
         let mut tx = self.pool.begin().await.map_err(db)?;
         let exists: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM sessions WHERE tenant = $1 AND session_id = $2 FOR UPDATE",
+            "SELECT 1 FROM runic.sessions WHERE tenant = $1 AND session_id = $2 FOR UPDATE",
         )
         .bind(tenant)
         .bind(session_id)
@@ -256,7 +254,7 @@ impl SessionStore for PostgresSessionStore {
 
     async fn read(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT seq, event FROM session_events
+            "SELECT seq, event FROM runic.events
              WHERE tenant = $1 AND session_id = $2 ORDER BY seq",
         )
         .bind(tenant)
@@ -269,10 +267,10 @@ impl SessionStore for PostgresSessionStore {
 
     async fn read_tail(&self, tenant: &str, session_id: &str) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT seq, event FROM session_events
+            "SELECT seq, event FROM runic.events
              WHERE tenant = $1 AND session_id = $2
                AND seq >= COALESCE((
-                 SELECT MAX(seq) FROM session_events
+                 SELECT MAX(seq) FROM runic.events
                  WHERE tenant = $1 AND session_id = $2 AND kind = 'StateSnapshot'
                ), 0)
              ORDER BY seq",
@@ -292,7 +290,7 @@ impl SessionStore for PostgresSessionStore {
         after_seq: u64,
     ) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT seq, event FROM session_events
+            "SELECT seq, event FROM runic.events
              WHERE tenant = $1 AND session_id = $2 AND seq > $3 ORDER BY seq",
         )
         .bind(tenant)
@@ -312,7 +310,7 @@ impl SessionStore for PostgresSessionStore {
         after_seq: u64,
     ) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT seq, event FROM session_events
+            "SELECT seq, event FROM runic.events
              WHERE tenant = $1 AND session_id = $2 AND run_id = $3 AND seq > $4 ORDER BY seq",
         )
         .bind(tenant)
@@ -333,7 +331,7 @@ impl SessionStore for PostgresSessionStore {
         limit: usize,
     ) -> Result<Vec<StoredEvent>> {
         let rows = sqlx::query(
-            "SELECT seq, event FROM session_events
+            "SELECT seq, event FROM runic.events
              WHERE tenant = $1 AND session_id = $2 AND seq > $3 ORDER BY seq LIMIT $4",
         )
         .bind(tenant)
@@ -364,7 +362,7 @@ impl SessionStore for PostgresSessionStore {
                         agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
-                 FROM sessions
+                 FROM runic.sessions
                  WHERE tenant = $1 AND (last_activity, session_id) < ($2, $3)
                    AND (($5 = 'all')
                      OR ($5 = 'roots' AND parent_session IS NULL)
@@ -382,7 +380,7 @@ impl SessionStore for PostgresSessionStore {
                         agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
-                 FROM sessions WHERE tenant = $1
+                 FROM runic.sessions WHERE tenant = $1
                    AND (($3 = 'all')
                      OR ($3 = 'roots' AND parent_session IS NULL)
                      OR ($3 = 'children' AND parent_session = $4))
@@ -408,7 +406,7 @@ impl SessionStore for PostgresSessionStore {
     ) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         let parent: Option<i32> = sqlx::query_scalar(
-            "SELECT 1 FROM sessions WHERE tenant = $1 AND session_id = $2 FOR SHARE",
+            "SELECT 1 FROM runic.sessions WHERE tenant = $1 AND session_id = $2 FOR SHARE",
         )
         .bind(tenant)
         .bind(parent_session)
@@ -419,7 +417,7 @@ impl SessionStore for PostgresSessionStore {
             return Err(Error::NotFound(format!("parent session {parent_session}")));
         }
         sqlx::query(
-            "INSERT INTO sessions (tenant, session_id, parent_session, agent)
+            "INSERT INTO runic.sessions (tenant, session_id, parent_session, agent)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT (tenant, session_id) DO UPDATE
                SET parent_session = EXCLUDED.parent_session,
@@ -442,7 +440,7 @@ impl SessionStore for PostgresSessionStore {
                         agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
-             FROM sessions WHERE tenant = $1 ORDER BY last_activity DESC",
+             FROM runic.sessions WHERE tenant = $1 ORDER BY last_activity DESC",
         )
         .bind(tenant)
         .fetch_all(&self.pool)
@@ -462,7 +460,7 @@ impl SessionStore for PostgresSessionStore {
                         agent, parent_session,
                         run_count, errored_runs, input_tokens, output_tokens,
                         last_run_status, last_run_at
-             FROM sessions WHERE tenant = $1 AND session_id = $2",
+             FROM runic.sessions WHERE tenant = $1 AND session_id = $2",
         )
         .bind(tenant)
         .bind(session_id)
@@ -475,7 +473,7 @@ impl SessionStore for PostgresSessionStore {
 
     async fn set_label(&self, tenant: &str, session_id: &str, label: Option<&str>) -> Result<()> {
         sqlx::query(
-            "INSERT INTO sessions (tenant, session_id, label)
+            "INSERT INTO runic.sessions (tenant, session_id, label)
              VALUES ($1, $2, $3)
              ON CONFLICT (tenant, session_id) DO UPDATE
                SET label = EXCLUDED.label",
@@ -490,19 +488,7 @@ impl SessionStore for PostgresSessionStore {
     }
 
     async fn delete_session(&self, tenant: &str, session_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE tenant = $1 AND session_id = $2")
-            .bind(tenant)
-            .bind(session_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
-        sqlx::query("DELETE FROM runs WHERE tenant = $1 AND session_id = $2")
-            .bind(tenant)
-            .bind(session_id)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
-        sqlx::query("DELETE FROM thread_leases WHERE tenant = $1 AND session_id = $2")
+        sqlx::query("DELETE FROM runic.sessions WHERE tenant = $1 AND session_id = $2")
             .bind(tenant)
             .bind(session_id)
             .execute(&self.pool)
@@ -517,11 +503,10 @@ impl SessionStore for PostgresSessionStore {
         session_id: &str,
         run_id: &str,
         agent: &str,
-        input: &crate::RunInput,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         sqlx::query(
-            "INSERT INTO sessions (tenant, session_id)
+            "INSERT INTO runic.sessions (tenant, session_id)
              VALUES ($1, $2) ON CONFLICT DO NOTHING",
         )
         .bind(tenant)
@@ -530,16 +515,13 @@ impl SessionStore for PostgresSessionStore {
         .await
         .map_err(db)?;
         sqlx::query(
-            "INSERT INTO runs (run_id, tenant, session_id, agent, status, input, context)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO runic.runs (run_id, tenant, session_id, agent)
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(run_id)
         .bind(tenant)
         .bind(session_id)
         .bind(agent)
-        .bind(if input.queued { "queued" } else { "pending" })
-        .bind(&input.input)
-        .bind(&input.context)
         .execute(&mut *tx)
         .await
         .map_err(db)?;
@@ -554,11 +536,15 @@ impl SessionStore for PostgresSessionStore {
         error: Option<&str>,
     ) -> Result<()> {
         let result = sqlx::query(
-            "UPDATE runs SET status = $2, error = $3, updated_at = now() WHERE run_id = $1",
+            "UPDATE runic.runs
+             SET status = $2, error = $3, updated_at = now(),
+                 finished_at = CASE WHEN $4 THEN now() ELSE finished_at END
+             WHERE run_id = $1",
         )
         .bind(run_id)
         .bind(status.as_str())
         .bind(error)
+        .bind(status.is_terminal())
         .execute(&self.pool)
         .await
         .map_err(db)?;
@@ -568,67 +554,72 @@ impl SessionStore for PostgresSessionStore {
         Ok(())
     }
 
-    async fn claim_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
+    async fn try_start_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE runs
-             SET status = 'running', claimed_by = $2,
-                 lease_expires_at = now() + make_interval(secs => $3),
-                 updated_at = now()
-             WHERE run_id = $1 AND status IN ('pending', 'queued') AND claimed_by IS NULL",
+            "UPDATE runic.runs
+             SET status = 'running', started_at = now(), updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status IN ('idle', 'waiting')
+               AND NOT EXISTS (
+                   SELECT 1 FROM runic.runs busy
+                   WHERE busy.tenant = runs.tenant
+                     AND busy.session_id = runs.session_id
+                     AND busy.status = 'running')
+               AND NOT EXISTS (
+                   SELECT 1 FROM runic.runs earlier
+                   WHERE earlier.tenant = runs.tenant
+                     AND earlier.session_id = runs.session_id
+                     AND earlier.status = 'idle'
+                     AND (earlier.created_at, earlier.run_id)
+                       < (runs.created_at, runs.run_id))",
         )
         .bind(run_id)
-        .bind(claimed_by)
-        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .bind(tenant)
         .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(result.rows_affected() > 0)
+        .await;
+
+        match result {
+            Ok(res) if res.rows_affected() > 0 => Ok(true),
+            Ok(_) => match self.get_run(tenant, run_id).await? {
+                None => Err(crate::Error::NotFound(format!("run {run_id}"))),
+                Some(_) => Ok(false),
+            },
+            Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => Ok(false),
+            Err(err) => Err(db(err)),
+        }
     }
 
-    async fn heartbeat_run(
-        &self,
-        run_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<Option<crate::RunSignals>> {
+    async fn take_signals(&self, tenant: &str, run_id: &str) -> Result<crate::RunSignals> {
         let row = sqlx::query(
-            "UPDATE runs r
-             SET lease_expires_at = now() + make_interval(secs => $3),
-                 steering = NULL, updated_at = now()
-             FROM (SELECT run_id, steering FROM runs WHERE run_id = $1 FOR UPDATE) old
-             WHERE r.run_id = old.run_id AND r.claimed_by = $2 AND r.status = 'running'
-             RETURNING r.cancel_requested, old.steering",
+            "UPDATE runic.runs r
+             SET steering = NULL, updated_at = now()
+             FROM (SELECT run_id, steering FROM runic.runs
+                   WHERE run_id = $1 AND tenant = $2 FOR UPDATE) old
+             WHERE r.run_id = old.run_id
+             RETURNING r.to_cancel, old.steering",
         )
         .bind(run_id)
-        .bind(claimed_by)
-        .bind(lease.num_milliseconds() as f64 / 1000.0)
+        .bind(tenant)
         .fetch_optional(&self.pool)
         .await
         .map_err(db)?;
         let Some(row) = row else {
-            return Ok(None);
+            return Err(crate::Error::NotFound(format!("run {run_id}")));
         };
-        let cancel_requested: bool = row.try_get("cancel_requested").map_err(db)?;
+        let to_cancel: bool = row.try_get("to_cancel").map_err(db)?;
         let steering: Option<serde_json::Value> = row.try_get("steering").map_err(db)?;
         let steering = steering
             .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
             .unwrap_or_default();
-        Ok(Some(crate::RunSignals {
-            cancel_requested,
+        Ok(crate::RunSignals {
+            to_cancel,
             steering,
-        }))
+        })
     }
 
     async fn request_cancel_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let dropped = sqlx::query(
-            "UPDATE runs SET status = 'cancelled', updated_at = now()
-             WHERE run_id = $1 AND tenant = $2
-               AND (status = 'paused' OR (status = 'queued' AND claimed_by IS NULL))",
+            "UPDATE runic.runs SET status = 'cancelled', finished_at = now(), updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status IN ('idle', 'waiting')",
         )
         .bind(run_id)
         .bind(tenant)
@@ -639,9 +630,8 @@ impl SessionStore for PostgresSessionStore {
             return Ok(true);
         }
         let flagged = sqlx::query(
-            "UPDATE runs SET cancel_requested = TRUE, updated_at = now()
-             WHERE run_id = $1 AND tenant = $2
-               AND status IN ('pending', 'queued', 'running', 'paused')",
+            "UPDATE runic.runs SET to_cancel = TRUE, updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'running'",
         )
         .bind(run_id)
         .bind(tenant)
@@ -653,11 +643,11 @@ impl SessionStore for PostgresSessionStore {
 
     async fn push_steering(&self, tenant: &str, run_id: &str, text: &str) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE runs
+            "UPDATE runic.runs
              SET steering = COALESCE(steering, '[]'::jsonb) || to_jsonb($3::text),
                  updated_at = now()
              WHERE run_id = $1 AND tenant = $2
-               AND status IN ('pending', 'queued', 'running', 'paused')",
+               AND status IN ('idle', 'running', 'waiting')",
         )
         .bind(run_id)
         .bind(tenant)
@@ -668,144 +658,11 @@ impl SessionStore for PostgresSessionStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn claim_thread(
-        &self,
-        tenant: &str,
-        session_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "INSERT INTO thread_leases (tenant, session_id, claimed_by, lease_expires_at)
-             VALUES ($1, $2, $3, now() + make_interval(secs => $4))
-             ON CONFLICT (tenant, session_id) DO UPDATE
-               SET claimed_by = EXCLUDED.claimed_by,
-                   lease_expires_at = EXCLUDED.lease_expires_at
-               WHERE thread_leases.lease_expires_at < now()
-                  OR thread_leases.claimed_by = EXCLUDED.claimed_by",
-        )
-        .bind(tenant)
-        .bind(session_id)
-        .bind(claimed_by)
-        .bind(lease.num_milliseconds() as f64 / 1000.0)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    async fn extend_thread_lease(
-        &self,
-        tenant: &str,
-        session_id: &str,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<bool> {
-        let result = sqlx::query(
-            "UPDATE thread_leases
-             SET lease_expires_at = now() + make_interval(secs => $4)
-             WHERE tenant = $1 AND session_id = $2 AND claimed_by = $3",
-        )
-        .bind(tenant)
-        .bind(session_id)
-        .bind(claimed_by)
-        .bind(lease.num_milliseconds() as f64 / 1000.0)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(result.rows_affected() > 0)
-    }
-
-    async fn release_thread(&self, tenant: &str, session_id: &str, claimed_by: &str) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM thread_leases
-             WHERE tenant = $1 AND session_id = $2 AND claimed_by = $3",
-        )
-        .bind(tenant)
-        .bind(session_id)
-        .bind(claimed_by)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(())
-    }
-
-    async fn reap_expired_runs(&self) -> Result<Vec<crate::RunRecord>> {
-        let rows = sqlx::query(&format!(
-            "UPDATE runs
-             SET status = 'error', error = 'lease expired', updated_at = now()
-             WHERE status = 'running' AND lease_expires_at < now()
-             RETURNING {RUN_COLUMNS}"
-        ))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(db)?;
-        let reaped: Vec<crate::RunRecord> =
-            rows.into_iter().map(row_to_run).collect::<Result<_>>()?;
-        for run in &reaped {
-            sqlx::query(
-                "UPDATE sessions SET last_run_status = 'failed'
-                 WHERE tenant = $1 AND session_id = $2
-                   AND last_run_status = 'running' AND last_run_at <= $3",
-            )
-            .bind(&run.tenant)
-            .bind(&run.session_id)
-            .bind(run.created_at)
-            .execute(&self.pool)
-            .await
-            .map_err(db)?;
-        }
-        Ok(reaped)
-    }
-
-    async fn claim_next_queued_run(
-        &self,
-        claimed_by: &str,
-        lease: chrono::Duration,
-    ) -> Result<Option<crate::RunRecord>> {
-        let row = sqlx::query(&format!(
-            "UPDATE runs
-             SET status = 'running', claimed_by = $1,
-                 lease_expires_at = now() + make_interval(secs => $2),
-                 updated_at = now()
-             WHERE run_id = (
-                 SELECT run_id FROM runs
-                 WHERE status = 'queued' AND claimed_by IS NULL
-                 ORDER BY created_at
-                 LIMIT 1
-                 FOR UPDATE SKIP LOCKED
-             )
-             RETURNING {RUN_COLUMNS}"
-        ))
-        .bind(claimed_by)
-        .bind(lease.num_milliseconds() as f64 / 1000.0)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(db)?;
-        row.map(row_to_run).transpose()
-    }
-
-    async fn release_run(&self, run_id: &str, claimed_by: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE runs
-             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
-                 updated_at = now()
-             WHERE run_id = $1 AND claimed_by = $2",
-        )
-        .bind(run_id)
-        .bind(claimed_by)
-        .execute(&self.pool)
-        .await
-        .map_err(db)?;
-        Ok(())
-    }
-
     async fn resume_run(&self, tenant: &str, run_id: &str) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE runs
-             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
-                 updated_at = now()
-             WHERE run_id = $1 AND tenant = $2 AND status = 'paused'",
+            "UPDATE runic.runs
+             SET status = 'idle', updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'waiting'",
         )
         .bind(run_id)
         .bind(tenant)
@@ -823,10 +680,9 @@ impl SessionStore for PostgresSessionStore {
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await.map_err(db)?;
         let row = sqlx::query(
-            "UPDATE runs
-             SET status = 'queued', claimed_by = NULL, lease_expires_at = NULL,
-                 updated_at = now()
-             WHERE run_id = $1 AND tenant = $2 AND status = 'paused'
+            "UPDATE runic.runs
+             SET status = 'idle', updated_at = now()
+             WHERE run_id = $1 AND tenant = $2 AND status = 'waiting'
              RETURNING session_id",
         )
         .bind(run_id)
@@ -846,7 +702,7 @@ impl SessionStore for PostgresSessionStore {
 
     async fn get_run(&self, tenant: &str, run_id: &str) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND run_id = $2"
+            "SELECT {RUN_COLUMNS} FROM runic.runs WHERE tenant = $1 AND run_id = $2"
         ))
         .bind(tenant)
         .bind(run_id)
@@ -866,7 +722,7 @@ impl SessionStore for PostgresSessionStore {
         let rows = match before {
             Some((cut_at, cut_id)) => {
                 sqlx::query(&format!(
-                    "SELECT {RUN_COLUMNS} FROM runs \
+                    "SELECT {RUN_COLUMNS} FROM runic.runs \
                      WHERE tenant = $1 AND session_id = $2 AND (created_at, run_id) < ($3, $4) \
                      ORDER BY created_at DESC, run_id DESC LIMIT $5"
                 ))
@@ -880,7 +736,7 @@ impl SessionStore for PostgresSessionStore {
             }
             None => {
                 sqlx::query(&format!(
-                    "SELECT {RUN_COLUMNS} FROM runs \
+                    "SELECT {RUN_COLUMNS} FROM runic.runs \
                      WHERE tenant = $1 AND session_id = $2 \
                      ORDER BY created_at DESC, run_id DESC LIMIT $3"
                 ))
@@ -901,9 +757,9 @@ impl SessionStore for PostgresSessionStore {
         session_id: &str,
     ) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM runs
+            "SELECT {RUN_COLUMNS} FROM runic.runs
              WHERE tenant = $1 AND session_id = $2
-               AND status IN ('pending', 'queued', 'running', 'paused')
+               AND status IN ('idle', 'running', 'waiting')
              ORDER BY (status = 'running') DESC, created_at DESC
              LIMIT 1"
         ))
@@ -917,7 +773,7 @@ impl SessionStore for PostgresSessionStore {
 
     async fn latest_run(&self, tenant: &str, session_id: &str) -> Result<Option<crate::RunRecord>> {
         let row = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM runs WHERE tenant = $1 AND session_id = $2
+            "SELECT {RUN_COLUMNS} FROM runic.runs WHERE tenant = $1 AND session_id = $2
              ORDER BY created_at DESC LIMIT 1"
         ))
         .bind(tenant)
@@ -938,7 +794,7 @@ impl SessionStore for PostgresSessionStore {
         let rows = sqlx::query(
             "SELECT session_id, seq, role, at,
                     ts_headline('english', text, q) AS snippet
-             FROM chat_messages, websearch_to_tsquery('english', $2) q
+             FROM runic.chats, websearch_to_tsquery('english', $2) q
              WHERE tenant = $1 AND tsv @@ q
                AND ($3::text IS NULL OR session_id <> $3)
              ORDER BY ts_rank(tsv, q) DESC
@@ -967,7 +823,7 @@ impl SessionStore for PostgresSessionStore {
 
     async fn cleanup_stale(&self, ttl: Duration) -> Result<u64> {
         let cutoff = Utc::now() - ttl;
-        let res = sqlx::query("DELETE FROM sessions WHERE last_activity < $1")
+        let res = sqlx::query("DELETE FROM runic.sessions WHERE last_activity < $1")
             .bind(cutoff)
             .execute(&self.pool)
             .await
@@ -976,7 +832,7 @@ impl SessionStore for PostgresSessionStore {
     }
 
     async fn list_tenants(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT DISTINCT tenant FROM sessions ORDER BY tenant")
+        let rows = sqlx::query("SELECT DISTINCT tenant FROM runic.sessions ORDER BY tenant")
             .fetch_all(&self.pool)
             .await
             .map_err(db)?;

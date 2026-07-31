@@ -1,54 +1,30 @@
-//! Route-level integration tests against the new stack.
-//!
-//! CRUD endpoints (health, threads, tenant isolation) run against a
-//! `PanicFactory`; the agent-hot path (SSE streaming) runs against a
-//! `ScriptedProvider` that returns one text turn with no network.
+mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use runic_agent::Runner;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{AgentFactory, ServeConfig, router, single_agent};
-use runic_substrate::{
-    ArtifactStore, LocalArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
-};
-use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
-use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
-use serde_json::Value;
+use runic_serve::{ServeConfig, router};
+use runic_substrate::{ArtifactStore, LocalArtifactStore, SessionStore};
+use runic_types::{ContentBlock, StopReason, TokenUsage};
 
-/// Build-on-demand fixture: panics if anyone tries to actually use the agent.
-/// Fine for tests that only hit CRUD endpoints.
-struct PanicFactory;
+use common::Harness;
+
+struct PanicProvider;
 
 #[async_trait]
-impl AgentFactory for PanicFactory {
-    async fn build(&self, _: &str, _: &str) -> anyhow::Result<Runner> {
-        panic!("PanicFactory: tests must not invoke the agent path");
+impl Provider for PanicProvider {
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
+        panic!("PanicProvider: tests must not invoke the agent path");
     }
 }
 
-fn make_router() -> axum::Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-/// Minimal provider: one text turn, then `EndTurn`. The trait's default
-/// `stream` wraps `complete`, emitting a `TextDelta` + `ContentComplete`, so
-/// the agent surfaces a `pong` token without a network or API key.
 struct ScriptedProvider;
 
 #[async_trait]
@@ -70,123 +46,29 @@ impl Provider for ScriptedProvider {
     }
 }
 
-/// Factory that builds a real Runner backed by the scripted provider, keyed to
-/// the requested session id (so persistence/replay line up).
-struct ScriptedFactory;
-
-#[async_trait]
-impl AgentFactory for ScriptedFactory {
-    async fn build(&self, _tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(
-            Runner::builder(Arc::new(ScriptedProvider), "alice", session_id)
-                .system_prompt("test")
-                .build(),
-        )
-    }
+fn crud_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(PanicProvider)))
 }
 
-fn scripted_router() -> axum::Router {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    scripted_router_with_store(store)
+fn scripted_router(h: &Harness) -> Router {
+    h.single_router(common::agent(Arc::new(ScriptedProvider)))
 }
 
-fn scripted_router_with_store(store: Arc<dyn SessionStore>) -> axum::Router {
-    router(ServeConfig {
-        session_store: store,
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ScriptedFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-struct FakeTranscriber {
-    expected_filename: &'static str,
-}
-
-#[async_trait]
-impl SpeechToText for FakeTranscriber {
-    async fn transcribe(
-        &self,
-        audio: &[u8],
-        filename: &str,
-    ) -> Result<Transcript, TranscribeError> {
-        assert_eq!(audio, b"audio-bytes");
-        assert_eq!(filename, self.expected_filename);
-        Ok(Transcript {
-            text: "bonjour".into(),
-            language: Some("fr".into()),
-        })
-    }
-}
-
-struct FailingTranscriber;
-
-#[async_trait]
-impl SpeechToText for FailingTranscriber {
-    async fn transcribe(
-        &self,
-        _audio: &[u8],
-        _filename: &str,
-    ) -> Result<Transcript, TranscribeError> {
-        Err(TranscribeError::Http("provider unavailable".into()))
-    }
-}
-
-fn transcribe_router(transcriber: Option<Arc<dyn SpeechToText>>) -> axum::Router {
-    router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    })
-}
-
-fn run_request(thread_id: &str, message: &str) -> Request<Body> {
+fn upload_request(
+    thread: &str,
+    tenant: &str,
+    mime: &str,
+    filename: &str,
+    bytes: &[u8],
+) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri(format!("/threads/{thread_id}/runs/stream"))
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(format!(r#"{{"message":"{message}"}}"#)))
+        .uri(format!("/threads/{thread}/artifacts"))
+        .header("content-type", mime)
+        .header("x-runic-tenant", tenant)
+        .header("x-runic-filename", filename)
+        .body(Body::from(bytes.to_vec()))
         .unwrap()
-}
-
-async fn body_to_string(resp: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(resp.into_body(), 10_000_000)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-async fn body_to_json(resp: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
-}
-
-fn sse_data(body: &str) -> Vec<Value> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("data:"))
-        .map(|json| serde_json::from_str(json.trim()).unwrap())
-        .collect()
-}
-
-fn sse_ids(body: &str) -> Vec<u64> {
-    body.lines()
-        .filter_map(|line| line.strip_prefix("id:"))
-        .map(|id| id.trim().parse().unwrap())
-        .collect()
 }
 
 async fn wait_for_stored_events(
@@ -200,139 +82,17 @@ async fn wait_for_stored_events(
         if events.len() >= min_events {
             return events;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("stored event count did not reach {min_events}");
 }
 
 #[tokio::test]
-async fn transcribe_requires_configured_backend() {
-    let app = transcribe_router(None);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/transcribe")
-                .header("content-type", "audio/wav")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from("audio-bytes"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["error"], "not_configured");
-}
-
-#[tokio::test]
-async fn transcribe_rejects_empty_body() {
-    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
-        expected_filename: "audio",
-    })));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/transcribe")
-                .header("content-type", "audio/wav")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["error"], "bad_request");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("empty audio body")
-    );
-}
-
-#[tokio::test]
-async fn transcribe_rejects_non_audio_content_type() {
-    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
-        expected_filename: "audio",
-    })));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/transcribe")
-                .header("content-type", "text/plain")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from("audio-bytes"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["error"], "bad_request");
-}
-
-#[tokio::test]
-async fn transcribe_returns_text_and_cleans_filename() {
-    let app = transcribe_router(Some(Arc::new(FakeTranscriber {
-        expected_filename: "voice.wav",
-    })));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/transcribe")
-                .header("content-type", "audio/wav; charset=binary")
-                .header("x-runic-tenant", "alice")
-                .header("x-runic-filename", "../clips\\voice.wav")
-                .body(Body::from("audio-bytes"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["text"], "bonjour");
-    assert_eq!(body["language"], "fr");
-}
-
-#[tokio::test]
-async fn transcribe_upstream_errors_are_bad_gateway() {
-    let app = transcribe_router(Some(Arc::new(FailingTranscriber)));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/transcribe")
-                .header("content-type", "audio/wav")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from("audio-bytes"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["error"], "upstream");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("provider unavailable")
-    );
-}
-
-#[tokio::test]
 async fn healthz_returns_ok() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
         .oneshot(
             Request::builder()
@@ -343,36 +103,34 @@ async fn healthz_returns_ok() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["status"], "ok");
     assert_eq!(body["service"], "runic-serve");
 }
 
 #[tokio::test]
 async fn create_thread_returns_201_with_generated_id() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
+        .oneshot(common::post_json("/threads", &h.tenant, "{}"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let body = body_to_json(resp).await;
-    assert_eq!(body["tenant"], "alice");
+    let body = common::body_json(resp).await;
+    assert_eq!(body["tenant"], h.tenant.as_str());
     assert_eq!(body["event_count"], 0);
     assert!(body["thread_id"].as_str().is_some_and(|s| !s.is_empty()));
 }
 
 #[tokio::test]
 async fn create_thread_honors_provided_id() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
         .oneshot(
             Request::builder()
@@ -385,40 +143,34 @@ async fn create_thread_honors_provided_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let body = body_to_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["thread_id"], "my-custom-id");
     assert_eq!(body["tenant"], "default");
 }
 
 #[tokio::test]
 async fn list_threads_starts_empty() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
+    let body = common::body_json(resp).await;
     assert!(body["threads"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn list_threads_rejects_invalid_cursor() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads?cursor=not-a-cursor")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads?cursor=not-a-cursor", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -426,14 +178,12 @@ async fn list_threads_rejects_invalid_cursor() {
 
 #[tokio::test]
 async fn get_unknown_thread_returns_404() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads/never-created")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads/never-created", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -441,46 +191,30 @@ async fn get_unknown_thread_returns_404() {
 
 #[tokio::test]
 async fn create_then_get_thread_is_materialized() {
-    let app = make_router();
-    let created = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"thread_id":"t1"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    common::create_thread(&app, &h.tenant, "t1").await;
 
     let got = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads/t1")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads/t1", &h.tenant))
         .await
         .unwrap();
     assert_eq!(got.status(), StatusCode::OK);
-    let body = body_to_json(got).await;
+    let body = common::body_json(got).await;
     assert_eq!(body["thread_id"], "t1");
     assert_eq!(body["event_count"], 0);
 }
 
 #[tokio::test]
 async fn thread_events_unknown_thread_returns_404() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads/never-created/events")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads/never-created/events", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -488,14 +222,12 @@ async fn thread_events_unknown_thread_returns_404() {
 
 #[tokio::test]
 async fn thread_state_unknown_thread_returns_404() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads/never-created/state")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads/never-created/state", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -503,15 +235,12 @@ async fn thread_state_unknown_thread_returns_404() {
 
 #[tokio::test]
 async fn delete_thread_returns_204() {
-    let app = make_router();
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/threads/anything")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::delete("/threads/anything", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -519,25 +248,26 @@ async fn delete_thread_returns_204() {
 
 #[tokio::test]
 async fn delete_thread_removes_local_artifact_blobs() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
     let root = tempfile::tempdir().unwrap();
     let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root.path()));
-    let app = router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: artifact_store.clone(),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    create_thread(&app, "with-artifact").await;
+    let app = router(
+        ServeConfig::new(
+            h.sessions.clone(),
+            runic_substrate::Blobs::from(artifact_store.clone()),
+            h.pool.clone(),
+        )
+        .agent("main", common::agent(Arc::new(PanicProvider))),
+    );
+    common::create_thread(&app, &h.tenant, "with-artifact").await;
 
     let resp = app
         .clone()
         .oneshot(upload_request(
             "with-artifact",
+            &h.tenant,
             "text/plain",
             "note.txt",
             b"delete me",
@@ -545,18 +275,14 @@ async fn delete_thread_removes_local_artifact_blobs() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
-    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
+    let id = common::body_json(resp).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(root.path().join("blobs").join(&id).exists());
 
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("DELETE")
-                .uri("/threads/with-artifact")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::delete("/threads/with-artifact", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -564,7 +290,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
     assert!(!root.path().join("blobs").join(&id).exists());
     assert!(
         artifact_store
-            .list("alice", "with-artifact")
+            .list(&h.tenant, "with-artifact")
             .await
             .unwrap()
             .is_empty()
@@ -573,63 +299,19 @@ async fn delete_thread_removes_local_artifact_blobs() {
 
 #[tokio::test]
 async fn tenant_header_isolates_thread_listings() {
-    let app = router(ServeConfig {
-        session_store: Arc::new(MemorySessionStore::new()),
-        artifact_store: Arc::new(MemoryArtifactStore::new()),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(PanicFactory)),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    let alice = format!("{}-alice", h.tenant);
+    let bob = format!("{}-bob", h.tenant);
 
-    // Alice creates a thread via CRUD (no agent path → PanicFactory is safe).
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from(r#"{"thread_id":"alice-thread"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
+    common::create_thread(&app, &alice, "alice-thread").await;
+    common::create_thread(&app, &bob, "bob-thread").await;
 
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .header("x-runic-tenant", "bob")
-                .body(Body::from(r#"{"thread_id":"bob-thread"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
-    // Bob lists their own threads — must not see alice's.
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/threads")
-                .header("x-runic-tenant", "bob")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let resp = app.oneshot(common::get("/threads", &bob)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
+    let body = common::body_json(resp).await;
     let ids: Vec<&str> = body["threads"]
         .as_array()
         .unwrap()
@@ -643,31 +325,66 @@ async fn tenant_header_isolates_thread_listings() {
 }
 
 #[tokio::test]
-async fn run_streams_agent_events() {
-    let app = scripted_router();
-    let resp = app.oneshot(run_request("t1", "ping")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_string(resp).await;
-    assert!(
-        body.contains("pong"),
-        "streamed text missing from body: {body}"
-    );
+async fn answering_missing_human_ask_returns_bad_request() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = crud_router(&h);
+    let resp = app
+        .oneshot(common::post_json(
+            "/threads/t1/asks/missing-ask",
+            &h.tenant,
+            r#"{"answer":"yes"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(common::body_string(resp).await.contains("no deferred call"));
+}
+
+#[tokio::test]
+async fn sequential_runs_on_same_thread_both_succeed() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = scripted_router(&h);
+
+    let r1 = app
+        .clone()
+        .oneshot(common::wait_request("t1", &h.tenant, "one"))
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), StatusCode::OK);
+    assert_eq!(common::body_json(r1).await["text"], "pong");
+
+    let r2 = app
+        .oneshot(common::wait_request("t1", &h.tenant, "two"))
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), StatusCode::OK);
+    assert_eq!(common::body_json(r2).await["text"], "pong");
 }
 
 #[tokio::test]
 async fn run_persists_events_for_thread_history() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = scripted_router(&h);
 
     let resp = app
         .clone()
-        .oneshot(run_request("persisted-thread", "remember me"))
+        .oneshot(common::wait_request(
+            "persisted-thread",
+            &h.tenant,
+            "remember me",
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_to_string(resp).await.contains("pong"));
+    assert_eq!(common::body_json(resp).await["text"], "pong");
 
-    let events = wait_for_stored_events(store.as_ref(), "alice", "persisted-thread", 5).await;
+    let events = wait_for_stored_events(h.store().as_ref(), &h.tenant, "persisted-thread", 4).await;
     assert!(events.iter().any(|stored| {
         matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("remember me"))
@@ -682,479 +399,10 @@ async fn run_persists_events_for_thread_history() {
     }));
 
     let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/threads/persisted-thread/events")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(common::get("/threads/persisted-thread/events", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_to_json(resp).await;
+    let body = common::body_json(resp).await;
     assert_eq!(body["events"].as_array().unwrap().len(), events.len());
-}
-
-#[tokio::test]
-async fn replay_run_respects_last_event_id_and_finishes_closed_run() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let app = scripted_router_with_store(store.clone());
-
-    let resp = app
-        .clone()
-        .oneshot(run_request("replay-thread", "first"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let live_body = body_to_string(resp).await;
-    let run_id = sse_data(&live_body)
-        .into_iter()
-        .find_map(|event| {
-            (event["type"] == "run_start").then(|| event["run_id"].as_str().unwrap().to_string())
-        })
-        .expect("live stream contains run_start");
-
-    let stored = wait_for_stored_events(store.as_ref(), "alice", "replay-thread", 5).await;
-    let after_seq = stored
-        .iter()
-        .find(|stored| matches!(stored.event, runic_substrate::SessionEvent::RunStart { .. }))
-        .expect("run start persisted")
-        .seq;
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/threads/replay-thread/runs/{run_id}/stream"))
-                .header("x-runic-tenant", "alice")
-                .header("last-event-id", after_seq.to_string())
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let replay_body = tokio::time::timeout(std::time::Duration::from_secs(1), body_to_string(resp))
-        .await
-        .expect("replay stream should finish for a closed run");
-
-    assert!(!replay_body.contains("event: run_start"));
-    assert!(replay_body.contains("event: message"));
-    assert!(replay_body.contains("event: run_end"));
-    assert!(replay_body.contains("event: done"));
-    assert!(sse_ids(&replay_body).iter().all(|seq| *seq > after_seq));
-}
-
-#[tokio::test]
-async fn sequential_runs_on_same_thread_both_succeed() {
-    // The second run can only proceed once the first releases the thread's
-    // slot mutex — proving the warm agent is reused across runs.
-    let app = scripted_router();
-
-    let r1 = app.clone().oneshot(run_request("t1", "one")).await.unwrap();
-    assert_eq!(r1.status(), StatusCode::OK);
-    assert!(body_to_string(r1).await.contains("pong"));
-
-    let r2 = app.clone().oneshot(run_request("t1", "two")).await.unwrap();
-    assert_eq!(r2.status(), StatusCode::OK);
-    assert!(body_to_string(r2).await.contains("pong"));
-}
-
-#[tokio::test]
-async fn abandoned_run_does_not_brick_the_thread() {
-    // Drop the response without reading it (client disconnect); the detached
-    // run task still drives the agent to completion, so a follow-up run on the
-    // same thread succeeds.
-    let app = scripted_router();
-
-    let abandoned = app
-        .clone()
-        .oneshot(run_request("t1", "abandon"))
-        .await
-        .unwrap();
-    assert_eq!(abandoned.status(), StatusCode::OK);
-    drop(abandoned);
-
-    let resp = app
-        .clone()
-        .oneshot(run_request("t1", "after"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(body_to_string(resp).await.contains("pong"));
-}
-
-#[tokio::test]
-async fn answering_missing_human_ask_returns_bad_request() {
-    let app = make_router();
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads/t1/asks/missing-ask")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"answer":"yes"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(body_to_string(resp).await.contains("no deferred call"));
-}
-
-// ── artifacts ────────────────────────────────────────────────────────────
-
-fn upload_request(thread: &str, mime: &str, filename: &str, bytes: &[u8]) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(format!("/threads/{thread}/artifacts"))
-        .header("content-type", mime)
-        .header("x-runic-tenant", "alice")
-        .header("x-runic-filename", filename)
-        .body(Body::from(bytes.to_vec()))
-        .unwrap()
-}
-
-async fn create_thread(app: &axum::Router, thread_id: &str) {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/threads")
-                .header("content-type", "application/json")
-                .header("x-runic-tenant", "alice")
-                .body(Body::from(format!(r#"{{"thread_id":"{thread_id}"}}"#)))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-}
-
-#[tokio::test]
-async fn upload_artifact_stores_and_lists() {
-    let app = scripted_router();
-    create_thread(&app, "t1").await;
-    let bytes = b"%PDF-1.7 hello world";
-
-    let resp = app
-        .clone()
-        .oneshot(upload_request("t1", "application/pdf", "doc.pdf", bytes))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-    let v = body_to_json(resp).await;
-    let id = v["id"].as_str().unwrap().to_string();
-    assert!(id.starts_with("art-"));
-    assert_eq!(v["size"].as_u64().unwrap(), bytes.len() as u64);
-    assert_eq!(v["mime_type"], "application/pdf");
-    assert_eq!(v["filename"], "doc.pdf");
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/threads/t1/artifacts")
-                .header("x-runic-tenant", "alice")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let list = body_to_json(resp).await;
-    assert!(list.as_array().unwrap().iter().any(|a| a["id"] == id));
-}
-
-#[tokio::test]
-async fn empty_upload_is_rejected() {
-    let app = scripted_router();
-    let resp = app
-        .oneshot(upload_request("t1", "application/pdf", "x.pdf", b""))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn run_with_artifact_ref_persists_only_the_reference() {
-    let (app, store, _artifacts, _last) = resolving_setup();
-    create_thread(&app, "reflike").await;
-
-    // Upload first, then reference the returned id from the run.
-    let resp = app
-        .clone()
-        .oneshot(upload_request(
-            "reflike",
-            "application/pdf",
-            "r.pdf",
-            b"%PDF some bytes",
-        ))
-        .await
-        .unwrap();
-    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
-
-    let body = serde_json::json!({
-        "content": [
-            { "type": "text", "text": "summarize the file" },
-            { "type": "artifact_ref", "id": id, "media_type": "application/pdf", "filename": "r.pdf" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/reflike/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    // No hook resolved the ref, so the loop refuses to call the model with a
-    // dangling pointer and the stream reports it instead of a reply.
-    let stream = body_to_string(resp).await;
-    assert!(!stream.contains("pong"), "{stream}");
-    assert!(
-        stream.contains(&id),
-        "the failure names the artifact: {stream}"
-    );
-
-    let events = wait_for_stored_events(store.as_ref(), "alice", "reflike", 2).await;
-    // The event log keeps the lean pointer …
-    let kept_ref = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { id: rid, .. } if rid == &id))))
-    });
-    assert!(kept_ref, "the artifact_ref pointer should be persisted");
-    // … and never the inline bytes.
-    let inlined = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
-    });
-    assert!(
-        !inlined,
-        "no inline image/file bytes should reach the event log"
-    );
-}
-
-#[tokio::test]
-async fn inline_media_in_run_body_is_stored_as_a_ref() {
-    let (app, store, _artifacts, _last) = resolving_setup();
-    create_thread(&app, "inline").await;
-
-    // Client posts inline base64 media directly to /runs/stream (bypassing
-    // /artifacts) — the server must store it and persist only a ref.
-    let body = serde_json::json!({
-        "content": [
-            { "type": "text", "text": "look" },
-            { "type": "image", "media_type": "image/png", "data": "aGVsbG8gcG5n" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/inline/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    // The stored ref is what this test is about; nothing resolves it back to
-    // bytes, so the model call itself never happens.
-    let stream = body_to_string(resp).await;
-    assert!(!stream.contains("pong"), "{stream}");
-
-    let events = wait_for_stored_events(store.as_ref(), "alice", "inline", 3).await;
-    let kept_ref = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c, ContentBlock::ArtifactRef { .. }))))
-    });
-    assert!(kept_ref, "inline media should be persisted as a ref");
-    let inlined = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
-    });
-    assert!(!inlined, "no inline bytes should reach the event log");
-}
-
-#[tokio::test]
-async fn run_body_ref_persists_canonical_mime_not_the_clients_claim() {
-    let (app, session, _artifacts, _last) = resolving_setup();
-    create_thread(&app, "mimethread").await;
-
-    // Stored as a PDF.
-    let resp = app
-        .clone()
-        .oneshot(upload_request(
-            "mimethread",
-            "application/pdf",
-            "r.pdf",
-            b"%PDF bytes",
-        ))
-        .await
-        .unwrap();
-    let id = body_to_json(resp).await["id"].as_str().unwrap().to_string();
-
-    // The run references it but LIES that it's an image.
-    let body = serde_json::json!({
-        "content": [
-            { "type": "text", "text": "hi" },
-            { "type": "artifact_ref", "id": id, "media_type": "image/png" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/mimethread/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let stream = body_to_string(resp).await;
-    assert!(!stream.contains("pong"), "{stream}");
-
-    let events = wait_for_stored_events(session.as_ref(), "alice", "mimethread", 3).await;
-    let canonical = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c,
-                    ContentBlock::ArtifactRef { media_type, .. } if media_type == "application/pdf"))))
-    });
-    assert!(canonical, "persisted ref should carry the stored mime");
-    let lied = events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c,
-                    ContentBlock::ArtifactRef { media_type, .. } if media_type == "image/png"))))
-    });
-    assert!(!lied, "the client's fake mime must not be persisted");
-}
-
-#[tokio::test]
-async fn foreign_artifact_ref_in_run_body_is_rejected() {
-    let app = scripted_router();
-    let body = serde_json::json!({
-        "content": [
-            { "type": "artifact_ref", "id": "art-not-mine", "media_type": "image/png" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/whatever/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn rejected_run_stores_no_orphan_artifacts() {
-    let (app, _session, artifacts, _last) = resolving_setup();
-    create_thread(&app, "orphan").await;
-
-    // A valid inline image followed by a foreign ref → the whole request is
-    // rejected, and the inline block before it must not have been stored.
-    let body = serde_json::json!({
-        "content": [
-            { "type": "image", "media_type": "image/png", "data": "aGVsbG8=" },
-            { "type": "artifact_ref", "id": "art-not-mine", "media_type": "image/png" }
-        ]
-    })
-    .to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/threads/orphan/runs/stream")
-        .header("content-type", "application/json")
-        .header("x-runic-tenant", "alice")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    let stored = artifacts.list("alice", "orphan").await.unwrap();
-    assert!(
-        stored.is_empty(),
-        "a rejected request must store no artifacts"
-    );
-}
-
-/// Records the (post-resolution) request the model layer receives.
-struct RecordingProvider {
-    last: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
-}
-
-#[async_trait]
-impl Provider for RecordingProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        *self.last.lock().unwrap() = Some(req);
-        Ok(CompletionResponse {
-            content: vec![ContentBlock::Text {
-                text: "pong".into(),
-                provider_metadata: None,
-            }],
-            stop_reason: StopReason::EndTurn,
-            tool_calls: vec![],
-            usage: TokenUsage::default(),
-        })
-    }
-}
-
-/// Builds a real agent that records the request it was handed, so serve's own
-/// plumbing is exercised end to end.
-struct ResolvingFactory {
-    last: Arc<std::sync::Mutex<Option<CompletionRequest>>>,
-}
-
-#[async_trait]
-impl AgentFactory for ResolvingFactory {
-    async fn build(&self, tenant: &str, session_id: &str) -> anyhow::Result<Runner> {
-        Ok(Runner::builder(
-            Arc::new(RecordingProvider {
-                last: self.last.clone(),
-            }),
-            tenant,
-            session_id,
-        )
-        .system_prompt("test")
-        .build())
-    }
-}
-
-type Recorder = Arc<std::sync::Mutex<Option<CompletionRequest>>>;
-
-fn resolving_setup() -> (
-    axum::Router,
-    Arc<dyn SessionStore>,
-    Arc<dyn ArtifactStore>,
-    Recorder,
-) {
-    let session: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
-    let artifacts: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
-    let last: Recorder = Arc::new(std::sync::Mutex::new(None));
-    let app = router(ServeConfig {
-        session_store: session.clone(),
-        artifact_store: artifacts.clone(),
-        transcriber: None,
-        agents: single_agent("main", Arc::new(ResolvingFactory { last: last.clone() })),
-        limits: Default::default(),
-        workers: None,
-        broker: None,
-        nudge: None,
-        identity: None,
-    });
-    (app, session, artifacts, last)
 }

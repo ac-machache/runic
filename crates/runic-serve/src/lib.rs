@@ -37,21 +37,23 @@
 
 pub mod app;
 pub mod auth;
+pub mod completion;
 pub mod error;
 pub mod hosts;
 pub mod openapi;
-pub mod queue;
 pub mod routes;
+pub mod store;
+pub mod stream;
 pub mod tenant;
 pub mod wire;
 pub mod worker;
 
-pub use apalis_postgres::PgPool;
 pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
 pub use auth::{Identity, IdentityError, IdentityResolver};
 pub use error::ServeError;
 pub use hosts::{AgentRegistry, HostedAgents};
-pub use queue::RunJob;
+pub use sqlx::PgPool;
+pub use store::{RunRecord, RunSpec, RunStatus, Runs};
 pub use tenant::Tenant;
 pub use wire::WireEvent;
-pub use worker::spawn_run_worker;
+pub use worker::Worker;

@@ -25,6 +25,7 @@ Cargo.lock.bak
 /codex
 /aegra
 /adk-rust
+/job
 
 # codegraph local index
 /.codegraph
@@ -40,3 +41,4 @@ webclaw
 critique-v2.md
 design-v2.md
 state-v2.md
+queue-rework.md

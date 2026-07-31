@@ -1,4 +1,5 @@
 pub mod input;
+pub mod stream;
 pub mod wait;
 
 use axum::Json;
@@ -66,9 +67,10 @@ pub async fn run_status(
     Path((thread_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<RunStatusResponse>, ServeError> {
     let record = state
-        .store()
-        .get_run(&tenant, &run_id)
-        .await?
+        .runs()
+        .get(&tenant, &run_id)
+        .await
+        .map_err(|error| ServeError::Store(error.to_string()))?
         .filter(|record| record.session_id == thread_id)
         .ok_or(ServeError::RunNotFound {
             id: run_id,
@@ -136,9 +138,10 @@ pub async fn list_thread_runs(
     let limit = query.limit.unwrap_or(20).min(100);
     let before = query.cursor.as_deref().and_then(decode_run_cursor);
     let records = state
-        .store()
-        .list_runs(&tenant, &thread_id, limit, before)
-        .await?;
+        .runs()
+        .list(&tenant, &thread_id, limit as i64, before)
+        .await
+        .map_err(|error| ServeError::Store(error.to_string()))?;
     let next_cursor = (records.len() == limit)
         .then(|| {
             records
@@ -274,15 +277,17 @@ async fn resolve_answer(
         }]),
         at: chrono::Utc::now(),
     };
-    if !state
-        .store()
-        .deliver_and_resume(&tenant, &run_id, &event)
-        .await?
-    {
+    let resumed = state
+        .runs()
+        .resume(&tenant, &run_id)
+        .await
+        .map_err(|error| ServeError::Store(error.to_string()))?;
+    if !resumed {
         return Err(ServeError::BadRequest(format!(
             "run '{run_id}' is not awaiting an answer"
         )));
     }
+    state.store().append(&tenant, &thread_id, &event).await?;
 
     Ok(StatusCode::ACCEPTED)
 }

@@ -1,23 +1,20 @@
 use std::time::Duration;
 
-use apalis::prelude::{TaskBuilder, TaskSink};
-use apalis_postgres::PgListener;
-use apalis_sql::ext::TaskBuilderExt;
 use axum::Json;
 use axum::extract::{Path, State};
-use runic_substrate::{RunStatus, SessionEvent};
+use runic_substrate::SessionEvent;
 use runic_types::Role;
 use serde::Serialize;
 
 use super::input::RunMessageRequest;
 use crate::app::AppState;
+use crate::completion::Ticket;
 use crate::error::{ErrorBody, ServeError};
-use crate::queue::{MAX_ATTEMPTS, RunJob};
+use crate::store::{RunSpec, RunStatus};
 use crate::tenant::Tenant;
-use crate::worker::COMPLETION_CHANNEL;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
-const RECHECK_EVERY: Duration = Duration::from_secs(5);
+const LOST_SIGNAL_GUARD: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WaitRunResponse {
@@ -60,62 +57,22 @@ pub async fn wait_run(
     let message = req.into_message()?;
 
     let run_id = runic_state::new_run_id();
-    state
-        .store()
-        .create_run(&tenant, &thread_id, &run_id, &agent)
-        .await?;
+    let payload = serde_json::to_value(&message)
+        .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
+    let spec = RunSpec::new(&tenant, &thread_id, &run_id, &agent)
+        .input(payload)
+        .context(context);
 
-    let job = RunJob {
-        tenant: tenant.clone(),
-        thread_id: thread_id.clone(),
-        run_id: run_id.clone(),
-        agent: agent.clone(),
-        message,
-        context,
-        wave: 0,
-    };
-    let done = match dispatch(&state, job, &run_id).await {
-        Ok(done) => done,
-        Err(error) => return Err(abandon(&state, &run_id, error).await),
-    };
+    let done = state.completions.ticket(&run_id);
+    state
+        .runs()
+        .enqueue(&spec)
+        .await
+        .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
 
     tracing::info!(%tenant, %thread_id, %agent, %run_id, "wait run queued");
 
     await_completion(&state, &tenant, &thread_id, &run_id, done).await
-}
-
-async fn dispatch(state: &AppState, job: RunJob, run_id: &str) -> Result<PgListener, ServeError> {
-    let mut done = PgListener::connect_with(&state.pool)
-        .await
-        .map_err(|error| {
-            ServeError::Internal(format!("could not watch for completion: {error}"))
-        })?;
-    done.listen(COMPLETION_CHANNEL).await.map_err(|error| {
-        ServeError::Internal(format!("could not watch for completion: {error}"))
-    })?;
-
-    state
-        .queue()
-        .push_task(
-            TaskBuilder::new(job)
-                .max_attempts(MAX_ATTEMPTS)
-                .with_idempotency_key(run_id)
-                .build(),
-        )
-        .await
-        .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
-    Ok(done)
-}
-
-async fn abandon(state: &AppState, run_id: &str, error: ServeError) -> ServeError {
-    if let Err(cleanup) = state
-        .store()
-        .set_run_status(run_id, RunStatus::Failed, Some(&error.to_string()))
-        .await
-    {
-        tracing::error!(%run_id, %cleanup, "could not release the thread after a failed dispatch");
-    }
-    error
 }
 
 async fn await_completion(
@@ -123,55 +80,41 @@ async fn await_completion(
     tenant: &str,
     thread_id: &str,
     run_id: &str,
-    mut done: PgListener,
+    mut done: Ticket,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
     let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
     loop {
-        if let Some(record) = state.store().get_run(tenant, run_id).await? {
-            match record.status {
-                RunStatus::Failed => {
-                    return Err(ServeError::Runner(
-                        record.error.unwrap_or_else(|| "the run failed".into()),
-                    ));
-                }
-                RunStatus::Successful | RunStatus::Cancelled | RunStatus::Waiting => {
-                    return Ok(Json(collect(state, tenant, thread_id, run_id).await?));
-                }
-                RunStatus::Idle | RunStatus::Running => {}
-            }
-        }
-
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         if left.is_zero() {
             return Err(ServeError::Timeout {
                 run_id: run_id.to_string(),
             });
         }
-        settle(&mut done, run_id, left.min(RECHECK_EVERY)).await;
-    }
-}
+        done.settled(left.min(LOST_SIGNAL_GUARD)).await;
 
-async fn settle(done: &mut PgListener, run_id: &str, budget: Duration) {
-    let until = tokio::time::Instant::now() + budget;
-    loop {
-        let left = until.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() {
-            return;
-        }
-        match tokio::time::timeout(left, done.recv()).await {
-            Ok(Ok(note)) if note.payload() == run_id => return,
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%run_id, %error, "completion listener dropped, polling instead");
-                tokio::time::sleep(left).await;
-                return;
+        let found = state
+            .runs()
+            .get(tenant, run_id)
+            .await
+            .map_err(|error| ServeError::Store(error.to_string()))?;
+        let Some(record) = found else {
+            continue;
+        };
+        match record.status {
+            RunStatus::Failed => {
+                return Err(ServeError::Runner(
+                    record.error.unwrap_or_else(|| "the run failed".into()),
+                ));
             }
-            Err(_) => return,
+            RunStatus::Successful | RunStatus::Cancelled | RunStatus::Waiting => {
+                return Ok(Json(collect(state, tenant, thread_id, run_id).await?));
+            }
+            RunStatus::Idle | RunStatus::Running => {}
         }
     }
 }
 
-async fn collect(
+pub(crate) async fn collect(
     state: &AppState,
     tenant: &str,
     thread_id: &str,

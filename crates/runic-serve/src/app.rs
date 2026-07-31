@@ -17,22 +17,27 @@ use tower_http::trace::TraceLayer;
 
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "docs-ui")]
 use utoipa::OpenApi;
 
-use apalis_postgres::PgPool;
+use sqlx::PgPool;
 
 use crate::hosts::{AgentRegistry, HostedAgents};
-use crate::queue::{RunSink, sink};
 use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
+use crate::store::Runs;
 
 #[derive(Clone)]
 pub struct AppState {
     pub sessions: Sessions,
     pub blobs: Blobs,
     pub pool: PgPool,
+    pub runs: Runs,
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agents: Arc<AgentRegistry>,
+    pub completions: crate::completion::Completions,
+    pub events: Arc<dyn crate::stream::RunEvents>,
 }
 
 impl AppState {
@@ -40,12 +45,12 @@ impl AppState {
         self.sessions.store()
     }
 
-    pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
-        self.blobs.store()
+    pub fn runs(&self) -> &Runs {
+        &self.runs
     }
 
-    pub fn queue(&self) -> RunSink {
-        sink(&self.pool)
+    pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
+        self.blobs.store()
     }
 
     pub fn thread(&self, tenant: &str, thread_id: &str) -> runic::Session {
@@ -112,9 +117,12 @@ fn app_state(config: ServeConfig) -> (AppState, Option<Arc<dyn crate::auth::Iden
     let state = AppState {
         sessions: config.sessions,
         blobs: config.blobs,
+        runs: Runs::new(config.pool.clone()),
         pool: config.pool,
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
+        completions: crate::completion::Completions::new(),
+        events: crate::stream::LocalEvents::new(),
     };
     (state, config.identity)
 }
@@ -166,6 +174,14 @@ fn routes(state: AppState) -> Router {
             get(runs::run_timeline),
         )
         .route("/threads/{thread_id}/runs/wait", post(runs::wait::wait_run))
+        .route(
+            "/threads/{thread_id}/runs/stream",
+            post(runs::stream::open_stream),
+        )
+        .route(
+            "/threads/{thread_id}/runs/{run_id}/stream",
+            get(runs::stream::resume_stream),
+        )
         .route("/threads/{thread_id}/runs/{run_id}", get(runs::run_status))
         .route(
             "/threads/{thread_id}/asks/{ask_id}",
@@ -187,57 +203,68 @@ fn routes(state: AppState) -> Router {
 pub fn router(config: ServeConfig) -> Router {
     let (state, identity) = app_state(config);
     if tokio::runtime::Handle::try_current().is_ok() {
-        crate::worker::spawn_run_worker(state.clone(), &state.pool.clone());
+        state.completions.watch(state.pool.clone());
+        crate::worker::spawn(state.clone()).detach();
     } else {
         tracing::warn!("router built outside a tokio runtime — the run worker is not started");
     }
-    crate::auth::apply(routes(state), identity)
-        .layer(CorsLayer::permissive())
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
-                            let request_id = request
-                                .extensions()
-                                .get::<RequestId>()
-                                .and_then(|id| id.header_value().to_str().ok())
-                                .unwrap_or("-")
-                                .to_string();
-                            tracing::info_span!(
-                                "http_request",
-                                method = %request.method(),
-                                path = %request.uri().path(),
-                                request_id = %request_id,
-                            )
-                        })
-                        .on_response(
-                            |response: &axum::response::Response,
-                             latency: Duration,
-                             _span: &tracing::Span| {
-                                tracing::info!(
-                                    status = %response.status().as_u16(),
-                                    latency_ms = %latency.as_millis(),
-                                    "request completed"
-                                );
-                            },
-                        ),
-                )
-                .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
-        )
+    with_layers(crate::auth::apply(routes(state), identity))
+}
+
+fn with_layers(router: Router) -> Router {
+    router.layer(CorsLayer::permissive()).layer(
+        ServiceBuilder::new()
+            .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
+            .layer(
+                TraceLayer::new_for_http()
+                    .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                        let request_id = request
+                            .extensions()
+                            .get::<RequestId>()
+                            .and_then(|id| id.header_value().to_str().ok())
+                            .unwrap_or("-")
+                            .to_string();
+                        tracing::info_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                            request_id = %request_id,
+                        )
+                    })
+                    .on_response(
+                        |response: &axum::response::Response,
+                         latency: Duration,
+                         _span: &tracing::Span| {
+                            tracing::info!(
+                                status = %response.status().as_u16(),
+                                latency_ms = %latency.as_millis(),
+                                "request completed"
+                            );
+                        },
+                    ),
+            )
+            .layer(PropagateRequestIdLayer::new(REQUEST_ID_HEADER)),
+    )
 }
 
 pub async fn serve(
     config: ServeConfig,
     addr: impl tokio::net::ToSocketAddrs,
 ) -> anyhow::Result<()> {
-    crate::queue::setup(&config.pool).await?;
+    crate::store::migrate(&config.pool).await?;
+
+    let (state, identity) = app_state(config);
+    state.completions.watch(state.pool.clone());
+    let worker = crate::worker::spawn(state.clone());
+    let app = with_layers(crate::auth::apply(routes(state), identity));
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "runic-serve listening");
-    axum::serve(listener, router(config))
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    worker.shutdown(SHUTDOWN_GRACE).await;
     Ok(())
 }
 

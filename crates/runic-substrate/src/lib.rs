@@ -40,9 +40,7 @@ pub use persister::{
     attach as attach_persister, persist_channel, spawn_persist,
 };
 pub use replay::{replay_into_state, replay_messages};
-pub use sessions::{
-    ChatHit, RunRecord, RunSignals, RunStatus, SessionMeta, SessionScope, SessionStore, StoredEvent,
-};
+pub use sessions::{ChatHit, SessionMeta, SessionScope, SessionStore, StoredEvent};
 pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 
 #[cfg(feature = "postgres")]

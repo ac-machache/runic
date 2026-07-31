@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::{RunStatus, SessionStore};
+use runic_serve::{RunSpec, RunStatus};
+use runic_substrate::SessionStore;
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 use common::Harness;
@@ -526,9 +527,9 @@ async fn delete_is_refused_while_a_run_is_active_on_the_thread() {
     let tenant = h.tenant.clone();
     common::create_thread(&app, &tenant, "busy").await;
 
+    let runs = h.runs();
     let run_id = common::uid("run");
-    store
-        .create_run(&tenant, "busy", &run_id, "main")
+    runs.enqueue(&RunSpec::new(&tenant, "busy", &run_id, "main"))
         .await
         .unwrap();
 
@@ -547,8 +548,7 @@ async fn delete_is_refused_while_a_run_is_active_on_the_thread() {
         "the refused delete must not touch the thread"
     );
 
-    store
-        .set_run_status(&run_id, RunStatus::Successful, None)
+    runs.finish(&run_id, RunStatus::Successful, None)
         .await
         .unwrap();
     let resp = app

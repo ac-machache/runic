@@ -26,7 +26,7 @@ impl TaskReminder {
         if due.is_empty() {
             return HookOutcome::Noop;
         }
-        due.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
+        due.sort_by_key(|a| a.spawned_at);
 
         let notes: Vec<String> = due
             .iter()

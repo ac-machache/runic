@@ -25,8 +25,8 @@ runic-hook = { path = "../runic-hook" }
 
 # Optional Postgres backends (session store + artifact metadata index). Off by
 # default so memory/local-fs users don't pull sqlx + a Postgres/TLS stack.
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono",
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "migrate", "macros", "sqlx-toml",
 ], optional = true }
 
 [features]

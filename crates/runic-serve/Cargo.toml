@@ -8,10 +8,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-apalis = { workspace = true }
-apalis-cron = { workspace = true }
-apalis-postgres = { workspace = true }
-apalis-sql = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
@@ -27,8 +23,8 @@ runic-substrate = { workspace = true }
 runic-transcriber = { path = "../runic-transcriber" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono",
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "migrate", "macros", "sqlx-toml",
 ] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "time", "signal", "net"] }

@@ -99,16 +99,14 @@ fn validate_media(request: &CompletionRequest) -> Result<(), ProviderError> {
                         });
                     }
                 }
-                ContentBlock::File { data, .. } => {
-                    if base64_len_bytes(data) > MAX_DOCUMENT_BYTES {
-                        return Err(ProviderError::Api {
-                            status: 413,
-                            message: format!(
-                                "document exceeds Mistral's {} MB limit",
-                                MAX_DOCUMENT_BYTES / (1024 * 1024)
-                            ),
-                        });
-                    }
+                ContentBlock::File { data, .. } if base64_len_bytes(data) > MAX_DOCUMENT_BYTES => {
+                    return Err(ProviderError::Api {
+                        status: 413,
+                        message: format!(
+                            "document exceeds Mistral's {} MB limit",
+                            MAX_DOCUMENT_BYTES / (1024 * 1024)
+                        ),
+                    });
                 }
                 _ => {}
             }

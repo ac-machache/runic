@@ -1,0 +1,2 @@
+[migrate]
+table-name = "public._sqlx_substrate_migrations"

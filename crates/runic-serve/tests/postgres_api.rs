@@ -44,12 +44,12 @@ impl Provider for ScriptedProvider {
 
 async fn pg_router(root: &Path) -> Option<(Router, Arc<dyn SessionStore>, Arc<dyn ArtifactStore>)> {
     let pool = common::test_pool().await?;
-    runic_serve::queue::setup(&pool)
-        .await
-        .expect("apalis queue schema setup");
     let sessions = PostgresSessionStore::from_pool(pool.clone())
         .await
         .expect("connect session store");
+    runic_serve::store::migrate(&pool)
+        .await
+        .expect("serve run schema setup");
     let bytes: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root));
     let artifacts = PostgresArtifactStore::from_pool(pool.clone(), bytes, "local")
         .await

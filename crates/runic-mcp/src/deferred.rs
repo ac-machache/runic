@@ -134,8 +134,8 @@ impl DeferredMcpToolSet {
                 (hits > 0).then_some((hits, stub))
             })
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        scored.into_iter().take(max).map(|(_, s)| s).collect()
+        scored.sort_by_key(|(hits, _)| std::cmp::Reverse(*hits));
+        scored.into_iter().take(max).map(|(_, stub)| stub).collect()
     }
 }
 

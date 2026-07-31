@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use apalis_postgres::PgPool;
 use axum::Router;
 use axum::body::Body;
 use axum::http::Request;
@@ -13,9 +12,10 @@ use tower::ServiceExt;
 
 use runic::{Agent, Llm};
 use runic_provider::Provider;
-use runic_serve::{HostedAgents, ServeConfig, router};
+use runic_serve::{HostedAgents, PgPool, Runs, ServeConfig, router};
 use runic_substrate::{
-    ArtifactStore, Blobs, MemoryArtifactStore, MemorySessionStore, SessionStore, Sessions,
+    ArtifactStore, Blobs, MemoryArtifactStore, MemorySessionStore, PostgresSessionStore,
+    SessionStore, Sessions,
 };
 
 pub fn uid(prefix: &str) -> String {
@@ -43,10 +43,12 @@ pub async fn test_pool() -> Option<PgPool> {
         .connect(&base_url)
         .await
         .expect("RUNIC_TEST_DATABASE_URL is set but unreachable");
-    sqlx::query(&format!(r#"CREATE DATABASE "{scratch_db}""#))
-        .execute(&maintenance)
-        .await
-        .expect("create per-test scratch database");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{scratch_db}""#
+    )))
+    .execute(&maintenance)
+    .await
+    .expect("create per-test scratch database");
     maintenance.close().await;
 
     Some(
@@ -82,6 +84,10 @@ impl Harness {
         self.sessions.store()
     }
 
+    pub fn runs(&self) -> Runs {
+        Runs::new(self.pool.clone())
+    }
+
     pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
         self.blobs.store()
     }
@@ -89,9 +95,12 @@ impl Harness {
 
 pub async fn harness() -> Option<Harness> {
     let pool = test_pool().await?;
-    runic_serve::queue::setup(&pool)
+    PostgresSessionStore::from_pool(pool.clone())
         .await
-        .expect("apalis queue schema setup");
+        .expect("substrate schema setup");
+    runic_serve::store::migrate(&pool)
+        .await
+        .expect("serve run schema setup");
     let sessions = Sessions::from(Arc::new(MemorySessionStore::new()) as Arc<dyn SessionStore>);
     let blobs = Blobs::from(Arc::new(MemoryArtifactStore::new()) as Arc<dyn ArtifactStore>);
     Some(Harness {

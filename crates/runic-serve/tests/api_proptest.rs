@@ -180,12 +180,15 @@ proptest! {
             let state = AppState {
                 sessions: h.sessions.clone(),
                 blobs: h.blobs.clone(),
+                runs: h.runs(),
                 pool: h.pool.clone(),
+                events: runic_serve::stream::LocalEvents::new(),
                 transcriber: None,
                 agents: Arc::new(AgentRegistry::new(single_agent(
                     "main",
                     common::agent(Arc::new(ScriptedProvider)),
                 ))),
+                completions: runic_serve::completion::Completions::new(),
             };
             let ref_body: RunMessageRequest = serde_json::from_value(json!({
                 "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }]

@@ -283,7 +283,7 @@ impl AgentState {
             .filter(|t| t.status == crate::tasks::TaskStatus::Running)
             .cloned()
             .collect();
-        open.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
+        open.sort_by_key(|a| a.spawned_at);
         open
     }
 
@@ -345,7 +345,7 @@ impl Reader for AgentState {
             .filter(|task| task.status == crate::tasks::TaskStatus::Running)
             .cloned()
             .collect();
-        open.sort_by(|a, b| a.spawned_at.cmp(&b.spawned_at));
+        open.sort_by_key(|a| a.spawned_at);
         open
     }
     fn data(&self) -> &serde_json::Map<String, serde_json::Value> {

@@ -15,7 +15,7 @@ CONTAINER=runic-test-pg
 PORT=55432
 export RUNIC_TEST_DATABASE_URL="postgres://postgres:postgres@localhost:${PORT}/runic_test"
 
-cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 cleanup

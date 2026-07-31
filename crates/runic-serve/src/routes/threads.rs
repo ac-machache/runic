@@ -565,10 +565,10 @@ pub(crate) async fn active_run(
     state: &AppState,
     tenant: &str,
     thread_id: &str,
-) -> Option<runic_substrate::RunRecord> {
+) -> Option<crate::store::RunRecord> {
     state
-        .store()
-        .latest_active_run(tenant, thread_id)
+        .runs()
+        .latest_active(tenant, thread_id)
         .await
         .ok()
         .flatten()

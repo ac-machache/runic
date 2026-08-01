@@ -68,9 +68,9 @@ async fn pg_router(root: &Path) -> Option<(Router, Arc<dyn SessionStore>, Arc<dy
     Some((app, sessions, artifacts))
 }
 
-async fn wait_for_events(store: &dyn SessionStore, tenant: &str, thread: &str, min: usize) {
+async fn wait_for_events(store: &dyn SessionStore, tenant: &str, session: &str, min: usize) {
     for _ in 0..100 {
-        if store.read(tenant, thread).await.unwrap().len() >= min {
+        if store.read(tenant, session).await.unwrap().len() >= min {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -85,16 +85,16 @@ async fn full_lifecycle_on_postgres() {
         return;
     };
     let tenant = common::uid("tenant");
-    let thread = common::uid("thread");
+    let session = common::uid("session");
 
-    common::create_thread(&app, &tenant, &thread).await;
+    common::create_session(&app, &tenant, &session).await;
 
     let resp = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/threads/{thread}/artifacts"))
+                .uri(format!("/sessions/{session}/artifacts"))
                 .header("content-type", "text/plain")
                 .header("x-runic-tenant", &tenant)
                 .header("x-runic-filename", "note.txt")
@@ -112,7 +112,7 @@ async fn full_lifecycle_on_postgres() {
 
     let resp = app
         .clone()
-        .oneshot(common::wait_request(&thread, &tenant, "hello"))
+        .oneshot(common::wait_request(&session, &tenant, "hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -120,11 +120,11 @@ async fn full_lifecycle_on_postgres() {
     assert_eq!(body["text"], "pong");
     let run_id = body["run_id"].as_str().unwrap().to_string();
 
-    wait_for_events(sessions.as_ref(), &tenant, &thread, 4).await;
+    wait_for_events(sessions.as_ref(), &tenant, &session, 4).await;
 
     let resp = app
         .clone()
-        .oneshot(common::get(&format!("/threads/{thread}/events"), &tenant))
+        .oneshot(common::get(&format!("/sessions/{session}/events"), &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -138,7 +138,7 @@ async fn full_lifecycle_on_postgres() {
     let resp = app
         .clone()
         .oneshot(common::get(
-            &format!("/threads/{thread}/runs/{run_id}/timeline"),
+            &format!("/sessions/{session}/runs/{run_id}/timeline"),
             &tenant,
         ))
         .await
@@ -149,19 +149,19 @@ async fn full_lifecycle_on_postgres() {
 
     let resp = app
         .clone()
-        .oneshot(common::delete(&format!("/threads/{thread}"), &tenant))
+        .oneshot(common::delete(&format!("/sessions/{session}"), &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     assert!(
         sessions
-            .session_meta(&tenant, &thread)
+            .session_meta(&tenant, &session)
             .await
             .unwrap()
             .is_none()
     );
-    assert!(artifacts.list(&tenant, &thread).await.unwrap().is_empty());
+    assert!(artifacts.list(&tenant, &session).await.unwrap().is_empty());
     assert!(!root.path().join("blobs").join(&art_id).exists());
 }
 
@@ -173,28 +173,28 @@ async fn tenant_isolation_on_postgres() {
     };
     let tenant_a = common::uid("tenant");
     let tenant_b = common::uid("tenant");
-    let thread_a = common::uid("thread");
-    let thread_b = common::uid("thread");
+    let session_a = common::uid("session");
+    let session_b = common::uid("session");
 
-    common::create_thread(&app, &tenant_a, &thread_a).await;
-    common::create_thread(&app, &tenant_b, &thread_b).await;
+    common::create_session(&app, &tenant_a, &session_a).await;
+    common::create_session(&app, &tenant_b, &session_b).await;
 
     let resp = app
         .clone()
-        .oneshot(common::get("/threads", &tenant_a))
+        .oneshot(common::get("/sessions", &tenant_a))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ids: Vec<String> = common::body_json(resp).await["threads"]
+    let ids: Vec<String> = common::body_json(resp).await["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["thread_id"].as_str().unwrap().to_string())
+        .map(|t| t["session_id"].as_str().unwrap().to_string())
         .collect();
-    assert!(ids.contains(&thread_a));
+    assert!(ids.contains(&session_a));
     assert!(
-        !ids.contains(&thread_b),
-        "tenant A leaked tenant B's thread"
+        !ids.contains(&session_b),
+        "tenant A leaked tenant B's session"
     );
 }
 
@@ -205,16 +205,16 @@ async fn wait_run_persists_the_full_lifecycle_on_postgres() {
         return;
     };
     let tenant = common::uid("tenant");
-    let thread = common::uid("thread");
+    let session = common::uid("session");
 
     let resp = app
-        .oneshot(common::wait_request(&thread, &tenant, "hi"))
+        .oneshot(common::wait_request(&session, &tenant, "hi"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    wait_for_events(sessions.as_ref(), &tenant, &thread, 4).await;
-    let events = sessions.read(&tenant, &thread).await.unwrap();
+    wait_for_events(sessions.as_ref(), &tenant, &session, 4).await;
+    let events = sessions.read(&tenant, &session).await.unwrap();
     assert!(events.iter().any(|stored| {
         matches!(&stored.event, runic_substrate::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))

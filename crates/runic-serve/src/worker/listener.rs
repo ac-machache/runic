@@ -16,6 +16,7 @@ pub fn watch(pool: PgPool, tracker: Arc<Tracker>) -> tokio::task::JoinHandle<()>
             match attach(&pool).await {
                 Ok(mut listener) => {
                     tracing::info!(channel = CHANNEL, "ready listener attached");
+                    tracker.wake();
                     while listener.recv().await.is_ok() {
                         tracker.wake();
                     }

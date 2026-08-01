@@ -19,7 +19,7 @@ pub struct ToolStat {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ThreadStats {
+pub struct SessionStats {
     pub runs: u64,
     pub errored_runs: u64,
     pub cancelled_runs: u64,
@@ -45,7 +45,7 @@ pub struct ThreadStats {
     pub tasks_failed: u64,
 }
 
-impl ThreadStats {
+impl SessionStats {
     pub fn fold(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::RunStarted { .. } => self.runs += 1,
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn runs_count_attempts_and_outcomes_separately() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&run_start());
         stats.fold(&run_end(RunEndStatus::Completed));
         stats.fold(&run_start());
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn turns_feed_tokens_latency_by_model_and_the_prompt_gauge() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&turn_end("m1", 100, 40, 20, 900));
         stats.fold(&turn_end("m2", 50, 10, 0, 100));
 
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn tool_stats_track_calls_errors_and_latency() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&tool_finished("payment", ToolStatus::Ok, 30));
         stats.fold(&tool_finished("payment", ToolStatus::Timeout, 5_000));
         stats.fold(&tool_finished("search", ToolStatus::Substituted, 0));
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn tracked_maps_are_bounded_with_an_overflow_bucket() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         for i in 0..(MAX_TRACKED_TOOLS + 5) {
             stats.fold(&tool_finished(&format!("tool-{i}"), ToolStatus::Ok, 1));
         }
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn delegation_edges_fold_into_delegated_usage() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&AgentEvent::DelegationFinished {
             run_id: "r1".into(),
             turn: 1,
@@ -295,10 +295,10 @@ mod tests {
 
     #[test]
     fn a_snapshot_with_stats_is_authoritative() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&tool_result("payment"));
 
-        let rolled = ThreadStats {
+        let rolled = SessionStats {
             runs: 9,
             total_tool_calls: 42,
             ..Default::default()
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_stats_less_snapshot_keeps_the_folded_stats() {
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         stats.fold(&tool_result("payment"));
 
         stats.fold(&AgentEvent::StateSnapshot {

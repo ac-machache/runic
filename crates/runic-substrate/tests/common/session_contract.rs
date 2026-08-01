@@ -696,7 +696,7 @@ pub async fn list_sessions_orders_recent_first(store: &dyn SessionStore) {
     assert_eq!(order, vec![c, b, a]); // most-recent-activity first
 }
 
-/// Keyset pagination over the thread list returns every session exactly once.
+/// Keyset pagination over the session list returns every session exactly once.
 pub async fn list_sessions_page_covers_every_session_once(store: &dyn SessionStore) {
     let t = uid("tenant");
     let mut ids = Vec::new();
@@ -732,7 +732,10 @@ pub async fn list_sessions_page_covers_every_session_once(store: &dyn SessionSto
 pub async fn set_label_reflected_in_meta_and_list(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     store.append(&t, &s, &user_msg("r", "x", 0)).await.unwrap();
-    store.set_label(&t, &s, Some("My Thread")).await.unwrap();
+    store
+        .set_label(&t, &s, Some("My SessionKey"))
+        .await
+        .unwrap();
     assert_eq!(
         store
             .session_meta(&t, &s)
@@ -741,10 +744,10 @@ pub async fn set_label_reflected_in_meta_and_list(store: &dyn SessionStore) {
             .unwrap()
             .label
             .as_deref(),
-        Some("My Thread")
+        Some("My SessionKey")
     );
     let listed = store.list_sessions(&t).await.unwrap();
-    assert_eq!(listed[0].label.as_deref(), Some("My Thread"));
+    assert_eq!(listed[0].label.as_deref(), Some("My SessionKey"));
 }
 
 pub async fn set_label_materializes_empty_session(store: &dyn SessionStore) {
@@ -817,7 +820,7 @@ pub async fn delete_session_is_tenant_scoped(store: &dyn SessionStore) {
     assert_eq!(
         store.read(&t2, &s).await.unwrap().len(),
         1,
-        "deleting tenant1's thread hit tenant2"
+        "deleting tenant1's session hit tenant2"
     );
 }
 

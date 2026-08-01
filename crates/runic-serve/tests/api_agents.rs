@@ -227,11 +227,11 @@ async fn unknown_agent_is_404() {
         return;
     };
     let f = fixture(&h);
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = f
         .app
         .oneshot(common::wait_request_agent(
-            &thread,
+            &session,
             &h.tenant,
             Some("ghost"),
             "hi",
@@ -250,10 +250,10 @@ async fn missing_agent_on_a_multi_agent_server_is_400_listing_the_roster() {
         return;
     };
     let f = fixture(&h);
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = f
         .app
-        .oneshot(common::wait_request(&thread, &h.tenant, "hi"))
+        .oneshot(common::wait_request(&session, &h.tenant, "hi"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -270,9 +270,9 @@ async fn missing_agent_on_a_single_agent_server_routes_to_it() {
     };
     let coral = EchoProvider::new("from-coral");
     let app = h.single_router(common::agent(coral));
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = app
-        .oneshot(common::wait_request(&thread, &h.tenant, "hi"))
+        .oneshot(common::wait_request(&session, &h.tenant, "hi"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -336,11 +336,11 @@ async fn run_start_event_records_the_agent() {
         return;
     };
     let f = fixture(&h);
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = f
         .app
         .oneshot(common::wait_request_agent(
-            &thread,
+            &session,
             &h.tenant,
             Some("coral"),
             "hi",
@@ -349,7 +349,7 @@ async fn run_start_event_records_the_agent() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let events = h.store().read(&h.tenant, &thread).await.unwrap();
+    let events = h.store().read(&h.tenant, &session).await.unwrap();
     let agent = events.iter().find_map(|e| match &e.event {
         runic_substrate::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
         _ => None,
@@ -368,10 +368,10 @@ async fn serve_config_builder_defaults_the_optional_infra() {
     assert!(config.identity.is_none());
 
     let app = router(config);
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = app
         .oneshot(common::wait_request_agent(
-            &thread,
+            &session,
             &h.tenant,
             Some("coral"),
             "hi",
@@ -474,11 +474,11 @@ async fn an_agent_macro_type_is_served_under_the_name_it_declares() {
         .unwrap();
     let app = router(config);
 
-    let thread = common::uid("t");
+    let session = common::uid("t");
     let resp = app
         .clone()
         .oneshot(common::wait_request_agent(
-            &thread,
+            &session,
             &h.tenant,
             Some("support"),
             "hi",

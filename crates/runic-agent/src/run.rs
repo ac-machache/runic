@@ -86,7 +86,7 @@ impl Runner {
             "run",
             run_id = %run_id,
             tenant = %self.state.user_id,
-            thread = %self.state.session_id,
+            session = %self.state.session_id,
             mode = ctx.mode.unwrap_or("direct"),
             total_turns = tracing::field::Empty,
             input_tokens = tracing::field::Empty,

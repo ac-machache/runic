@@ -1,5 +1,6 @@
 pub mod control;
 pub mod input;
+pub mod loose;
 pub mod stream;
 pub mod wait;
 
@@ -24,10 +25,10 @@ pub struct RunStatusResponse {
 
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/runs/{run_id}",
+    path = "/sessions/{session_id}/runs/{run_id}",
     tag = "runs",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -39,17 +40,17 @@ pub struct RunStatusResponse {
 pub async fn run_status(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<RunStatusResponse>, ServeError> {
     let record = state
         .runs()
         .get(&tenant, &run_id)
         .await
         .map_err(|error| ServeError::Store(error.to_string()))?
-        .filter(|record| record.session_id == thread_id)
+        .filter(|record| record.session_id.as_deref() == Some(session_id.as_str()))
         .ok_or(ServeError::RunNotFound {
             id: run_id,
-            thread: thread_id,
+            session: session_id,
         })?;
     Ok(Json(RunStatusResponse {
         run_id: record.run_id,
@@ -93,10 +94,10 @@ pub struct RunListResponse {
 
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/runs",
+    path = "/sessions/{session_id}/runs",
     tag = "runs",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         RunListQuery,
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -104,17 +105,17 @@ pub struct RunListResponse {
         (status = 200, description = "Run summaries, newest first, keyset-paginated via `cursor`", body = RunListResponse)
     )
 )]
-pub async fn list_thread_runs(
+pub async fn list_session_runs(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path(thread_id): Path<String>,
+    Path(session_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<RunListQuery>,
 ) -> Result<Json<RunListResponse>, ServeError> {
     let limit = query.limit.unwrap_or(20).min(100);
     let before = query.cursor.as_deref().and_then(decode_run_cursor);
     let records = state
         .runs()
-        .list(&tenant, &thread_id, limit as i64, before)
+        .list(&tenant, &session_id, limit as i64, before)
         .await
         .map_err(|error| ServeError::Store(error.to_string()))?;
     let next_cursor = (records.len() == limit)
@@ -142,10 +143,10 @@ pub async fn list_thread_runs(
 
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/runs/{run_id}/timeline",
+    path = "/sessions/{session_id}/runs/{run_id}/timeline",
     tag = "runs",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -157,18 +158,18 @@ pub async fn list_thread_runs(
 pub async fn run_timeline(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ServeError> {
     let events = state
         .store()
-        .read_run_after(&tenant, &thread_id, &run_id, 0)
+        .read_run_after(&tenant, &session_id, &run_id, 0)
         .await?;
     let trace = runic_substrate::timeline::project(events.iter().map(|entry| &entry.event))
         .into_iter()
         .next()
         .ok_or(ServeError::RunNotFound {
             id: run_id,
-            thread: thread_id,
+            session: session_id,
         })?;
     Ok(Json(serde_json::to_value(trace).map_err(|error| {
         ServeError::Internal(format!("timeline serialization failed: {error}"))

@@ -61,7 +61,7 @@ async fn bare_router_nests_under_a_prefix() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/threads/t1/runs/wait")
+                .uri("/api/sessions/t1/runs/wait")
                 .header("content-type", "application/json")
                 .header("x-runic-tenant", &h.tenant)
                 .body(Body::from(json!({ "message": "hi" }).to_string()))
@@ -184,7 +184,7 @@ async fn full_router_answers_preflight() {
         .oneshot(
             Request::builder()
                 .method("OPTIONS")
-                .uri("/threads/t1/runs/wait")
+                .uri("/sessions/t1/runs/wait")
                 .header("origin", "https://example.com")
                 .header("access-control-request-method", "POST")
                 .body(Body::empty())
@@ -204,20 +204,20 @@ async fn errors_keep_their_shape_when_nested() {
     };
     let app = Router::new().nest("/api", bare_router(config(&h)));
 
-    let missing_thread = app
+    let missing_session = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/threads/nope")
+                .uri("/api/sessions/nope")
                 .header("x-runic-tenant", &h.tenant)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(missing_thread.status(), StatusCode::NOT_FOUND);
+    assert_eq!(missing_session.status(), StatusCode::NOT_FOUND);
     assert_eq!(
-        common::body_json(missing_thread).await["error"],
+        common::body_json(missing_session).await["error"],
         "not_found"
     );
 
@@ -225,7 +225,7 @@ async fn errors_keep_their_shape_when_nested() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/threads/t1/runs/wait")
+                .uri("/api/sessions/t1/runs/wait")
                 .header("content-type", "application/json")
                 .header("x-runic-tenant", &h.tenant)
                 .body(Body::from(
@@ -249,7 +249,7 @@ async fn malformed_json_is_a_400_when_nested() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/threads/t1/runs/wait")
+                .uri("/api/sessions/t1/runs/wait")
                 .header("content-type", "application/json")
                 .header("x-runic-tenant", &h.tenant)
                 .body(Body::from("{not json"))
@@ -270,7 +270,7 @@ async fn wrong_content_type_is_rejected_when_nested() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/threads/t1/runs/wait")
+                .uri("/api/sessions/t1/runs/wait")
                 .header("content-type", "text/plain")
                 .header("x-runic-tenant", &h.tenant)
                 .body(Body::from(json!({ "message": "hi" }).to_string()))

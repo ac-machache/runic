@@ -1,5 +1,5 @@
 //! Artifact upload/list — bytes live in the [`runic_substrate::ArtifactStore`],
-//! keyed by `(tenant, thread)`. A message references one by id (an
+//! keyed by `(tenant, session)`. A message references one by id (an
 //! `artifact_ref` content block) instead of carrying inline base64, so the
 //! event log stays lean.
 
@@ -20,10 +20,14 @@ use crate::tenant::Tenant;
 /// body is rejected before it's fully buffered.
 pub const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
 
-async fn require_thread(state: &AppState, tenant: &str, thread_id: &str) -> Result<(), ServeError> {
-    if state.thread(tenant, thread_id).meta().await?.is_none() {
-        return Err(ServeError::ThreadNotFound {
-            id: thread_id.to_string(),
+async fn require_session(
+    state: &AppState,
+    tenant: &str,
+    session_id: &str,
+) -> Result<(), ServeError> {
+    if state.session(tenant, session_id).meta().await?.is_none() {
+        return Err(ServeError::SessionNotFound {
+            id: session_id.to_string(),
         });
     }
     Ok(())
@@ -63,15 +67,15 @@ impl From<Artifact> for ArtifactMeta {
     }
 }
 
-/// `POST /threads/:id/artifacts` — store the raw request body. `Content-Type`
+/// `POST /sessions/:id/artifacts` — store the raw request body. `Content-Type`
 /// gives the media type; `x-runic-filename` (optional) is echoed back.
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/artifacts",
+    path = "/sessions/{session_id}/artifacts",
     tag = "artifacts",
     request_body(content = String, description = "Raw artifact bytes (max 25 MiB)", content_type = "application/octet-stream"),
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`"),
         ("Content-Type" = Option<String>, Header, description = "Media type; defaults to application/octet-stream"),
         ("X-Runic-Filename" = Option<String>, Header, description = "Optional filename, echoed back")
@@ -79,13 +83,13 @@ impl From<Artifact> for ArtifactMeta {
     responses(
         (status = 201, description = "Stored", body = UploadedArtifact),
         (status = 400, description = "Empty or oversized body", body = ErrorBody),
-        (status = 404, description = "Unknown thread", body = ErrorBody)
+        (status = 404, description = "Unknown session", body = ErrorBody)
     )
 )]
 pub async fn upload_artifact(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path(thread_id): Path<String>,
+    Path(session_id): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<UploadedArtifact>), ServeError> {
@@ -95,7 +99,7 @@ pub async fn upload_artifact(
     if body.len() > MAX_ARTIFACT_BYTES {
         return Err(ServeError::BadRequest("upload exceeds size limit".into()));
     }
-    require_thread(&state, &tenant, &thread_id).await?;
+    require_session(&state, &tenant, &session_id).await?;
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -113,7 +117,7 @@ pub async fn upload_artifact(
         .artifacts()
         .put(
             &tenant,
-            &thread_id,
+            &session_id,
             content_type,
             ArtifactSource::UserUpload,
             &body,
@@ -122,7 +126,7 @@ pub async fn upload_artifact(
 
     tracing::info!(
         %tenant,
-        %thread_id,
+        %session_id,
         artifact_id = %art.id,
         mime_type = %art.mime_type,
         bytes = art.size,
@@ -140,57 +144,57 @@ pub async fn upload_artifact(
     ))
 }
 
-/// `GET /threads/:id/artifacts` — metadata for every artifact in the thread.
+/// `GET /sessions/:id/artifacts` — metadata for every artifact in the session.
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/artifacts",
+    path = "/sessions/{session_id}/artifacts",
     tag = "artifacts",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
         (status = 200, description = "Artifact metadata", body = [ArtifactMeta]),
-        (status = 404, description = "Unknown thread", body = ErrorBody)
+        (status = 404, description = "Unknown session", body = ErrorBody)
     )
 )]
 pub async fn list_artifacts(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path(thread_id): Path<String>,
+    Path(session_id): Path<String>,
 ) -> Result<Json<Vec<ArtifactMeta>>, ServeError> {
-    require_thread(&state, &tenant, &thread_id).await?;
-    let arts = state.artifacts().list(&tenant, &thread_id).await?;
+    require_session(&state, &tenant, &session_id).await?;
+    let arts = state.artifacts().list(&tenant, &session_id).await?;
     Ok(Json(arts.into_iter().map(ArtifactMeta::from).collect()))
 }
 
-/// `GET /threads/:id/artifacts/:artifact_id` — the raw bytes, served with the
-/// stored media type. The artifact must belong to `(tenant, thread)`.
+/// `GET /sessions/:id/artifacts/:artifact_id` — the raw bytes, served with the
+/// stored media type. The artifact must belong to `(tenant, session)`.
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/artifacts/{artifact_id}",
+    path = "/sessions/{session_id}/artifacts/{artifact_id}",
     tag = "artifacts",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("artifact_id" = String, Path, description = "Artifact id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
         (status = 200, description = "Raw artifact bytes", content_type = "application/octet-stream"),
-        (status = 404, description = "Unknown thread or artifact", body = ErrorBody)
+        (status = 404, description = "Unknown session or artifact", body = ErrorBody)
     )
 )]
 pub async fn download_artifact(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, artifact_id)): Path<(String, String)>,
+    Path((session_id, artifact_id)): Path<(String, String)>,
 ) -> Result<impl axum::response::IntoResponse, ServeError> {
-    require_thread(&state, &tenant, &thread_id).await?;
-    let arts = state.artifacts().list(&tenant, &thread_id).await?;
+    require_session(&state, &tenant, &session_id).await?;
+    let arts = state.artifacts().list(&tenant, &session_id).await?;
     let Some(meta) = arts.into_iter().find(|a| a.id == artifact_id) else {
         return Err(ServeError::ArtifactNotFound {
             id: artifact_id,
-            thread: thread_id,
+            session: session_id,
         });
     };
     let bytes = state.artifacts().get(&meta.id).await?;

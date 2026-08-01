@@ -55,7 +55,7 @@ fn scripted_router(h: &Harness) -> Router {
 }
 
 fn upload_request(
-    thread: &str,
+    session: &str,
     tenant: &str,
     mime: &str,
     filename: &str,
@@ -63,7 +63,7 @@ fn upload_request(
 ) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri(format!("/threads/{thread}/artifacts"))
+        .uri(format!("/sessions/{session}/artifacts"))
         .header("content-type", mime)
         .header("x-runic-tenant", tenant)
         .header("x-runic-filename", filename)
@@ -74,11 +74,11 @@ fn upload_request(
 async fn wait_for_stored_events(
     store: &dyn SessionStore,
     tenant: &str,
-    thread_id: &str,
+    session_id: &str,
     min_events: usize,
 ) -> Vec<runic_substrate::StoredEvent> {
     for _ in 0..50 {
-        let events = store.read(tenant, thread_id).await.unwrap();
+        let events = store.read(tenant, session_id).await.unwrap();
         if events.len() >= min_events {
             return events;
         }
@@ -109,24 +109,24 @@ async fn healthz_returns_ok() {
 }
 
 #[tokio::test]
-async fn create_thread_returns_201_with_generated_id() {
+async fn create_session_returns_201_with_generated_id() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::post_json("/threads", &h.tenant, "{}"))
+        .oneshot(common::post_json("/sessions", &h.tenant, "{}"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body = common::body_json(resp).await;
     assert_eq!(body["tenant"], h.tenant.as_str());
     assert_eq!(body["event_count"], 0);
-    assert!(body["thread_id"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(body["session_id"].as_str().is_some_and(|s| !s.is_empty()));
 }
 
 #[tokio::test]
-async fn create_thread_honors_provided_id() {
+async fn create_session_honors_provided_id() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -135,119 +135,119 @@ async fn create_thread_honors_provided_id() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/threads")
+                .uri("/sessions")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"thread_id":"my-custom-id"}"#))
+                .body(Body::from(r#"{"session_id":"my-custom-id"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body = common::body_json(resp).await;
-    assert_eq!(body["thread_id"], "my-custom-id");
+    assert_eq!(body["session_id"], "my-custom-id");
     assert_eq!(body["tenant"], "default");
 }
 
 #[tokio::test]
-async fn list_threads_starts_empty() {
+async fn list_sessions_starts_empty() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads", &h.tenant))
+        .oneshot(common::get("/sessions", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = common::body_json(resp).await;
-    assert!(body["threads"].as_array().unwrap().is_empty());
+    assert!(body["sessions"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn list_threads_rejects_invalid_cursor() {
+async fn list_sessions_rejects_invalid_cursor() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads?cursor=not-a-cursor", &h.tenant))
+        .oneshot(common::get("/sessions?cursor=not-a-cursor", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
-async fn get_unknown_thread_returns_404() {
+async fn get_unknown_session_returns_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads/never-created", &h.tenant))
+        .oneshot(common::get("/sessions/never-created", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn create_then_get_thread_is_materialized() {
+async fn create_then_get_session_is_materialized() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
 
     let got = app
-        .oneshot(common::get("/threads/t1", &h.tenant))
+        .oneshot(common::get("/sessions/t1", &h.tenant))
         .await
         .unwrap();
     assert_eq!(got.status(), StatusCode::OK);
     let body = common::body_json(got).await;
-    assert_eq!(body["thread_id"], "t1");
+    assert_eq!(body["session_id"], "t1");
     assert_eq!(body["event_count"], 0);
 }
 
 #[tokio::test]
-async fn thread_events_unknown_thread_returns_404() {
+async fn session_events_unknown_session_returns_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads/never-created/events", &h.tenant))
+        .oneshot(common::get("/sessions/never-created/events", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn thread_state_unknown_thread_returns_404() {
+async fn session_state_unknown_session_returns_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads/never-created/state", &h.tenant))
+        .oneshot(common::get("/sessions/never-created/state", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn delete_thread_returns_204() {
+async fn delete_session_returns_204() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::delete("/threads/anything", &h.tenant))
+        .oneshot(common::delete("/sessions/anything", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]
-async fn delete_thread_removes_local_artifact_blobs() {
+async fn delete_session_removes_local_artifact_blobs() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -261,7 +261,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
         )
         .agent("main", common::agent(Arc::new(PanicProvider))),
     );
-    common::create_thread(&app, &h.tenant, "with-artifact").await;
+    common::create_session(&app, &h.tenant, "with-artifact").await;
 
     let resp = app
         .clone()
@@ -282,7 +282,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
     assert!(root.path().join("blobs").join(&id).exists());
 
     let resp = app
-        .oneshot(common::delete("/threads/with-artifact", &h.tenant))
+        .oneshot(common::delete("/sessions/with-artifact", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -298,7 +298,7 @@ async fn delete_thread_removes_local_artifact_blobs() {
 }
 
 #[tokio::test]
-async fn tenant_header_isolates_thread_listings() {
+async fn tenant_header_isolates_session_listings() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -306,21 +306,21 @@ async fn tenant_header_isolates_thread_listings() {
     let alice = format!("{}-alice", h.tenant);
     let bob = format!("{}-bob", h.tenant);
 
-    common::create_thread(&app, &alice, "alice-thread").await;
-    common::create_thread(&app, &bob, "bob-thread").await;
+    common::create_session(&app, &alice, "alice-session").await;
+    common::create_session(&app, &bob, "bob-session").await;
 
-    let resp = app.oneshot(common::get("/threads", &bob)).await.unwrap();
+    let resp = app.oneshot(common::get("/sessions", &bob)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = common::body_json(resp).await;
-    let ids: Vec<&str> = body["threads"]
+    let ids: Vec<&str> = body["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|v| v["thread_id"].as_str().unwrap())
+        .map(|v| v["session_id"].as_str().unwrap())
         .collect();
     assert!(
-        !ids.contains(&"alice-thread"),
-        "bob should not see alice's thread; got {ids:?}"
+        !ids.contains(&"alice-session"),
+        "bob should not see alice's session; got {ids:?}"
     );
 }
 
@@ -332,7 +332,7 @@ async fn resuming_an_unknown_run_is_not_found() {
     let app = crud_router(&h);
     let resp = app
         .oneshot(common::post_json(
-            "/threads/t1/runs/missing-run/resume",
+            "/sessions/t1/runs/missing-run/resume",
             &h.tenant,
             r#"{"call_id":"c1","answer":"yes"}"#,
         ))
@@ -347,7 +347,7 @@ async fn resuming_a_run_that_is_not_parked_is_bad_request() {
         return;
     };
     let app = scripted_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
 
     let resp = app
         .clone()
@@ -362,7 +362,7 @@ async fn resuming_a_run_that_is_not_parked_is_bad_request() {
 
     let resp = app
         .oneshot(common::post_json(
-            &format!("/threads/t1/runs/{run_id}/resume"),
+            &format!("/sessions/t1/runs/{run_id}/resume"),
             &h.tenant,
             r#"{"call_id":"c1","answer":"yes"}"#,
         ))
@@ -373,7 +373,7 @@ async fn resuming_a_run_that_is_not_parked_is_bad_request() {
 }
 
 #[tokio::test]
-async fn sequential_runs_on_same_thread_both_succeed() {
+async fn sequential_runs_on_same_session_both_succeed() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -396,7 +396,7 @@ async fn sequential_runs_on_same_thread_both_succeed() {
 }
 
 #[tokio::test]
-async fn run_persists_events_for_thread_history() {
+async fn run_persists_events_for_session_history() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -405,7 +405,7 @@ async fn run_persists_events_for_thread_history() {
     let resp = app
         .clone()
         .oneshot(common::wait_request(
-            "persisted-thread",
+            "persisted-session",
             &h.tenant,
             "remember me",
         ))
@@ -414,7 +414,8 @@ async fn run_persists_events_for_thread_history() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(common::body_json(resp).await["text"], "pong");
 
-    let events = wait_for_stored_events(h.store().as_ref(), &h.tenant, "persisted-thread", 4).await;
+    let events =
+        wait_for_stored_events(h.store().as_ref(), &h.tenant, "persisted-session", 4).await;
     assert!(events.iter().any(|stored| {
         matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("remember me"))
@@ -429,7 +430,7 @@ async fn run_persists_events_for_thread_history() {
     }));
 
     let resp = app
-        .oneshot(common::get("/threads/persisted-thread/events", &h.tenant))
+        .oneshot(common::get("/sessions/persisted-session/events", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);

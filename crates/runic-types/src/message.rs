@@ -433,14 +433,14 @@ impl TokenUsage {
 ///
 /// These control how the response is delivered back to the user/channel:
 /// - `reply_to`: reply to a specific message ID
-/// - `current_thread`: reply in the current thread
+/// - `current_session`: reply in the current session
 /// - `silent`: suppress the response entirely
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplyDirectives {
     /// Reply to a specific message ID.
     pub reply_to: Option<String>,
-    /// Reply in the current thread.
-    pub current_thread: bool,
+    /// Reply in the current session.
+    pub current_session: bool,
     /// Suppress the response from being sent.
     pub silent: bool,
 }

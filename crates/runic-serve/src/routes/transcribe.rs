@@ -1,5 +1,5 @@
 //! `POST /transcribe` — audio bytes in, text out. A preprocessing step: the
-//! audio never enters a thread or the event log; the client sends the returned
+//! audio never enters a session or the event log; the client sends the returned
 //! text as an ordinary message.
 
 use axum::Json;

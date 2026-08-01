@@ -25,7 +25,7 @@ use utoipa::OpenApi;
 use sqlx::PgPool;
 
 use crate::hosts::{AgentRegistry, HostedAgents};
-use crate::routes::{agents, artifacts, health, runs, threads, transcribe};
+use crate::routes::{agents, artifacts, health, runs, sessions, transcribe};
 use crate::store::Runs;
 
 #[derive(Clone)]
@@ -38,6 +38,7 @@ pub struct AppState {
     pub agents: Arc<AgentRegistry>,
     pub completions: crate::completion::Completions,
     pub events: Arc<dyn crate::stream::RunEvents>,
+    pub hooks: Arc<crate::hook::HookRegistry>,
 }
 
 impl AppState {
@@ -53,10 +54,13 @@ impl AppState {
         self.blobs.store()
     }
 
-    pub fn thread(&self, tenant: &str, thread_id: &str) -> runic::Session {
-        runic::session((tenant, thread_id))
+    pub fn session(&self, tenant: &str, session_id: &str) -> runic::Session {
+        self.scratch(tenant, session_id)
             .store(self.sessions.clone())
-            .artifacts(self.blobs.clone())
+    }
+
+    pub fn scratch(&self, tenant: &str, session_id: &str) -> runic::Session {
+        runic::session((tenant, session_id)).artifacts(self.blobs.clone())
     }
 }
 
@@ -68,6 +72,7 @@ pub struct ServeConfig {
     pub agents: HashMap<String, HostedAgents>,
     pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
     pub events: Option<Arc<dyn crate::stream::RunEvents>>,
+    pub hooks: crate::hook::HookRegistry,
 }
 
 impl ServeConfig {
@@ -80,11 +85,17 @@ impl ServeConfig {
             agents: HashMap::new(),
             identity: None,
             events: None,
+            hooks: crate::hook::HookRegistry::default(),
         }
     }
 
     pub fn events(mut self, events: Arc<dyn crate::stream::RunEvents>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn hook(mut self, name: impl Into<String>, hook: impl crate::hook::RunHook) -> Self {
+        self.hooks.insert(name, Arc::new(hook));
         self
     }
 
@@ -132,6 +143,7 @@ fn app_state(config: ServeConfig) -> (AppState, Option<Arc<dyn crate::auth::Iden
         events: config
             .events
             .unwrap_or_else(|| crate::stream::LocalEvents::new()),
+        hooks: Arc::new(config.hooks),
     };
     (state, config.identity)
 }
@@ -148,60 +160,72 @@ fn routes(state: AppState) -> Router {
         .route("/agents", get(agents::list_agents))
         .route("/agents/{name}", get(agents::agent_overview))
         .route(
-            "/threads",
-            post(threads::create_thread).get(threads::list_threads),
+            "/sessions",
+            post(sessions::create_session).get(sessions::list_sessions),
         )
         .route(
-            "/threads/{thread_id}",
-            get(threads::get_thread)
-                .patch(threads::update_thread)
-                .delete(threads::delete_thread),
+            "/sessions/{session_id}",
+            get(sessions::get_session)
+                .patch(sessions::update_session)
+                .delete(sessions::delete_session),
         )
         .route(
-            "/threads/{thread_id}/children",
-            get(threads::list_thread_children),
+            "/sessions/{session_id}/children",
+            get(sessions::list_session_children),
         )
-        .route("/threads/{thread_id}/events", get(threads::thread_events))
-        .route("/threads/{thread_id}/state", get(threads::thread_state))
         .route(
-            "/threads/{thread_id}/artifacts",
+            "/sessions/{session_id}/events",
+            get(sessions::session_events),
+        )
+        .route("/sessions/{session_id}/state", get(sessions::session_state))
+        .route(
+            "/sessions/{session_id}/artifacts",
             post(artifacts::upload_artifact)
                 .get(artifacts::list_artifacts)
                 .layer(DefaultBodyLimit::max(artifacts::MAX_ARTIFACT_BYTES)),
         )
         .route(
-            "/threads/{thread_id}/artifacts/{artifact_id}",
+            "/sessions/{session_id}/artifacts/{artifact_id}",
             get(artifacts::download_artifact),
         )
         .route(
             "/transcribe",
             post(transcribe::transcribe).layer(DefaultBodyLimit::max(transcribe::MAX_AUDIO_BYTES)),
         )
-        .route("/threads/{thread_id}/runs", get(runs::list_thread_runs))
+        .route("/runs/wait", post(runs::loose::wait_run))
+        .route("/runs/forget", post(runs::loose::forget_run))
+        .route("/runs/{run_id}", get(runs::loose::run_outcome))
+        .route("/sessions/{session_id}/runs", get(runs::list_session_runs))
         .route(
-            "/threads/{thread_id}/runs/{run_id}/timeline",
+            "/sessions/{session_id}/runs/{run_id}/timeline",
             get(runs::run_timeline),
         )
-        .route("/threads/{thread_id}/runs/wait", post(runs::wait::wait_run))
         .route(
-            "/threads/{thread_id}/runs/stream",
+            "/sessions/{session_id}/runs/wait",
+            post(runs::wait::wait_run),
+        )
+        .route(
+            "/sessions/{session_id}/runs/stream",
             post(runs::stream::open_stream),
         )
         .route(
-            "/threads/{thread_id}/runs/{run_id}/stream",
+            "/sessions/{session_id}/runs/{run_id}/stream",
             get(runs::stream::resume_stream),
         )
-        .route("/threads/{thread_id}/runs/{run_id}", get(runs::run_status))
         .route(
-            "/threads/{thread_id}/runs/{run_id}/cancel",
+            "/sessions/{session_id}/runs/{run_id}",
+            get(runs::run_status),
+        )
+        .route(
+            "/sessions/{session_id}/runs/{run_id}/cancel",
             post(runs::control::cancel_run),
         )
         .route(
-            "/threads/{thread_id}/runs/{run_id}/steer",
+            "/sessions/{session_id}/runs/{run_id}/steer",
             post(runs::control::steer_run),
         )
         .route(
-            "/threads/{thread_id}/runs/{run_id}/resume",
+            "/sessions/{session_id}/runs/{run_id}/resume",
             post(runs::control::resume_run),
         )
         .with_state(state);

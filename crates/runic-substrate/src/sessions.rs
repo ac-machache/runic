@@ -98,7 +98,7 @@ pub(crate) fn summary_delta(event: &SessionEvent) -> SummaryDelta {
     }
 }
 
-/// Which sessions a listing covers: top-level threads (the default), the
+/// Which sessions a listing covers: top-level sessions (the default), the
 /// children of one parent, or everything.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SessionScope {

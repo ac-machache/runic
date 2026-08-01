@@ -92,7 +92,7 @@ pub struct AgentState {
     pub system_prompt: String,
 
     #[serde(default)]
-    stats: crate::stats::ThreadStats,
+    stats: crate::stats::SessionStats,
 
     #[serde(default)]
     tasks: HashMap<String, crate::tasks::TaskRecord>,
@@ -155,7 +155,7 @@ impl AgentState {
             session_id: session_id.into(),
             label: None,
             system_prompt: system_prompt.into(),
-            stats: crate::stats::ThreadStats::default(),
+            stats: crate::stats::SessionStats::default(),
             tasks: HashMap::new(),
             data: serde_json::Map::new(),
             current_run_id: None,
@@ -333,7 +333,7 @@ impl AgentState {
         &self.data
     }
 
-    pub fn stats(&self) -> &crate::stats::ThreadStats {
+    pub fn stats(&self) -> &crate::stats::SessionStats {
         &self.stats
     }
 
@@ -376,7 +376,7 @@ impl AgentState {
 pub trait Reader {
     fn messages(&self) -> &[Message];
     fn last_assistant_text(&self) -> Option<String>;
-    fn stats(&self) -> &crate::stats::ThreadStats;
+    fn stats(&self) -> &crate::stats::SessionStats;
     fn tasks(&self) -> &HashMap<String, crate::tasks::TaskRecord>;
     fn open_tasks(&self) -> Vec<crate::tasks::TaskRecord>;
     fn data(&self) -> &serde_json::Map<String, serde_json::Value>;
@@ -401,7 +401,7 @@ impl Reader for AgentState {
         }
         None
     }
-    fn stats(&self) -> &crate::stats::ThreadStats {
+    fn stats(&self) -> &crate::stats::SessionStats {
         &self.stats
     }
     fn tasks(&self) -> &HashMap<String, crate::tasks::TaskRecord> {

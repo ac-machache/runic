@@ -19,6 +19,8 @@ pub struct RunMessageRequest {
     #[serde(default)]
     #[schema(value_type = Option<Object>)]
     pub context: Option<serde_json::Value>,
+    #[serde(default)]
+    pub hook: Option<String>,
 }
 
 impl RunMessageRequest {
@@ -49,7 +51,7 @@ fn decode(data: &str) -> Result<Vec<u8>, ServeError> {
 pub async fn input_from_message(
     state: &AppState,
     tenant: &str,
-    thread_id: &str,
+    session_id: &str,
     msg: Message,
 ) -> Result<Input, ServeError> {
     let blocks = match msg.content {
@@ -61,7 +63,7 @@ pub async fn input_from_message(
         .iter()
         .any(|block| matches!(block, ContentBlock::ArtifactRef { .. }));
     let owned = match has_ref {
-        true => state.artifacts().list(tenant, thread_id).await?,
+        true => state.artifacts().list(tenant, session_id).await?,
         false => Vec::new(),
     };
 
@@ -91,7 +93,7 @@ pub async fn input_from_message(
             ContentBlock::ArtifactRef { id, filename, .. } => {
                 let Some(artifact) = owned.iter().find(|owned| owned.id == id) else {
                     return Err(ServeError::BadRequest(
-                        "artifact_ref does not belong to this thread".into(),
+                        "artifact_ref does not belong to this session".into(),
                     ));
                 };
                 attachments.push(Attachment::Stored {

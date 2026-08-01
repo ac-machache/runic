@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use super::types::{ClaimedRun, RunRecord, RunSignals, RunSpec, RunStatus};
+use super::types::{Cancelled, ClaimedRun, RunRecord, RunSignals, RunSpec, RunStatus};
 
 macro_rules! run_columns {
     () => {
-        "run_id, tenant, session_id, agent, status, error, to_cancel, \
+        "run_id, tenant, session_id, agent, status, error, output, to_cancel, \
          attempt, max_attempts, created_at, started_at, finished_at, updated_at"
     };
 }
@@ -73,6 +73,7 @@ fn row_to_run(row: sqlx::postgres::PgRow) -> Result<RunRecord, sqlx::Error> {
         status: RunStatus::parse(&status)
             .ok_or_else(|| decode(format!("unknown run status {status:?}")))?,
         error: row.try_get("error")?,
+        output: row.try_get("output")?,
         to_cancel: row.try_get("to_cancel")?,
         attempt: row.try_get("attempt")?,
         max_attempts: row.try_get("max_attempts")?,
@@ -110,6 +111,7 @@ fn row_to_claim(row: sqlx::postgres::PgRow) -> Result<ClaimedRun, sqlx::Error> {
         to_cancel: row.try_get("to_cancel")?,
         steering: steering_texts(row.try_get("steering")?),
         answer: row.try_get("answer")?,
+        hook: row.try_get("hook")?,
     })
 }
 
@@ -130,13 +132,14 @@ impl Runs {
 
     pub async fn enqueue(&self, spec: &RunSpec) -> Result<(), sqlx::Error> {
         sqlx::query(
-            "WITH thread AS (
+            "WITH session AS (
                  INSERT INTO runic.sessions (tenant, session_id)
-                 VALUES ($2, $3) ON CONFLICT DO NOTHING
+                 SELECT $2, $3 WHERE $3 IS NOT NULL
+                 ON CONFLICT DO NOTHING
              )
              INSERT INTO runic.runs
-                 (run_id, tenant, session_id, agent, input, context, execute_at)
-             VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()))",
+                 (run_id, tenant, session_id, agent, input, context, hook, execute_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()))",
         )
         .bind(&spec.run_id)
         .bind(&spec.tenant)
@@ -144,6 +147,7 @@ impl Runs {
         .bind(&spec.agent)
         .bind(&spec.input)
         .bind(&spec.context)
+        .bind(&spec.hook)
         .bind(spec.execute_at)
         .execute(&self.pool)
         .await?;
@@ -176,7 +180,8 @@ impl Runs {
                              < (due.created_at, due.run_id))
              ),
              winners AS (
-                 SELECT target.run_id, target.to_cancel, target.steering, target.answer
+                 SELECT target.run_id, target.to_cancel, target.steering, target.answer,
+                        target.hook
                  FROM ready
                  JOIN runic.runs target ON target.run_id = ready.run_id
                  WHERE target.status = 'idle'
@@ -196,7 +201,8 @@ impl Runs {
                            runic.runs.session_id, runic.runs.agent,
                            runic.runs.input, runic.runs.context,
                            runic.runs.attempt, runic.runs.max_attempts,
-                           winners.to_cancel, winners.steering, winners.answer
+                           winners.to_cancel, winners.steering, winners.answer,
+                           winners.hook
              ),
              sleep_until AS (
                  SELECT min(execute_at) AS next_at
@@ -204,13 +210,13 @@ impl Runs {
                  WHERE status = 'idle' AND execute_at > now()
              )
              SELECT run_id, tenant, session_id, agent, input, context,
-                    attempt, max_attempts, to_cancel, steering, answer,
+                    attempt, max_attempts, to_cancel, steering, answer, hook,
                     NULL::timestamptz AS next_at
              FROM claimed
              UNION ALL
              SELECT NULL::text, NULL::text, NULL::text, NULL::text,
                     NULL::jsonb, NULL::jsonb, NULL::int, NULL::int,
-                    NULL::boolean, NULL::jsonb, NULL::jsonb,
+                    NULL::boolean, NULL::jsonb, NULL::jsonb, NULL::text,
                     sleep_until.next_at
              FROM sleep_until
              WHERE NOT EXISTS (SELECT 1 FROM claimed)",
@@ -297,11 +303,12 @@ impl Runs {
         run_id: &str,
         status: RunStatus,
         error: Option<&str>,
+        output: Option<&serde_json::Value>,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE runic.runs
-             SET status = $2, error = $3, updated_at = now(),
-                 worker_id = NULL, alive_at = NULL,
+             SET status = $2, error = $3, output = COALESCE($5, output),
+                 updated_at = now(), worker_id = NULL, alive_at = NULL,
                  finished_at = CASE WHEN $4 THEN now() ELSE finished_at END
              WHERE run_id = $1",
         )
@@ -309,6 +316,7 @@ impl Runs {
         .bind(status.as_str())
         .bind(error)
         .bind(status.is_terminal())
+        .bind(output)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)
@@ -415,7 +423,11 @@ impl Runs {
         }))
     }
 
-    pub async fn request_cancel(&self, tenant: &str, run_id: &str) -> Result<bool, sqlx::Error> {
+    pub async fn request_cancel(
+        &self,
+        tenant: &str,
+        run_id: &str,
+    ) -> Result<Cancelled, sqlx::Error> {
         let dropped = sqlx::query(
             "WITH dropped AS (
                  UPDATE runic.runs
@@ -431,7 +443,7 @@ impl Runs {
         .fetch_optional(&self.pool)
         .await?;
         if dropped.is_some() {
-            return Ok(true);
+            return Ok(Cancelled::Dropped);
         }
         let flagged = sqlx::query(
             "WITH flagged AS (
@@ -446,7 +458,10 @@ impl Runs {
         .bind(SIGNAL_CHANNEL)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(flagged.is_some())
+        Ok(match flagged.is_some() {
+            true => Cancelled::Flagged,
+            false => Cancelled::Gone,
+        })
     }
 
     pub async fn push_steering(

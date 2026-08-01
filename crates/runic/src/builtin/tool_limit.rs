@@ -11,16 +11,16 @@ use runic_types::ToolCall;
 struct Counts {
     run_tool: HashMap<String, u32>,
     run_total: u32,
-    thread_tool: HashMap<String, u64>,
-    thread_total: u64,
+    session_tool: HashMap<String, u64>,
+    session_total: u64,
 }
 
 #[hook(kind = write, name = "tool-call-limit", at = [before_agent, before_tool])]
 pub struct ToolCallLimit {
     per_run: HashMap<String, u32>,
-    per_thread: HashMap<String, u32>,
+    per_session: HashMap<String, u32>,
     total_per_run: Option<u32>,
-    total_per_thread: Option<u32>,
+    total_per_session: Option<u32>,
     messages: HashMap<String, String>,
     counts: Mutex<Counts>,
 }
@@ -35,9 +35,9 @@ impl ToolCallLimit {
     pub fn new() -> Self {
         Self {
             per_run: HashMap::new(),
-            per_thread: HashMap::new(),
+            per_session: HashMap::new(),
             total_per_run: None,
-            total_per_thread: None,
+            total_per_session: None,
             messages: HashMap::new(),
             counts: Mutex::new(Counts::default()),
         }
@@ -58,8 +58,8 @@ impl ToolCallLimit {
         self
     }
 
-    pub fn per_thread(mut self, tool: impl Into<String>, max_calls: u32) -> Self {
-        self.per_thread.insert(tool.into(), max_calls);
+    pub fn per_session(mut self, tool: impl Into<String>, max_calls: u32) -> Self {
+        self.per_session.insert(tool.into(), max_calls);
         self
     }
 
@@ -68,8 +68,8 @@ impl ToolCallLimit {
         self
     }
 
-    pub fn total_per_thread(mut self, max_calls: u32) -> Self {
-        self.total_per_thread = Some(max_calls);
+    pub fn total_per_session(mut self, max_calls: u32) -> Self {
+        self.total_per_session = Some(max_calls);
         self
     }
 
@@ -77,13 +77,13 @@ impl ToolCallLimit {
         *self.counts.lock().unwrap() = Counts {
             run_tool: HashMap::new(),
             run_total: 0,
-            thread_tool: state
+            session_tool: state
                 .stats()
                 .tools
                 .iter()
                 .map(|(name, stat)| (name.clone(), stat.calls))
                 .collect(),
-            thread_total: state.stats().total_tool_calls,
+            session_total: state.stats().total_tool_calls,
         };
         HookOutcome::Noop
     }
@@ -91,14 +91,14 @@ impl ToolCallLimit {
     async fn before_tool(&self, _state: &mut AgentState, call: &mut ToolCall) -> HookOutcome {
         let mut counts = self.counts.lock().unwrap();
 
-        if let Some(&max) = self.per_thread.get(&call.name) {
+        if let Some(&max) = self.per_session.get(&call.name) {
             let max = max as u64;
-            let used = counts.thread_tool.get(&call.name).copied().unwrap_or(0);
+            let used = counts.session_tool.get(&call.name).copied().unwrap_or(0);
             if used >= max {
                 return self.block(
                     &call.name,
                     format!(
-                        "tool call limit reached for {} ({used}/{max} this thread)",
+                        "tool call limit reached for {} ({used}/{max} this session)",
                         call.name
                     ),
                 );
@@ -116,12 +116,12 @@ impl ToolCallLimit {
                 );
             }
         }
-        if let Some(max) = self.total_per_thread
-            && counts.thread_total >= max as u64
+        if let Some(max) = self.total_per_session
+            && counts.session_total >= max as u64
         {
             return HookOutcome::SubstituteToolResult(ToolResult::error(format!(
-                "total tool call limit reached ({}/{max} this thread)",
-                counts.thread_total
+                "total tool call limit reached ({}/{max} this session)",
+                counts.session_total
             )));
         }
         if let Some(max) = self.total_per_run
@@ -135,8 +135,8 @@ impl ToolCallLimit {
 
         *counts.run_tool.entry(call.name.clone()).or_insert(0) += 1;
         counts.run_total += 1;
-        *counts.thread_tool.entry(call.name.clone()).or_insert(0) += 1;
-        counts.thread_total += 1;
+        *counts.session_tool.entry(call.name.clone()).or_insert(0) += 1;
+        counts.session_total += 1;
         HookOutcome::Noop
     }
 }
@@ -211,8 +211,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_thread_persists_across_runs() {
-        let hook = ToolCallLimit::new().per_thread("payment", 2);
+    async fn per_session_persists_across_runs() {
+        let hook = ToolCallLimit::new().per_session("payment", 2);
         let mut s = state();
 
         hook.before_agent(&mut s).await;
@@ -223,14 +223,14 @@ mod tests {
 
         hook.before_agent(&mut s).await;
         let blocked = hook.before_tool(&mut s, &mut call("payment")).await;
-        assert!(is_blocked(&blocked, "this thread"));
+        assert!(is_blocked(&blocked, "this session"));
         assert!(allowed(&hook, &mut s, "search").await);
     }
 
     #[tokio::test]
     async fn custom_message_replaces_the_default() {
         let hook = ToolCallLimit::new()
-            .per_thread("payment", 1)
+            .per_session("payment", 1)
             .message("payment", "No more charges — ask the user to confirm.");
         let mut s = state();
         s.emit(tool_result_event("r1", "payment"));
@@ -246,8 +246,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_thread_survives_compaction() {
-        let hook = ToolCallLimit::new().per_thread("payment", 2);
+    async fn per_session_survives_compaction() {
+        let hook = ToolCallLimit::new().per_session("payment", 2);
         let mut s = state();
         s.emit(tool_result_event("r1", "payment"));
         s.emit(tool_result_event("r1", "payment"));
@@ -265,19 +265,19 @@ mod tests {
 
         hook.before_agent(&mut s).await;
         let blocked = hook.before_tool(&mut s, &mut call("payment")).await;
-        assert!(is_blocked(&blocked, "this thread"));
+        assert!(is_blocked(&blocked, "this session"));
     }
 
     #[tokio::test]
-    async fn per_thread_survives_an_agent_rebuild() {
-        let hook = ToolCallLimit::new().per_thread("payment", 2);
+    async fn per_session_survives_an_agent_rebuild() {
+        let hook = ToolCallLimit::new().per_session("payment", 2);
         let mut replayed = state();
         replayed.emit(tool_result_event("r1", "payment"));
         replayed.emit(tool_result_event("r2", "payment"));
 
         hook.before_agent(&mut replayed).await;
         let blocked = hook.before_tool(&mut replayed, &mut call("payment")).await;
-        assert!(is_blocked(&blocked, "this thread"));
+        assert!(is_blocked(&blocked, "this session"));
     }
 
     #[tokio::test]
@@ -292,8 +292,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn totals_cap_across_tools_per_run_and_per_thread() {
-        let hook = ToolCallLimit::new().total_per_run(2).total_per_thread(3);
+    async fn totals_cap_across_tools_per_run_and_per_session() {
+        let hook = ToolCallLimit::new().total_per_run(2).total_per_session(3);
         let mut s = state();
 
         hook.before_agent(&mut s).await;
@@ -310,7 +310,7 @@ mod tests {
 
         hook.before_agent(&mut s).await;
         let blocked = hook.before_tool(&mut s, &mut call("d")).await;
-        assert!(is_blocked(&blocked, "this thread"));
+        assert!(is_blocked(&blocked, "this session"));
     }
 
     #[tokio::test]

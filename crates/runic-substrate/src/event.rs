@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use runic_state::{
     AgentEvent, AuditStamp, DelegationMode, DelegationStatus, HookLifecycle, PersistenceStatus,
-    RunEndStatus, RunOutcome, TaskRecord, TaskStatus, ThreadStats, ToolStatus,
+    RunEndStatus, RunOutcome, SessionStats, TaskRecord, TaskStatus, ToolStatus,
 };
 use runic_types::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,7 @@ pub enum SessionEvent {
         system_prompt: String,
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        stats: Option<Box<ThreadStats>>,
+        stats: Option<Box<SessionStats>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         open_tasks: Option<Vec<TaskRecord>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

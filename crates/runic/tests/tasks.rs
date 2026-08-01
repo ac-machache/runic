@@ -10,7 +10,7 @@ use runic::subagent::{DelegateTool, Subagent};
 use runic_agent::{Runner, TasksSnapshot};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_state::AgentEvent;
-use runic_state::{TaskStatus, ThreadStats};
+use runic_state::{SessionStats, TaskStatus};
 use runic_tool::{Tool, ToolContext};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage, ToolCall};
 
@@ -149,7 +149,7 @@ async fn background_delegation_lands_in_state_stats_and_the_next_model_call() {
         Some(&serde_json::json!(true))
     );
 
-    let stats: &ThreadStats = agent.state().stats();
+    let stats: &SessionStats = agent.state().stats();
     assert_eq!(stats.tasks_spawned, 1);
     assert_eq!(stats.tasks_finished, 1);
     assert_eq!(stats.tasks_failed, 0);
@@ -226,7 +226,7 @@ async fn background_delegation_emits_a_navigable_edge() {
     assert_eq!(finished.1, runic_state::DelegationStatus::Ok);
     assert_eq!(finished.2, "t1");
 
-    let stats: &ThreadStats = agent.state().stats();
+    let stats: &SessionStats = agent.state().stats();
     assert_eq!(stats.delegations, 1);
 }
 

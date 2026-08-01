@@ -167,7 +167,7 @@ pub enum AgentEvent {
         messages: Vec<Message>,
         system_prompt: String,
         reason: String,
-        stats: Option<Box<crate::stats::ThreadStats>>,
+        stats: Option<Box<crate::stats::SessionStats>>,
         open_tasks: Option<Vec<crate::tasks::TaskRecord>>,
         data: Option<serde_json::Map<String, serde_json::Value>>,
         at: DateTime<Utc>,

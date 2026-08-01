@@ -22,7 +22,7 @@ pub use state::{
     AgentState, Deferral, Emitter, InvalidStateKey, MAX_STATE_KEY_BYTES, Reader, RunTimeContext,
     RunTotals, new_run_id, validate_state_key,
 };
-pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, ThreadStats, ToolStat};
+pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, SessionStats, ToolStat};
 pub use subsession::{SubRun, SubSession};
 pub use tasks::{TaskRecord, TaskStatus};
 

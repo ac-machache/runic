@@ -20,26 +20,26 @@ pub struct ErrorBody {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
-    #[error("thread {id:?} not found")]
-    ThreadNotFound { id: String },
+    #[error("session {id:?} not found")]
+    SessionNotFound { id: String },
 
-    #[error("run {id:?} not found on thread {thread:?}")]
-    RunNotFound { id: String, thread: String },
+    #[error("run {id:?} not found on session {session:?}")]
+    RunNotFound { id: String, session: String },
 
-    #[error("no run in flight on thread {thread_id:?}")]
-    NoRunInFlight { thread_id: String },
+    #[error("no run in flight on session {session_id:?}")]
+    NoRunInFlight { session_id: String },
 
-    #[error("a run is active on thread {thread_id:?}; cancel it before deleting")]
-    ThreadBusy { thread_id: String },
+    #[error("a run is active on session {session_id:?}; cancel it before deleting")]
+    SessionBusy { session_id: String },
 
     #[error("agent {name:?} not found")]
     AgentNotFound { name: String },
 
-    #[error("artifact {id:?} not found on thread {thread:?}")]
-    ArtifactNotFound { id: String, thread: String },
+    #[error("artifact {id:?} not found on session {session:?}")]
+    ArtifactNotFound { id: String, session: String },
 
-    #[error("persistence degraded on thread {thread:?} ({backlog} events unflushed)")]
-    PersistenceDegraded { thread: String, backlog: u64 },
+    #[error("persistence degraded on session {session:?} ({backlog} events unflushed)")]
+    PersistenceDegraded { session: String, backlog: u64 },
 
     #[error("this instance is at its concurrent run limit ({active} active)")]
     TooBusy { active: usize },
@@ -75,11 +75,11 @@ impl From<runic_substrate::Error> for ServeError {
 impl IntoResponse for ServeError {
     fn into_response(self) -> Response {
         let (status, kind) = match &self {
-            Self::ThreadNotFound { .. }
+            Self::SessionNotFound { .. }
             | Self::RunNotFound { .. }
             | Self::AgentNotFound { .. }
             | Self::ArtifactNotFound { .. } => (StatusCode::NOT_FOUND, "not_found"),
-            Self::NoRunInFlight { .. } | Self::ThreadBusy { .. } => {
+            Self::NoRunInFlight { .. } | Self::SessionBusy { .. } => {
                 (StatusCode::CONFLICT, "conflict")
             }
             Self::PersistenceDegraded { .. } => (StatusCode::SERVICE_UNAVAILABLE, "degraded"),
@@ -104,12 +104,12 @@ impl IntoResponse for ServeError {
             | Self::TooBusy { .. } => {
                 tracing::warn!(kind, error = %self, "request failed")
             }
-            Self::ThreadNotFound { .. }
+            Self::SessionNotFound { .. }
             | Self::RunNotFound { .. }
             | Self::AgentNotFound { .. }
             | Self::ArtifactNotFound { .. }
             | Self::NoRunInFlight { .. }
-            | Self::ThreadBusy { .. }
+            | Self::SessionBusy { .. }
             | Self::BadRequest(_) => {}
         }
 

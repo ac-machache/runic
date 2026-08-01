@@ -42,11 +42,11 @@ fn resume_from(headers: &HeaderMap, run_id: &str) -> Result<u64, Ended> {
 
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/runs/stream",
+    path = "/sessions/{session_id}/runs/stream",
     tag = "runs",
     request_body = RunMessageRequest,
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
@@ -58,7 +58,7 @@ fn resume_from(headers: &HeaderMap, run_id: &str) -> Result<u64, Ended> {
 pub async fn open_stream(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path(thread_id): Path<String>,
+    Path(session_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Response, ServeError> {
     let agent = state.agents.resolve_agent(req.agent.as_deref())?;
@@ -68,7 +68,8 @@ pub async fn open_stream(
     let run_id = runic_state::new_run_id();
     let payload = serde_json::to_value(&message)
         .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
-    let spec = RunSpec::new(&tenant, &thread_id, &run_id, &agent)
+    let spec = RunSpec::new(&tenant, &run_id, &agent)
+        .session(&session_id)
         .input(payload)
         .context(context);
 
@@ -78,22 +79,22 @@ pub async fn open_stream(
         .await
         .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
 
-    tracing::info!(%tenant, %thread_id, %agent, %run_id, "stream run queued");
+    tracing::info!(%tenant, %session_id, %agent, %run_id, "stream run queued");
 
     let opening = WireEvent::RunStart {
         run_id: run_id.clone(),
         agent: Some(agent),
         at: None,
     };
-    Ok(follow(state, tenant, thread_id, run_id, 0, Some(opening)).into_response())
+    Ok(follow(state, tenant, run_id, 0, Some(opening)).into_response())
 }
 
 #[utoipa::path(
     get,
-    path = "/threads/{thread_id}/runs/{run_id}/stream",
+    path = "/sessions/{session_id}/runs/{run_id}/stream",
     tag = "runs",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("Last-Event-ID" = Option<String>, Header, description = "Resume cursor from a dropped stream"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
@@ -107,7 +108,7 @@ pub async fn open_stream(
 pub async fn resume_stream(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ServeError> {
     let Ok(after) = resume_from(&headers, &run_id) else {
@@ -119,24 +120,23 @@ pub async fn resume_stream(
         .get(&tenant, &run_id)
         .await
         .map_err(|error| ServeError::Store(error.to_string()))?
-        .filter(|record| record.session_id == thread_id)
+        .filter(|record| record.session_id.as_deref() == Some(session_id.as_str()))
         .ok_or(ServeError::RunNotFound {
             id: run_id.clone(),
-            thread: thread_id.clone(),
+            session: session_id.clone(),
         })?;
 
     if record.status.is_terminal() || record.status == RunStatus::Waiting {
-        let closing = finale(&state, &tenant, &thread_id, &run_id).await;
+        let closing = finale(&state, &tenant, &run_id).await;
         return Ok(once(closing, &run_id).into_response());
     }
 
-    Ok(follow(state, tenant, thread_id, run_id, after, None).into_response())
+    Ok(follow(state, tenant, run_id, after, None).into_response())
 }
 
 fn follow(
     state: AppState,
     tenant: String,
-    thread_id: String,
     run_id: String,
     after: u64,
     opening: Option<WireEvent>,
@@ -149,7 +149,7 @@ fn follow(
         loop {
             let replay = state.events.since(&run_id, cursor).await;
             if replay.gap {
-                yield frame(finale(&state, &tenant, &thread_id, &run_id).await, &run_id);
+                yield frame(finale(&state, &tenant, &run_id).await, &run_id);
                 break;
             }
             for (seq, event) in replay.events {
@@ -157,7 +157,7 @@ fn follow(
                 yield Ok(sse(&event, &format!("{run_id}:{seq}")));
             }
             if replay.closed {
-                yield frame(finale(&state, &tenant, &thread_id, &run_id).await, &run_id);
+                yield frame(finale(&state, &tenant, &run_id).await, &run_id);
                 break;
             }
         }
@@ -165,13 +165,8 @@ fn follow(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEPALIVE_EVERY))
 }
 
-async fn finale(
-    state: &AppState,
-    tenant: &str,
-    thread_id: &str,
-    run_id: &str,
-) -> Result<WireEvent, ServeError> {
-    let answer = collect(state, tenant, thread_id, run_id).await?;
+async fn finale(state: &AppState, tenant: &str, run_id: &str) -> Result<WireEvent, ServeError> {
+    let answer = collect(state, tenant, run_id).await?;
     Ok(WireEvent::Done {
         total_turns: Some(answer.total_turns),
         stop_reason: answer.stop_reason,

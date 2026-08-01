@@ -99,12 +99,12 @@ fn agent_with_limit(provider: Arc<ScriptedProvider>, executions: Arc<AtomicU32>)
     Runner::builder(provider, "u1", "s1")
         .system_prompt("sys")
         .tool(Arc::new(PaymentTool { executions }))
-        .write_hook(Arc::new(ToolCallLimit::new().per_thread("payment", 2)))
+        .write_hook(Arc::new(ToolCallLimit::new().per_session("payment", 2)))
         .build()
 }
 
 #[tokio::test]
-async fn the_loop_blocks_a_thread_capped_tool_and_the_model_sees_why() {
+async fn the_loop_blocks_a_session_capped_tool_and_the_model_sees_why() {
     let provider = ScriptedProvider::new(vec![
         tool_use_response("t1", "payment"),
         tool_use_response("t2", "payment"),
@@ -138,11 +138,11 @@ async fn the_loop_blocks_a_thread_capped_tool_and_the_model_sees_why() {
         .collect();
     assert_eq!(blocked.len(), 3);
     assert!(blocked[0].0.contains("charged") && !blocked[0].1);
-    assert!(blocked[2].0.contains("2/2 this thread") && blocked[2].1);
+    assert!(blocked[2].0.contains("2/2 this session") && blocked[2].1);
 }
 
 #[tokio::test]
-async fn the_thread_cap_holds_across_runs() {
+async fn the_session_cap_holds_across_runs() {
     let provider = ScriptedProvider::new(vec![
         tool_use_response("t1", "payment"),
         text_response("first done"),

@@ -10,7 +10,7 @@ pub mod output;
 pub use ability::{Ability, ToAbility};
 pub use builtin::Compaction;
 pub use composer::{
-    Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, Thread, session,
+    Agent, AgentDef, AgentOutput, ComposeError, Composer, Session, SessionKey, session,
 };
 pub use context::Context;
 pub use input::Input;

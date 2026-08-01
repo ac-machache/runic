@@ -36,7 +36,7 @@ async fn paginate(store: &dyn SessionStore, t: &str, s: &str, page: usize) -> Ve
     out
 }
 
-pub async fn ten_thousand_events_one_thread(store: &dyn SessionStore) {
+pub async fn ten_thousand_events_one_session(store: &dyn SessionStore) {
     let (t, s) = tenant_session();
     let n = 10_000i64;
     // append in chunks so a single batch stays reasonable for any backend
@@ -65,7 +65,7 @@ pub async fn ten_thousand_events_one_thread(store: &dyn SessionStore) {
     );
 }
 
-pub async fn one_thousand_threads_one_tenant(store: &dyn SessionStore) {
+pub async fn one_thousand_sessions_one_tenant(store: &dyn SessionStore) {
     let t = uid("tenant");
     for i in 0..1000 {
         let s = uid("sess");
@@ -73,7 +73,7 @@ pub async fn one_thousand_threads_one_tenant(store: &dyn SessionStore) {
     }
     assert_eq!(store.list_sessions(&t).await.unwrap().len(), 1000);
 
-    // page the thread list with a small window; every thread appears once
+    // page the session list with a small window; every session appears once
     let mut seen = std::collections::HashSet::new();
     let mut cursor: Option<(DateTime<Utc>, String)> = None;
     loop {
@@ -87,13 +87,13 @@ pub async fn one_thousand_threads_one_tenant(store: &dyn SessionStore) {
         let last = page.last().unwrap();
         cursor = Some((last.last_activity, last.session_id.clone()));
         for m in page {
-            assert!(seen.insert(m.session_id), "thread listed twice");
+            assert!(seen.insert(m.session_id), "session listed twice");
         }
     }
-    assert_eq!(seen.len(), 1000, "thread pagination skipped or stalled");
+    assert_eq!(seen.len(), 1000, "session pagination skipped or stalled");
 }
 
-pub async fn hundred_tenants_same_thread_name(store: &dyn SessionStore) {
+pub async fn hundred_tenants_same_session_name(store: &dyn SessionStore) {
     let s = uid("shared-sess"); // SAME id under 100 tenants
     let tenants: Vec<String> = (0..100).map(|_| uid("tenant")).collect();
     for (i, t) in tenants.iter().enumerate() {

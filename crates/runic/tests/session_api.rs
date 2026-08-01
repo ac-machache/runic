@@ -66,20 +66,20 @@ async fn session_persists_and_hydrates_across_runs() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
 
-    let first = runic::session(("tenant", "thread-1"))
+    let first = runic::session(("tenant", "session-1"))
         .store(store.clone())
         .invoke(&agent, Input::text("remember my name"))
         .await
         .unwrap();
     assert_eq!(first.text, "my name is Ada");
 
-    let stored = store.read("tenant", "thread-1").await.unwrap();
+    let stored = store.read("tenant", "session-1").await.unwrap();
     assert!(
         !stored.is_empty(),
         "the run's events are appended to the store"
     );
 
-    let second = runic::session(("tenant", "thread-1"))
+    let second = runic::session(("tenant", "session-1"))
         .store(store.clone())
         .invoke(&agent, Input::text("what is my name"))
         .await
@@ -201,13 +201,13 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
 }
 
 #[tokio::test]
-async fn one_thread_can_be_answered_by_different_agents() {
+async fn one_session_can_be_answered_by_different_agents() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
 
     let first_provider = ScriptedProvider::new(vec![text("noted")]);
     let support = Agent::new(Llm::new(first_provider, "m").instructions("you are support"));
 
-    runic::session(("tenant", "shared-thread"))
+    runic::session(("tenant", "shared-session"))
         .store(store.clone())
         .invoke(&support, Input::text("my order id is 4417"))
         .await
@@ -217,7 +217,7 @@ async fn one_thread_can_be_answered_by_different_agents() {
     let analyst =
         Agent::new(Llm::new(second_provider.clone(), "m").instructions("you are analyst"));
 
-    runic::session(("tenant", "shared-thread"))
+    runic::session(("tenant", "shared-session"))
         .store(store.clone())
         .invoke(&analyst, Input::text("what was the order id"))
         .await
@@ -235,7 +235,7 @@ async fn one_thread_can_be_answered_by_different_agents() {
 
     assert!(
         transcript.contains("4417"),
-        "a different agent on the same thread must hydrate the earlier turns:\n{transcript}"
+        "a different agent on the same session must hydrate the earlier turns:\n{transcript}"
     );
     assert!(
         seen.last().unwrap().system.as_deref() == Some("you are analyst"),
@@ -298,7 +298,7 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
 
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let readable = blobs.clone().tool(Probe("read_thread_artifact"));
+    let readable = blobs.clone().tool(Probe("read_session_artifact"));
 
     runic::session(("tenant", "t1"))
         .store(runic::substrate::sessions_memory())
@@ -315,7 +315,7 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
         .iter()
         .map(|spec| spec.name.clone())
         .collect();
-    assert_eq!(names, vec!["read_thread_artifact".to_string()]);
+    assert_eq!(names, vec!["read_session_artifact".to_string()]);
 }
 
 struct Stamp(&'static str);
@@ -374,7 +374,7 @@ async fn a_store_contributes_the_hooks_it_was_given() {
 }
 
 #[tokio::test]
-async fn a_session_answers_for_its_own_thread_without_reaching_for_the_store() {
+async fn a_session_answers_for_its_own_session_without_reaching_for_the_store() {
     let provider = ScriptedProvider::new(vec![text("noted")]);
     let agent = Agent::new(Llm::new(provider, "test-model"));
     let sessions = runic::substrate::sessions_memory();
@@ -387,7 +387,7 @@ async fn a_session_answers_for_its_own_thread_without_reaching_for_the_store() {
 
     assert_eq!(chat.label().await.unwrap().as_deref(), Some("order 4417"));
 
-    let meta = chat.meta().await.unwrap().expect("the thread exists");
+    let meta = chat.meta().await.unwrap().expect("the session exists");
     assert_eq!(meta.run_count, 1);
     assert!(meta.event_count > 0, "the meta row aggregates the log");
 
@@ -398,12 +398,12 @@ async fn a_session_answers_for_its_own_thread_without_reaching_for_the_store() {
     assert!(!chat.events().await.unwrap().is_empty());
 
     chat.delete().await.unwrap();
-    assert!(chat.meta().await.unwrap().is_none(), "the thread is gone");
+    assert!(chat.meta().await.unwrap().is_none(), "the session is gone");
     assert!(chat.events().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn without_a_store_a_thread_has_no_history_and_cannot_be_written_to() {
+async fn without_a_store_a_session_has_no_history_and_cannot_be_written_to() {
     let provider = ScriptedProvider::new(vec![text("hello")]);
     let agent = Agent::new(Llm::new(provider, "test-model"));
     let chat = runic::session(("tenant", "t1"));

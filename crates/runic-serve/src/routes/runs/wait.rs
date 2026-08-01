@@ -2,15 +2,13 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use runic_substrate::SessionEvent;
-use runic_types::Role;
 use serde::Serialize;
 
 use super::input::RunMessageRequest;
 use crate::app::AppState;
 use crate::completion::Ticket;
 use crate::error::{ErrorBody, ServeError};
-use crate::store::{RunSpec, RunStatus};
+use crate::store::{RunOutput, RunSpec, RunStatus};
 use crate::tenant::Tenant;
 use runic_state::Deferral;
 
@@ -53,11 +51,11 @@ impl From<Deferral> for Awaiting {
 
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/runs/wait",
+    path = "/sessions/{session_id}/runs/wait",
     tag = "runs",
     request_body = RunMessageRequest,
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
     responses(
@@ -70,7 +68,7 @@ impl From<Deferral> for Awaiting {
 pub async fn wait_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path(thread_id): Path<String>,
+    Path(session_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
     let agent = state.agents.resolve_agent(req.agent.as_deref())?;
@@ -80,7 +78,8 @@ pub async fn wait_run(
     let run_id = runic_state::new_run_id();
     let payload = serde_json::to_value(&message)
         .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
-    let spec = RunSpec::new(&tenant, &thread_id, &run_id, &agent)
+    let spec = RunSpec::new(&tenant, &run_id, &agent)
+        .session(&session_id)
         .input(payload)
         .context(context);
 
@@ -91,15 +90,14 @@ pub async fn wait_run(
         .await
         .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
 
-    tracing::info!(%tenant, %thread_id, %agent, %run_id, "wait run queued");
+    tracing::info!(%tenant, %session_id, %agent, %run_id, "wait run queued");
 
-    await_completion(&state, &tenant, &thread_id, &run_id, done).await
+    await_completion(&state, &tenant, &run_id, done).await
 }
 
-async fn await_completion(
+pub(crate) async fn await_completion(
     state: &AppState,
     tenant: &str,
-    thread_id: &str,
     run_id: &str,
     mut done: Ticket,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
@@ -128,7 +126,7 @@ async fn await_completion(
                 ));
             }
             RunStatus::Successful | RunStatus::Cancelled | RunStatus::Waiting => {
-                return Ok(Json(collect(state, tenant, thread_id, run_id).await?));
+                return Ok(Json(collect(state, tenant, run_id).await?));
             }
             RunStatus::Idle | RunStatus::Running => {}
         }
@@ -138,50 +136,44 @@ async fn await_completion(
 pub(crate) async fn collect(
     state: &AppState,
     tenant: &str,
-    thread_id: &str,
     run_id: &str,
 ) -> Result<WaitRunResponse, ServeError> {
-    let events = state
-        .store()
-        .read_run_after(tenant, thread_id, run_id, 0)
-        .await?;
+    let record = state
+        .runs()
+        .get(tenant, run_id)
+        .await
+        .map_err(|error| ServeError::Store(error.to_string()))?;
 
-    let awaiting = state
-        .thread(tenant, thread_id)
-        .awaiting()
-        .await?
-        .map(Awaiting::from);
+    let output: RunOutput = record
+        .as_ref()
+        .and_then(|record| record.output.clone())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
 
-    let mut text = String::new();
-    let mut outcome = None;
-    for stored in events {
-        match stored.event {
-            SessionEvent::Message { msg, .. } if matches!(msg.role, Role::Assistant) => {
-                let spoken = msg.content.text_content();
-                if !spoken.trim().is_empty() {
-                    text = spoken;
-                }
-            }
-            SessionEvent::RunEnd {
-                outcome: finished, ..
-            } => outcome = Some(finished),
-            _ => {}
-        }
-    }
+    let awaiting = match record
+        .as_ref()
+        .and_then(|record| record.session_id.as_deref())
+    {
+        Some(session) => state
+            .session(tenant, session)
+            .awaiting()
+            .await?
+            .map(Awaiting::from),
+        None => None,
+    };
 
-    let outcome = outcome.unwrap_or_default();
-    let stop_reason = match (&awaiting, outcome.stop_reason) {
+    let stop_reason = match (&awaiting, output.stop_reason) {
         (Some(_), None) => Some("suspended".to_string()),
         (_, settled) => settled,
     };
     Ok(WaitRunResponse {
         run_id: run_id.to_string(),
-        text,
+        text: output.text,
         stop_reason,
-        total_turns: outcome.total_turns,
-        input_tokens: outcome.usage.input_tokens,
-        output_tokens: outcome.usage.output_tokens,
-        structured: outcome.structured,
+        total_turns: output.total_turns,
+        input_tokens: output.input_tokens,
+        output_tokens: output.output_tokens,
+        structured: output.structured,
         awaiting,
     })
 }

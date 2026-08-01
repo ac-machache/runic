@@ -3,7 +3,7 @@
 //! strictly-increasing `seq` per `(tenant, session)`, `read` is seq-ordered,
 //! `read_after` is an exclusive tail, and tenants/sessions are isolated.
 //!
-//! Async, so each generated case runs on a small current-thread runtime.
+//! Async, so each generated case runs on a small current-session runtime.
 
 use chrono::{DateTime, Utc};
 use proptest::prelude::*;

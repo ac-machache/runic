@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use runic_agent::{AgentError, RunContext, Runner};
-use runic_state::{AgentEvent, Deferral, PersistenceStatus, RunOutcome, ThreadStats};
+use runic_state::{AgentEvent, Deferral, PersistenceStatus, RunOutcome, SessionStats};
 use runic_substrate::{
     Blobs, SessionMeta, SessionScope, SessionStore, Sessions, StoreSubSession, StoredEvent,
     attach_persister, replay_messages,
@@ -17,12 +17,12 @@ use super::{Agent, AgentOutput};
 use crate::Input;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Thread {
+pub struct SessionKey {
     tenant: String,
     id: String,
 }
 
-impl Thread {
+impl SessionKey {
     pub fn new(tenant: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             tenant: tenant.into(),
@@ -50,26 +50,26 @@ async fn step(
     }
 }
 
-impl<T: Into<String>, I: Into<String>> From<(T, I)> for Thread {
+impl<T: Into<String>, I: Into<String>> From<(T, I)> for SessionKey {
     fn from((tenant, id): (T, I)) -> Self {
-        Thread::new(tenant, id)
+        SessionKey::new(tenant, id)
     }
 }
 
 pub struct Session {
-    thread: Thread,
+    session: SessionKey,
     sessions: Option<Sessions>,
     blobs: Option<Blobs>,
 }
 
-pub fn session(thread: impl Into<Thread>) -> Session {
-    Session::new(thread)
+pub fn session(session: impl Into<SessionKey>) -> Session {
+    Session::new(session)
 }
 
 impl Session {
-    pub fn new(thread: impl Into<Thread>) -> Self {
+    pub fn new(session: impl Into<SessionKey>) -> Self {
         Self {
-            thread: thread.into(),
+            session: session.into(),
             sessions: None,
             blobs: None,
         }
@@ -86,11 +86,11 @@ impl Session {
     }
 
     pub fn tenant(&self) -> &str {
-        self.thread.tenant()
+        self.session.tenant()
     }
 
-    pub fn thread(&self) -> &str {
-        self.thread.id()
+    pub fn session(&self) -> &str {
+        self.session.id()
     }
 
     fn require_store(&self) -> StoreResult<Arc<dyn SessionStore>> {
@@ -108,7 +108,7 @@ impl Session {
         };
         sessions
             .store()
-            .session_meta(self.tenant(), self.thread())
+            .session_meta(self.tenant(), self.session())
             .await
     }
 
@@ -118,7 +118,7 @@ impl Session {
 
     pub async fn set_label(&self, label: Option<&str>) -> StoreResult<()> {
         self.require_store()?
-            .set_label(self.tenant(), self.thread(), label)
+            .set_label(self.tenant(), self.session(), label)
             .await?;
         Ok(())
     }
@@ -127,7 +127,7 @@ impl Session {
         let Some(sessions) = &self.sessions else {
             return Ok(Vec::new());
         };
-        sessions.store().read(self.tenant(), self.thread()).await
+        sessions.store().read(self.tenant(), self.session()).await
     }
 
     /// A page of the log after `after_seq`, plus whether more remain.
@@ -141,7 +141,7 @@ impl Session {
         };
         let mut page = sessions
             .store()
-            .read_after_limited(self.tenant(), self.thread(), after_seq, limit + 1)
+            .read_after_limited(self.tenant(), self.session(), after_seq, limit + 1)
             .await?;
         let has_more = page.len() > limit;
         page.truncate(limit);
@@ -150,15 +150,15 @@ impl Session {
 
     /// Folded from the tail: a `StateSnapshot` carries the rolled-up totals and
     /// replaces rather than accumulates, so reading past one changes nothing.
-    pub async fn stats(&self) -> StoreResult<ThreadStats> {
+    pub async fn stats(&self) -> StoreResult<SessionStats> {
         let Some(sessions) = &self.sessions else {
-            return Ok(ThreadStats::default());
+            return Ok(SessionStats::default());
         };
         let stored = sessions
             .store()
-            .read_tail(self.tenant(), self.thread())
+            .read_tail(self.tenant(), self.session())
             .await?;
-        let mut stats = ThreadStats::default();
+        let mut stats = SessionStats::default();
         for entry in stored {
             stats.fold(&entry.event.lift());
         }
@@ -171,23 +171,23 @@ impl Session {
         };
         let stored = sessions
             .store()
-            .read_tail(self.tenant(), self.thread())
+            .read_tail(self.tenant(), self.session())
             .await?;
-        let mut state = runic_state::AgentState::new(self.tenant(), self.thread(), "");
+        let mut state = runic_state::AgentState::new(self.tenant(), self.session(), "");
         for entry in stored {
             state.fold(&entry.event.lift());
         }
         Ok(state.take_pending())
     }
 
-    /// This thread and every thread delegated from it, parents before children.
+    /// This session and every session delegated from it, parents before children.
     /// Reverse it to delete: a child outliving its parent is an orphan, the
     /// other way round is just a partial delete.
     pub async fn descendants(&self) -> StoreResult<Vec<String>> {
         let store = self.require_store()?;
-        let mut pending = vec![self.thread().to_string()];
+        let mut pending = vec![self.session().to_string()];
         let mut order: Vec<String> = Vec::new();
-        while let Some(thread) = pending.pop() {
+        while let Some(session) = pending.pop() {
             let mut cursor = None;
             loop {
                 let page = store
@@ -195,7 +195,7 @@ impl Session {
                         self.tenant(),
                         cursor,
                         CHILD_PAGE,
-                        SessionScope::ChildrenOf(thread.clone()),
+                        SessionScope::ChildrenOf(session.clone()),
                     )
                     .await?;
                 let Some(last) = page.last() else { break };
@@ -206,7 +206,7 @@ impl Session {
                     break;
                 }
             }
-            order.push(thread);
+            order.push(session);
         }
         Ok(order)
     }
@@ -214,8 +214,8 @@ impl Session {
     pub async fn delete_tree(&self) -> StoreResult<usize> {
         let store = self.require_store()?;
         let order = self.descendants().await?;
-        for thread in order.iter().rev() {
-            store.delete_session(self.tenant(), thread).await?;
+        for session in order.iter().rev() {
+            store.delete_session(self.tenant(), session).await?;
         }
         Ok(order.len())
     }
@@ -224,12 +224,12 @@ impl Session {
         let Some(sessions) = &self.sessions else {
             return Ok(Vec::new());
         };
-        replay_messages(sessions.store().as_ref(), self.tenant(), self.thread()).await
+        replay_messages(sessions.store().as_ref(), self.tenant(), self.session()).await
     }
 
     pub async fn delete(&self) -> StoreResult<()> {
         self.require_store()?
-            .delete_session(self.tenant(), self.thread())
+            .delete_session(self.tenant(), self.session())
             .await?;
         Ok(())
     }
@@ -253,7 +253,7 @@ impl Session {
         let span = tracing::info_span!(
             "session_run",
             tenant = %self.tenant(),
-            thread = %self.thread(),
+            session = %self.session(),
             persisted = self.sessions.is_some(),
             persist_backlog_at_flush = tracing::field::Empty,
             flush_ms = tracing::field::Empty,
@@ -263,7 +263,7 @@ impl Session {
             let hydrate_span = tracing::info_span!(
                 "hydrate",
                 tenant = %self.tenant(),
-                thread = %self.thread(),
+                session = %self.session(),
                 events = tracing::field::Empty,
             );
             let mut runner = async {
@@ -276,11 +276,11 @@ impl Session {
                     bound = bound.tools(sessions.tools().iter().cloned());
                     bound = bound.hooks(sessions.hooks().iter().cloned());
                 }
-                let mut runner = bound.build(self.tenant(), self.thread()).await?;
+                let mut runner = bound.build(self.tenant(), self.session()).await?;
                 if let Some(sessions) = &self.sessions {
                     let entries = sessions
                         .store()
-                        .read_tail(self.tenant(), self.thread())
+                        .read_tail(self.tenant(), self.session())
                         .await?;
                     tracing::Span::current().record("events", entries.len());
                     for entry in entries {
@@ -302,14 +302,14 @@ impl Session {
             let (emitter, handle) = attach_persister(
                 sessions.store(),
                 self.tenant().to_string(),
-                self.thread().to_string(),
+                self.session().to_string(),
             );
             ctx.events.push(emitter);
             if ctx.sub_session.is_none() {
                 ctx.sub_session = Some(Arc::new(StoreSubSession::new(
                     sessions.store(),
                     self.tenant().to_string(),
-                    self.thread().to_string(),
+                    self.session().to_string(),
                 )));
             }
             // The runner drops its subscribers when the run ends, so keep a

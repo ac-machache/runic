@@ -27,7 +27,7 @@ fn crud_router(h: &Harness) -> Router {
 }
 
 fn upload(
-    thread: &str,
+    session: &str,
     tenant: &str,
     content_type: Option<&str>,
     filename: Option<&str>,
@@ -35,7 +35,7 @@ fn upload(
 ) -> Request<Body> {
     let mut b = Request::builder()
         .method("POST")
-        .uri(format!("/threads/{thread}/artifacts"))
+        .uri(format!("/sessions/{session}/artifacts"))
         .header("x-runic-tenant", tenant);
     if let Some(ct) = content_type {
         b = b.header("content-type", ct);
@@ -54,7 +54,7 @@ async fn body_json(resp: axum::response::Response) -> Value {
 }
 
 #[tokio::test]
-async fn upload_to_unknown_thread_is_404() {
+async fn upload_to_unknown_session_is_404() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -73,13 +73,13 @@ async fn upload_to_unknown_thread_is_404() {
 }
 
 #[tokio::test]
-async fn list_unknown_thread_is_404() {
+async fn list_unknown_session_is_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::get("/threads/ghost/artifacts", &h.tenant))
+        .oneshot(common::get("/sessions/ghost/artifacts", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -91,7 +91,7 @@ async fn upload_without_content_type_defaults_to_octet_stream() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let resp = app
         .oneshot(upload("t1", &h.tenant, None, Some("blob.bin"), b"raw"))
         .await
@@ -109,7 +109,7 @@ async fn upload_canonicalizes_content_type_with_charset() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let resp = app
         .oneshot(upload(
             "t1",
@@ -130,7 +130,7 @@ async fn upload_trims_filename() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let resp = app
         .oneshot(upload(
             "t1",
@@ -151,7 +151,7 @@ async fn filename_does_not_change_stored_size_or_type() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let a = body_json(
         app.clone()
             .oneshot(upload(
@@ -182,7 +182,7 @@ async fn filename_does_not_change_stored_size_or_type() {
     assert_eq!(a["mime_type"], b["mime_type"]);
 
     let list = body_json(
-        app.oneshot(common::get("/threads/t1/artifacts", &h.tenant))
+        app.oneshot(common::get("/sessions/t1/artifacts", &h.tenant))
             .await
             .unwrap(),
     )
@@ -191,12 +191,12 @@ async fn filename_does_not_change_stored_size_or_type() {
 }
 
 #[tokio::test]
-async fn wrong_tenant_cannot_upload_to_foreign_thread() {
+async fn wrong_tenant_cannot_upload_to_foreign_session() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "shared-id").await;
+    common::create_session(&app, &h.tenant, "shared-id").await;
     let resp = app
         .oneshot(upload(
             "shared-id",
@@ -211,23 +211,23 @@ async fn wrong_tenant_cannot_upload_to_foreign_thread() {
 }
 
 #[tokio::test]
-async fn wrong_tenant_cannot_list_foreign_thread() {
+async fn wrong_tenant_cannot_list_foreign_session() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "shared-id").await;
+    common::create_session(&app, &h.tenant, "shared-id").await;
     let resp = app
-        .oneshot(common::get("/threads/shared-id/artifacts", "someone-else"))
+        .oneshot(common::get("/sessions/shared-id/artifacts", "someone-else"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-async fn upload_ok(app: &Router, thread: &str, tenant: &str, bytes: &[u8]) -> String {
+async fn upload_ok(app: &Router, session: &str, tenant: &str, bytes: &[u8]) -> String {
     let resp = app
         .clone()
-        .oneshot(upload(thread, tenant, Some("image/png"), None, bytes))
+        .oneshot(upload(session, tenant, Some("image/png"), None, bytes))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -240,12 +240,12 @@ async fn download_returns_the_bytes_with_the_stored_type() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let id = upload_ok(&app, "t1", &h.tenant, b"\x89PNG fake image bytes").await;
 
     let resp = app
         .oneshot(common::get(
-            &format!("/threads/t1/artifacts/{id}"),
+            &format!("/sessions/t1/artifacts/{id}"),
             &h.tenant,
         ))
         .await
@@ -264,9 +264,9 @@ async fn download_unknown_artifact_is_404() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let resp = app
-        .oneshot(common::get("/threads/t1/artifacts/ghost", &h.tenant))
+        .oneshot(common::get("/sessions/t1/artifacts/ghost", &h.tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -274,18 +274,18 @@ async fn download_unknown_artifact_is_404() {
 }
 
 #[tokio::test]
-async fn download_from_another_thread_is_404() {
+async fn download_from_another_session_is_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
-    common::create_thread(&app, &h.tenant, "t2").await;
+    common::create_session(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t2").await;
     let id = upload_ok(&app, "t1", &h.tenant, b"secret").await;
 
     let resp = app
         .oneshot(common::get(
-            &format!("/threads/t2/artifacts/{id}"),
+            &format!("/sessions/t2/artifacts/{id}"),
             &h.tenant,
         ))
         .await
@@ -299,12 +299,12 @@ async fn wrong_tenant_cannot_download_foreign_artifact() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "t1").await;
+    common::create_session(&app, &h.tenant, "t1").await;
     let id = upload_ok(&app, "t1", &h.tenant, b"secret").await;
 
     let resp = app
         .oneshot(common::get(
-            &format!("/threads/t1/artifacts/{id}"),
+            &format!("/sessions/t1/artifacts/{id}"),
             "someone-else",
         ))
         .await

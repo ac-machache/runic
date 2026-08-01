@@ -95,17 +95,17 @@ async fn a_background_task_is_durable_without_another_run() {
         return;
     };
     let app = h.single_router(agent_with_delegate());
-    let thread = common::uid("t");
+    let session = common::uid("t");
 
     let resp = app
-        .oneshot(common::wait_request(&thread, &h.tenant, "go"))
+        .oneshot(common::wait_request(&session, &h.tenant, "go"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
     let mut finished = None;
     for _ in 0..100 {
-        let events = h.store().read(&h.tenant, &thread).await.unwrap();
+        let events = h.store().read(&h.tenant, &session).await.unwrap();
         finished = events.into_iter().find_map(|s| match s.event {
             SessionEvent::TaskFinished { status, result, .. } => Some((status, result)),
             _ => None,
@@ -121,7 +121,7 @@ async fn a_background_task_is_durable_without_another_run() {
     assert_eq!(status, runic_state::TaskStatus::Completed);
     assert_eq!(result.as_deref(), Some("dug it up"));
 
-    let events = h.store().read(&h.tenant, &thread).await.unwrap();
+    let events = h.store().read(&h.tenant, &session).await.unwrap();
     assert!(
         events
             .iter()

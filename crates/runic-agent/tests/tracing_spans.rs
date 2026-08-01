@@ -116,7 +116,7 @@ async fn the_span_tree_carries_the_agreed_fields() {
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
 
     for expected in [
-        "run{run_id=r-traced tenant=alice thread=s1 mode=\"direct\"",
+        "run{run_id=r-traced tenant=alice session=s1 mode=\"direct\"",
         "total_turns=2",
         "stop_reason=\"end_turn\"",
         "turn{n=1}",

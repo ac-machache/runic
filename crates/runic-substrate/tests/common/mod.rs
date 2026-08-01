@@ -65,9 +65,9 @@ macro_rules! session_store_stress_suite {
         $crate::contract_suite_ignored!(
             $crate::common::stress_contract,
             $factory,
-            ten_thousand_events_one_thread,
-            one_thousand_threads_one_tenant,
-            hundred_tenants_same_thread_name,
+            ten_thousand_events_one_session,
+            one_thousand_sessions_one_tenant,
+            hundred_tenants_same_session_name,
             append_batch_sizes_1_10_100_1000,
             paginate_two_thousand_events_small_page,
             reconstruct_large_log,

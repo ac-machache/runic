@@ -72,12 +72,12 @@ async fn session_run_carries_session_and_hydrate_spans() {
 
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    runic::session(("tenant", "thread-1"))
+    runic::session(("tenant", "session-1"))
         .store(store.clone())
         .invoke(&agent, Input::text("first message"))
         .await
         .unwrap();
-    runic::session(("tenant", "thread-1"))
+    runic::session(("tenant", "session-1"))
         .store(store.clone())
         .invoke(&agent, Input::text("second message"))
         .await
@@ -86,8 +86,8 @@ async fn session_run_carries_session_and_hydrate_spans() {
     let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
 
     for expected in [
-        "session_run{tenant=tenant thread=thread-1",
-        "hydrate{tenant=tenant thread=thread-1",
+        "session_run{tenant=tenant session=session-1",
+        "hydrate{tenant=tenant session=session-1",
         "persist_backlog_at_flush=",
         "flush_ms=",
         "run{run_id=",

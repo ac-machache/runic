@@ -178,7 +178,7 @@ pub enum WireEvent {
         stop_reason: Option<String>,
     },
 
-    /// The run's events are durable — safe to reload the thread. `Done` only
+    /// The run's events are durable — safe to reload the session. `Done` only
     /// means the agent answered.
     Persisted {
         ok: bool,

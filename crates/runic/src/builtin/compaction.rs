@@ -9,7 +9,7 @@ use runic_state::{AgentEvent, AgentState};
 use runic_types::{ContentBlock, Message, MessageContent, Role};
 
 pub const DEFAULT_SUMMARY_GUIDANCE: &str = "You compress conversation history. Summarize the transcript \
-faithfully and densely: goals, decisions, facts, tool results worth keeping, open threads, and \
+faithfully and densely: goals, decisions, facts, tool results worth keeping, open sessions, and \
 the user's constraints or preferences. Third person, no preamble, no commentary — output only \
 the summary.";
 

@@ -706,7 +706,7 @@ async fn deferred_tool_activates_then_becomes_callable() {
 
 #[tokio::test]
 async fn activations_survive_a_rebuild_from_the_log() {
-    // A fresh agent (as after a stateless hydrate) folds the thread's
+    // A fresh agent (as after a stateless hydrate) folds the session's
     // StateUpdated activation event and can call the tool straight away.
     let provider = Arc::new(ScriptedProvider::new(vec![
         tool_use_response("a1", "late_tool", serde_json::json!({})),

@@ -4,5 +4,5 @@ pub mod agents;
 pub mod artifacts;
 pub mod health;
 pub mod runs;
-pub mod threads;
+pub mod sessions;
 pub mod transcribe;

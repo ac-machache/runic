@@ -61,7 +61,7 @@ impl IdentityResolver for BearerResolver {
 fn wait_request(auth: Option<&str>, spoofed_tenant: Option<&str>) -> Request<Body> {
     let mut builder = Request::builder()
         .method("POST")
-        .uri("/threads/t1/runs/wait")
+        .uri("/sessions/t1/runs/wait")
         .header("content-type", "application/json");
     if let Some(token) = auth {
         builder = builder.header("authorization", token);
@@ -185,12 +185,12 @@ async fn every_other_route_requires_credentials() {
     let app = router(authed_config(&h));
     for path in [
         "/agents",
-        "/threads",
-        "/threads/t1",
-        "/threads/t1/events",
-        "/threads/t1/state",
-        "/threads/t1/artifacts",
-        "/threads/t1/runs/r1",
+        "/sessions",
+        "/sessions/t1",
+        "/sessions/t1/events",
+        "/sessions/t1/state",
+        "/sessions/t1/artifacts",
+        "/sessions/t1/runs/r1",
         "/openapi.json",
     ] {
         let resp = app

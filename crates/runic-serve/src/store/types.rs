@@ -48,9 +48,12 @@ impl RunStatus {
 pub struct RunRecord {
     pub run_id: String,
     pub tenant: String,
-    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub agent: String,
     pub status: RunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -65,6 +68,38 @@ pub struct RunRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RunOutput {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    pub total_turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+}
+
+impl From<&runic::AgentOutput> for RunOutput {
+    fn from(done: &runic::AgentOutput) -> Self {
+        Self {
+            text: done.text.clone(),
+            stop_reason: done.outcome.stop_reason.clone(),
+            total_turns: done.outcome.total_turns,
+            input_tokens: done.outcome.usage.input_tokens,
+            output_tokens: done.outcome.usage.output_tokens,
+            structured: done.outcome.structured.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cancelled {
+    Dropped,
+    Flagged,
+    Gone,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunSignals {
     pub to_cancel: bool,
@@ -74,30 +109,41 @@ pub struct RunSignals {
 #[derive(Debug, Clone)]
 pub struct RunSpec {
     pub tenant: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub run_id: String,
     pub agent: String,
     pub input: Option<serde_json::Value>,
     pub context: Option<serde_json::Value>,
+    pub hook: Option<String>,
     pub execute_at: Option<DateTime<Utc>>,
 }
 
 impl RunSpec {
     pub fn new(
         tenant: impl Into<String>,
-        session_id: impl Into<String>,
         run_id: impl Into<String>,
         agent: impl Into<String>,
     ) -> Self {
         Self {
             tenant: tenant.into(),
-            session_id: session_id.into(),
+            session_id: None,
             run_id: run_id.into(),
             agent: agent.into(),
             input: None,
             context: None,
+            hook: None,
             execute_at: None,
         }
+    }
+
+    pub fn session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn hook(mut self, hook: Option<String>) -> Self {
+        self.hook = hook;
+        self
     }
 
     pub fn input(mut self, input: serde_json::Value) -> Self {
@@ -120,7 +166,7 @@ impl RunSpec {
 pub struct ClaimedRun {
     pub run_id: String,
     pub tenant: String,
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub agent: String,
     pub input: Option<serde_json::Value>,
     pub context: Option<serde_json::Value>,
@@ -129,6 +175,7 @@ pub struct ClaimedRun {
     pub to_cancel: bool,
     pub steering: Vec<String>,
     pub answer: Option<serde_json::Value>,
+    pub hook: Option<String>,
 }
 
 impl ClaimedRun {

@@ -55,10 +55,10 @@ fn scripted_router(h: &Harness) -> Router {
 }
 
 async fn create_labeled(app: &Router, tenant: &str, id: &str, label: Value) -> Value {
-    let body = json!({ "thread_id": id, "label": label }).to_string();
+    let body = json!({ "session_id": id, "label": label }).to_string();
     let resp = app
         .clone()
-        .oneshot(common::post_json("/threads", tenant, body))
+        .oneshot(common::post_json("/sessions", tenant, body))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -68,11 +68,11 @@ async fn create_labeled(app: &Router, tenant: &str, id: &str, label: Value) -> V
 async fn wait_for_stored_events(
     store: &dyn SessionStore,
     tenant: &str,
-    thread_id: &str,
+    session_id: &str,
     min_events: usize,
 ) {
     for _ in 0..50 {
-        if store.read(tenant, thread_id).await.unwrap().len() >= min_events {
+        if store.read(tenant, session_id).await.unwrap().len() >= min_events {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -83,7 +83,7 @@ async fn wait_for_stored_events(
 async fn list(app: &Router, tenant: &str, query: &str) -> Value {
     let resp = app
         .clone()
-        .oneshot(common::get(&format!("/threads{query}"), tenant))
+        .oneshot(common::get(&format!("/sessions{query}"), tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -91,11 +91,11 @@ async fn list(app: &Router, tenant: &str, query: &str) -> Value {
 }
 
 fn page_ids(page: &Value) -> Vec<String> {
-    page["threads"]
+    page["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["thread_id"].as_str().unwrap().to_string())
+        .map(|t| t["session_id"].as_str().unwrap().to_string())
         .collect()
 }
 
@@ -115,10 +115,10 @@ async fn list_limit_clamps_to_upper_bound_of_200() {
     };
     let app = crud_router(&h);
     for i in 0..205 {
-        common::create_thread(&app, &h.tenant, &format!("t{i:03}")).await;
+        common::create_session(&app, &h.tenant, &format!("t{i:03}")).await;
     }
     let page = list(&app, &h.tenant, "?limit=1000").await;
-    assert_eq!(page["threads"].as_array().unwrap().len(), 200);
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 200);
     assert!(page["next_cursor"].is_string());
 }
 
@@ -128,10 +128,10 @@ async fn list_limit_clamps_to_lower_bound_of_1() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "a").await;
-    common::create_thread(&app, &h.tenant, "b").await;
+    common::create_session(&app, &h.tenant, "a").await;
+    common::create_session(&app, &h.tenant, "b").await;
     let page = list(&app, &h.tenant, "?limit=0").await;
-    assert_eq!(page["threads"].as_array().unwrap().len(), 1);
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 1);
     assert!(page["next_cursor"].is_string());
 }
 
@@ -141,22 +141,22 @@ async fn next_cursor_absent_when_page_exhausts_results() {
         return;
     };
     let app = crud_router(&h);
-    common::create_thread(&app, &h.tenant, "only-a").await;
-    common::create_thread(&app, &h.tenant, "only-b").await;
+    common::create_session(&app, &h.tenant, "only-a").await;
+    common::create_session(&app, &h.tenant, "only-b").await;
     let page = list(&app, &h.tenant, "?limit=50").await;
-    assert_eq!(page["threads"].as_array().unwrap().len(), 2);
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 2);
     assert!(page["next_cursor"].is_null());
 }
 
 #[tokio::test]
-async fn walking_cursor_covers_every_thread_once() {
+async fn walking_cursor_covers_every_session_once() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let mut created: Vec<String> = (0..25).map(|i| format!("t{i:02}")).collect();
     for id in &created {
-        common::create_thread(&app, &h.tenant, id).await;
+        common::create_session(&app, &h.tenant, id).await;
     }
 
     let mut seen: Vec<String> = Vec::new();
@@ -182,7 +182,7 @@ async fn listing_is_newest_active_first() {
     };
     let app = crud_router(&h);
     for id in ["oldest", "middle", "newest"] {
-        common::create_thread(&app, &h.tenant, id).await;
+        common::create_session(&app, &h.tenant, id).await;
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let page = list(&app, &h.tenant, "?limit=50").await;
@@ -190,7 +190,7 @@ async fn listing_is_newest_active_first() {
 }
 
 #[tokio::test]
-async fn cursor_is_tenant_scoped_and_cannot_leak_foreign_threads() {
+async fn cursor_is_tenant_scoped_and_cannot_leak_foreign_sessions() {
     let Some(h) = common::harness().await else {
         return;
     };
@@ -198,8 +198,8 @@ async fn cursor_is_tenant_scoped_and_cannot_leak_foreign_threads() {
     let alice = format!("{}-alice", h.tenant);
     let bob = format!("{}-bob", h.tenant);
     for i in 0..5 {
-        common::create_thread(&app, &alice, &format!("alice-{i}")).await;
-        common::create_thread(&app, &bob, &format!("bob-{i}")).await;
+        common::create_session(&app, &alice, &format!("alice-{i}")).await;
+        common::create_session(&app, &bob, &format!("bob-{i}")).await;
     }
 
     let alice_page = list(&app, &alice, "?limit=2").await;
@@ -248,9 +248,9 @@ async fn recreate_without_label_preserves_existing() {
     let resp = app
         .clone()
         .oneshot(common::post_json(
-            "/threads",
+            "/sessions",
             &h.tenant,
-            json!({ "thread_id": "keepme" }).to_string(),
+            json!({ "session_id": "keepme" }).to_string(),
         ))
         .await
         .unwrap();
@@ -280,7 +280,7 @@ async fn patch_sets_clears_and_leaves_label_unchanged() {
     let resp = app
         .clone()
         .oneshot(common::patch_json(
-            "/threads/patchme",
+            "/sessions/patchme",
             &h.tenant,
             r#"{"label":"renamed"}"#,
         ))
@@ -291,7 +291,7 @@ async fn patch_sets_clears_and_leaves_label_unchanged() {
 
     let resp = app
         .clone()
-        .oneshot(common::patch_json("/threads/patchme", &h.tenant, "{}"))
+        .oneshot(common::patch_json("/sessions/patchme", &h.tenant, "{}"))
         .await
         .unwrap();
     assert_eq!(common::body_json(resp).await["label"], "renamed");
@@ -299,7 +299,7 @@ async fn patch_sets_clears_and_leaves_label_unchanged() {
     let resp = app
         .clone()
         .oneshot(common::patch_json(
-            "/threads/patchme",
+            "/sessions/patchme",
             &h.tenant,
             r#"{"label":null}"#,
         ))
@@ -309,14 +309,14 @@ async fn patch_sets_clears_and_leaves_label_unchanged() {
 }
 
 #[tokio::test]
-async fn patch_unknown_thread_is_404() {
+async fn patch_unknown_session_is_404() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
         .oneshot(common::patch_json(
-            "/threads/ghost",
+            "/sessions/ghost",
             &h.tenant,
             r#"{"label":"x"}"#,
         ))
@@ -329,11 +329,11 @@ async fn seed_run_events(h: &Harness) -> Router {
     let app = scripted_router(h);
     let resp = app
         .clone()
-        .oneshot(common::wait_request("evthread", &h.tenant, "hello"))
+        .oneshot(common::wait_request("evsession", &h.tenant, "hello"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    wait_for_stored_events(h.store().as_ref(), &h.tenant, "evthread", 4).await;
+    wait_for_stored_events(h.store().as_ref(), &h.tenant, "evsession", 4).await;
     app
 }
 
@@ -341,7 +341,7 @@ async fn events_page(app: &Router, tenant: &str, query: &str) -> Value {
     let resp = app
         .clone()
         .oneshot(common::get(
-            &format!("/threads/evthread/events{query}"),
+            &format!("/sessions/evsession/events{query}"),
             tenant,
         ))
         .await
@@ -356,7 +356,7 @@ async fn events_pagination_walks_all_seqs_without_gaps() {
         return;
     };
     let app = seed_run_events(&h).await;
-    let total = h.store().read(&h.tenant, "evthread").await.unwrap().len();
+    let total = h.store().read(&h.tenant, "evsession").await.unwrap().len();
 
     let mut seqs: Vec<u64> = Vec::new();
     let mut after = 0u64;
@@ -382,7 +382,7 @@ async fn events_has_more_and_next_after_seq_are_consistent() {
         return;
     };
     let app = seed_run_events(&h).await;
-    let total = h.store().read(&h.tenant, "evthread").await.unwrap().len();
+    let total = h.store().read(&h.tenant, "evsession").await.unwrap().len();
 
     let first = events_page(&app, &h.tenant, "?limit=2").await;
     assert_eq!(first["events"].as_array().unwrap().len(), 2);
@@ -412,7 +412,7 @@ async fn events_for_wrong_tenant_is_404_not_foreign_events() {
     };
     let app = seed_run_events(&h).await;
     let resp = app
-        .oneshot(common::get("/threads/evthread/events", "mallory"))
+        .oneshot(common::get("/sessions/evsession/events", "mallory"))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -427,7 +427,7 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
     let app = scripted_router(&h);
     let tenant = h.tenant.clone();
 
-    common::create_thread(&app, &tenant, "parent-1").await;
+    common::create_session(&app, &tenant, "parent-1").await;
     for (child, grandchild) in [("chd-a", None), ("chd-b", Some("chd-b-1"))] {
         store
             .create_child_session(&tenant, child, "parent-1", "scout")
@@ -456,40 +456,40 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 
     let resp = app
         .clone()
-        .oneshot(common::get("/threads", &tenant))
+        .oneshot(common::get("/sessions", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let listed = common::body_json(resp).await;
-    let ids: Vec<&str> = listed["threads"]
+    let ids: Vec<&str> = listed["sessions"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|t| t["thread_id"].as_str().unwrap())
+        .map(|t| t["session_id"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&"parent-1"));
     assert!(
         !ids.iter().any(|id| id.starts_with("chd-")),
-        "thread list must exclude child sessions: {ids:?}"
+        "session list must exclude child sessions: {ids:?}"
     );
 
     let resp = app
         .clone()
-        .oneshot(common::get("/threads/parent-1/children", &tenant))
+        .oneshot(common::get("/sessions/parent-1/children", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let children = common::body_json(resp).await;
-    let rows = children["threads"].as_array().unwrap();
+    let rows = children["sessions"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     for row in rows {
-        assert_eq!(row["parent_thread"], "parent-1");
+        assert_eq!(row["parent_session"], "parent-1");
         assert_eq!(row["agent"], "scout");
     }
 
     let resp = app
         .clone()
-        .oneshot(common::get("/threads/parent-1/children", "mallory"))
+        .oneshot(common::get("/sessions/parent-1/children", "mallory"))
         .await
         .unwrap();
     assert_eq!(
@@ -500,7 +500,7 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 
     let resp = app
         .clone()
-        .oneshot(common::delete("/threads/parent-1", &tenant))
+        .oneshot(common::delete("/sessions/parent-1", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
@@ -518,42 +518,42 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
 }
 
 #[tokio::test]
-async fn delete_is_refused_while_a_run_is_active_on_the_thread() {
+async fn delete_is_refused_while_a_run_is_active_on_the_session() {
     let Some(h) = common::harness().await else {
         return;
     };
     let store = h.store();
     let app = scripted_router(&h);
     let tenant = h.tenant.clone();
-    common::create_thread(&app, &tenant, "busy").await;
+    common::create_session(&app, &tenant, "busy").await;
 
     let runs = h.runs();
     let run_id = common::uid("run");
-    runs.enqueue(&RunSpec::new(&tenant, "busy", &run_id, "main"))
+    runs.enqueue(&RunSpec::new(&tenant, &run_id, "main").session("busy"))
         .await
         .unwrap();
 
     let resp = app
         .clone()
-        .oneshot(common::delete("/threads/busy", &tenant))
+        .oneshot(common::delete("/sessions/busy", &tenant))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::CONFLICT,
-        "delete must be refused while a run is active on the thread"
+        "delete must be refused while a run is active on the session"
     );
     assert!(
         store.session_meta(&tenant, "busy").await.unwrap().is_some(),
-        "the refused delete must not touch the thread"
+        "the refused delete must not touch the session"
     );
 
-    runs.finish(&run_id, RunStatus::Successful, None)
+    runs.finish(&run_id, RunStatus::Successful, None, None)
         .await
         .unwrap();
     let resp = app
         .clone()
-        .oneshot(common::delete("/threads/busy", &tenant))
+        .oneshot(common::delete("/sessions/busy", &tenant))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);

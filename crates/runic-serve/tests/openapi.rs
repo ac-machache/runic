@@ -58,21 +58,26 @@ async fn every_route_and_method_is_documented() {
         ("/healthz", &["get"]),
         ("/agents", &["get"]),
         ("/agents/{name}", &["get"]),
-        ("/threads", &["get", "post"]),
-        ("/threads/{thread_id}", &["get", "patch", "delete"]),
-        ("/threads/{thread_id}/children", &["get"]),
-        ("/threads/{thread_id}/events", &["get"]),
-        ("/threads/{thread_id}/state", &["get"]),
-        ("/threads/{thread_id}/artifacts", &["get", "post"]),
-        ("/threads/{thread_id}/artifacts/{artifact_id}", &["get"]),
+        ("/sessions", &["get", "post"]),
+        ("/sessions/{session_id}", &["get", "patch", "delete"]),
+        ("/sessions/{session_id}/children", &["get"]),
+        ("/sessions/{session_id}/events", &["get"]),
+        ("/sessions/{session_id}/state", &["get"]),
+        ("/sessions/{session_id}/artifacts", &["get", "post"]),
+        ("/sessions/{session_id}/artifacts/{artifact_id}", &["get"]),
         ("/transcribe", &["post"]),
-        ("/threads/{thread_id}/runs", &["get"]),
-        ("/threads/{thread_id}/runs/{run_id}", &["get"]),
-        ("/threads/{thread_id}/runs/{run_id}/timeline", &["get"]),
-        ("/threads/{thread_id}/runs/wait", &["post"]),
-        ("/threads/{thread_id}/runs/{run_id}/cancel", &["post"]),
-        ("/threads/{thread_id}/runs/{run_id}/steer", &["post"]),
-        ("/threads/{thread_id}/runs/{run_id}/resume", &["post"]),
+        ("/sessions/{session_id}/runs", &["get"]),
+        ("/sessions/{session_id}/runs/{run_id}", &["get"]),
+        ("/sessions/{session_id}/runs/{run_id}/timeline", &["get"]),
+        ("/sessions/{session_id}/runs/wait", &["post"]),
+        ("/runs/wait", &["post"]),
+        ("/runs/forget", &["post"]),
+        ("/runs/{run_id}", &["get"]),
+        ("/sessions/{session_id}/runs/stream", &["post"]),
+        ("/sessions/{session_id}/runs/{run_id}/stream", &["get"]),
+        ("/sessions/{session_id}/runs/{run_id}/cancel", &["post"]),
+        ("/sessions/{session_id}/runs/{run_id}/steer", &["post"]),
+        ("/sessions/{session_id}/runs/{run_id}/resume", &["post"]),
     ];
     for (path, methods) in expect {
         let item = &paths[path];
@@ -91,12 +96,10 @@ async fn deleted_endpoints_are_not_documented() {
     let Some(spec) = spec().await else { return };
     let paths = &spec["paths"];
     for path in [
-        "/threads/{thread_id}/runs/stream",
-        "/threads/{thread_id}/runs",
-        "/threads/{thread_id}/runs/cancel",
-        "/threads/{thread_id}/runs/steer",
-        "/threads/{thread_id}/runs/{run_id}/stream",
-        "/threads/{thread_id}/asks/{ask_id}",
+        "/sessions/{session_id}/runs",
+        "/sessions/{session_id}/runs/cancel",
+        "/sessions/{session_id}/runs/steer",
+        "/sessions/{session_id}/asks/{ask_id}",
     ] {
         if let Some(item) = paths.get(path) {
             assert!(
@@ -116,14 +119,14 @@ async fn important_schemas_and_error_body_exist() {
         "AgentInfo",
         "AgentList",
         "AgentOverview",
-        "Thread",
-        "ThreadSummary",
-        "ThreadList",
-        "CreateThreadRequest",
-        "UpdateThreadRequest",
-        "ThreadEventsResponse",
+        "SessionKey",
+        "SessionSummary",
+        "SessionList",
+        "CreateSessionRequest",
+        "UpdateSessionRequest",
+        "SessionEventsResponse",
         "StoredEventEnvelope",
-        "ThreadStateResponse",
+        "SessionStateResponse",
         "UploadedArtifact",
         "ArtifactMeta",
         "TranscriptResponse",
@@ -135,6 +138,8 @@ async fn important_schemas_and_error_body_exist() {
         "SteerRequest",
         "ResumeRequest",
         "Awaiting",
+        "QueuedRun",
+        "LooseRunResponse",
         "WireEvent",
         "ErrorBody",
     ] {
@@ -146,19 +151,19 @@ async fn important_schemas_and_error_body_exist() {
 }
 
 #[tokio::test]
-async fn tenant_header_is_documented_on_list_threads() {
+async fn tenant_header_is_documented_on_list_sessions() {
     let Some(spec) = spec().await else { return };
-    let list_params = &spec["paths"]["/threads"]["get"]["parameters"];
+    let list_params = &spec["paths"]["/sessions"]["get"]["parameters"];
     assert!(
         has_header(list_params, "X-Runic-Tenant"),
-        "X-Runic-Tenant not documented on GET /threads"
+        "X-Runic-Tenant not documented on GET /sessions"
     );
 }
 
 #[tokio::test]
 async fn error_responses_reference_the_error_body_schema() {
     let Some(spec) = spec().await else { return };
-    let schema = &spec["paths"]["/threads/{thread_id}"]["get"]["responses"]["404"]["content"]["application/json"]
+    let schema = &spec["paths"]["/sessions/{session_id}"]["get"]["responses"]["404"]["content"]["application/json"]
         ["schema"]["$ref"];
     assert_eq!(schema, "#/components/schemas/ErrorBody");
 }

@@ -152,12 +152,12 @@ pub fn delete(uri: &str, tenant: &str) -> Request<Body> {
         .unwrap()
 }
 
-pub fn wait_request(thread: &str, tenant: &str, message: &str) -> Request<Body> {
-    wait_request_agent(thread, tenant, None, message)
+pub fn wait_request(session: &str, tenant: &str, message: &str) -> Request<Body> {
+    wait_request_agent(session, tenant, None, message)
 }
 
 pub fn wait_request_agent(
-    thread: &str,
+    session: &str,
     tenant: &str,
     agent: Option<&str>,
     message: &str,
@@ -167,7 +167,7 @@ pub fn wait_request_agent(
         body["agent"] = json!(agent);
     }
     post_json(
-        &format!("/threads/{thread}/runs/wait"),
+        &format!("/sessions/{session}/runs/wait"),
         tenant,
         body.to_string(),
     )
@@ -187,13 +187,13 @@ pub async fn body_string(resp: axum::response::Response) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-pub async fn create_thread(app: &Router, tenant: &str, thread_id: &str) {
+pub async fn create_session(app: &Router, tenant: &str, session_id: &str) {
     let resp = app
         .clone()
         .oneshot(post_json(
-            "/threads",
+            "/sessions",
             tenant,
-            json!({ "thread_id": thread_id }).to_string(),
+            json!({ "session_id": session_id }).to_string(),
         ))
         .await
         .unwrap();

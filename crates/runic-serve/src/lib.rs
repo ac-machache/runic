@@ -9,7 +9,7 @@
 //!
 //! `runic-serve` knows about:
 //!   - Threads (== sessions in our existing vocabulary)
-//!   - Runs (one agent invocation on a thread)
+//!   - Runs (one agent invocation on a session)
 //!   - Server-sent events
 //!   - The `SessionStore` for durability + replay
 //!   - The [`AgentFactory`] trait for spawning agents on demand
@@ -29,7 +29,7 @@
 //!
 //! # Resume
 //!
-//! `GET /threads/:id/runs/:run_id/stream` accepts a `Last-Event-ID`
+//! `GET /sessions/:id/runs/:run_id/stream` accepts a `Last-Event-ID`
 //! header. The server replays every persisted event whose `seq` is
 //! greater than that id, then (if the run is still in flight) attaches
 //! to the live broadcast. The `id` field on each SSE event is the
@@ -39,6 +39,7 @@ pub mod app;
 pub mod auth;
 pub mod completion;
 pub mod error;
+pub mod hook;
 pub mod hosts;
 pub mod openapi;
 pub mod routes;

@@ -169,7 +169,7 @@ async fn not_found_shape() {
     };
     let app = crud_router(&h);
     let (status, body) =
-        status_json(app.oneshot(get("/threads/ghost", TENANT)).await.unwrap()).await;
+        status_json(app.oneshot(get("/sessions/ghost", TENANT)).await.unwrap()).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_error_shape(&body, "not_found");
 }
@@ -181,7 +181,7 @@ async fn bad_request_shape() {
     };
     let app = crud_router(&h);
     let resp = app
-        .oneshot(common::post_json("/threads/t1/runs/wait", TENANT, "{}"))
+        .oneshot(common::post_json("/sessions/t1/runs/wait", TENANT, "{}"))
         .await
         .unwrap();
     let (status, body) = status_json(resp).await;
@@ -195,8 +195,12 @@ async fn store_error_shape() {
         return;
     };
     let app = failing_store_router(&h);
-    let (status, body) =
-        status_json(app.oneshot(get("/threads/anything", TENANT)).await.unwrap()).await;
+    let (status, body) = status_json(
+        app.oneshot(get("/sessions/anything", TENANT))
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_error_shape(&body, "store");
 }
@@ -237,7 +241,7 @@ async fn agent_failure_surfaces_as_a_500_agent_error() {
     let app = failing_agent_router(&h);
     let resp = app
         .oneshot(common::post_json(
-            "/threads/t1/runs/wait",
+            "/sessions/t1/runs/wait",
             TENANT,
             json!({ "message": "hi" }).to_string(),
         ))

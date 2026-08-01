@@ -85,19 +85,19 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
 
     #[test]
-    fn tenant_thread_namespace_never_collides(t1 in name(), t2 in name(), id in name()) {
+    fn tenant_session_namespace_never_collides(t1 in name(), t2 in name(), id in name()) {
         prop_assume!(t1 != t2);
         rt().block_on(async {
             let Some(h) = common::harness().await else { return Ok(()) };
             let app = h.single_router(common::agent(Arc::new(PanicProvider)));
-            common::create_thread(&app, &t1, &id).await;
+            common::create_session(&app, &t1, &id).await;
 
-            let mine = app.clone().oneshot(common::get(&format!("/threads/{id}"), &t1)).await.unwrap();
+            let mine = app.clone().oneshot(common::get(&format!("/sessions/{id}"), &t1)).await.unwrap();
             prop_assert_eq!(mine.status(), StatusCode::OK);
             let got = common::body_json(mine).await;
-            prop_assert_eq!(got["thread_id"].as_str().unwrap(), id.as_str());
+            prop_assert_eq!(got["session_id"].as_str().unwrap(), id.as_str());
 
-            let foreign = app.clone().oneshot(common::get(&format!("/threads/{id}"), &t2)).await.unwrap();
+            let foreign = app.clone().oneshot(common::get(&format!("/sessions/{id}"), &t2)).await.unwrap();
             prop_assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
             Ok(())
         })?;
@@ -111,17 +111,17 @@ proptest! {
             let tenant = h.tenant.clone();
             let mut created: Vec<String> = (0..n).map(|i| format!("th-{i:03}")).collect();
             for id in &created {
-                common::create_thread(&app, &tenant, id).await;
+                common::create_session(&app, &tenant, id).await;
             }
 
             let mut seen: Vec<String> = Vec::new();
             let mut query = format!("?limit={page}");
             loop {
-                let resp = app.clone().oneshot(common::get(&format!("/threads{query}"), &tenant)).await.unwrap();
+                let resp = app.clone().oneshot(common::get(&format!("/sessions{query}"), &tenant)).await.unwrap();
                 prop_assert_eq!(resp.status(), StatusCode::OK);
                 let body = common::body_json(resp).await;
-                for t in body["threads"].as_array().unwrap() {
-                    seen.push(t["thread_id"].as_str().unwrap().to_string());
+                for t in body["sessions"].as_array().unwrap() {
+                    seen.push(t["session_id"].as_str().unwrap().to_string());
                 }
                 match body["next_cursor"].as_str() {
                     Some(cursor) => query = format!("?limit={page}&cursor={}", urlencode(cursor)),
@@ -143,12 +143,12 @@ proptest! {
             let store = h.store();
             let tenant = h.tenant.clone();
             let app = h.single_router(common::agent(Arc::new(ScriptedProvider)));
-            common::create_thread(&app, &tenant, "props").await;
+            common::create_session(&app, &tenant, "props").await;
 
             let body = json!({ "content": blocks }).to_string();
             let resp = app
                 .clone()
-                .oneshot(common::post_json("/threads/props/runs/wait", &tenant, body))
+                .oneshot(common::post_json("/sessions/props/runs/wait", &tenant, body))
                 .await
                 .unwrap();
             prop_assert_eq!(resp.status(), StatusCode::OK);
@@ -170,7 +170,7 @@ proptest! {
         rt().block_on(async {
             let Some(h) = common::harness().await else { return Ok(()) };
             let app = h.single_router(common::agent(Arc::new(ScriptedProvider)));
-            common::create_thread(&app, &owner, "vault").await;
+            common::create_session(&app, &owner, "vault").await;
             let art = h
                 .artifacts()
                 .put(&owner, "vault", "text/plain", ArtifactSource::UserUpload, b"secret")
@@ -189,6 +189,7 @@ proptest! {
                     common::agent(Arc::new(ScriptedProvider)),
                 ))),
                 completions: runic_serve::completion::Completions::new(),
+                hooks: Arc::new(runic_serve::hook::HookRegistry::default()),
             };
             let ref_body: RunMessageRequest = serde_json::from_value(json!({
                 "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }]
@@ -200,7 +201,7 @@ proptest! {
             let resp = app
                 .clone()
                 .oneshot(common::post_json(
-                    "/threads/vault/runs/wait",
+                    "/sessions/vault/runs/wait",
                     &owner,
                     json!({ "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }] })
                         .to_string(),

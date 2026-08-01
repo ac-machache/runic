@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
+use crate::store::Cancelled;
 use crate::tenant::Tenant;
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -38,10 +39,10 @@ where
 
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/runs/{run_id}/cancel",
+    path = "/sessions/{session_id}/runs/{run_id}/cancel",
     tag = "runs",
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -54,17 +55,21 @@ where
 pub async fn cancel_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ServeError> {
-    on_thread(&state, &tenant, &thread_id, &run_id).await?;
+    on_session(&state, &tenant, &session_id, &run_id).await?;
     let accepted = state
         .runs()
         .request_cancel(&tenant, &run_id)
         .await
         .map_err(|error| ServeError::Store(error.to_string()))?;
     match accepted {
-        true => Ok(StatusCode::ACCEPTED),
-        false => Err(ServeError::BadRequest(format!(
+        Cancelled::Dropped => {
+            state.events.finish(&run_id);
+            Ok(StatusCode::ACCEPTED)
+        }
+        Cancelled::Flagged => Ok(StatusCode::ACCEPTED),
+        Cancelled::Gone => Err(ServeError::BadRequest(format!(
             "run {run_id:?} has already finished"
         ))),
     }
@@ -72,11 +77,11 @@ pub async fn cancel_run(
 
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/runs/{run_id}/steer",
+    path = "/sessions/{session_id}/runs/{run_id}/steer",
     tag = "runs",
     request_body = SteerRequest,
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -89,13 +94,13 @@ pub async fn cancel_run(
 pub async fn steer_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
     Json(body): Json<SteerRequest>,
 ) -> Result<StatusCode, ServeError> {
     if body.message.trim().is_empty() {
         return Err(ServeError::BadRequest("message must not be empty".into()));
     }
-    on_thread(&state, &tenant, &thread_id, &run_id).await?;
+    on_session(&state, &tenant, &session_id, &run_id).await?;
     let accepted = state
         .runs()
         .push_steering(&tenant, &run_id, &body.message)
@@ -111,11 +116,11 @@ pub async fn steer_run(
 
 #[utoipa::path(
     post,
-    path = "/threads/{thread_id}/runs/{run_id}/resume",
+    path = "/sessions/{session_id}/runs/{run_id}/resume",
     tag = "runs",
     request_body = ResumeRequest,
     params(
-        ("thread_id" = String, Path, description = "Thread id"),
+        ("session_id" = String, Path, description = "Session id"),
         ("run_id" = String, Path, description = "Run id"),
         ("X-Runic-Tenant" = Option<String>, Header, description = "Tenant; defaults to `default`")
     ),
@@ -128,13 +133,13 @@ pub async fn steer_run(
 pub async fn resume_run(
     State(state): State<AppState>,
     Tenant(tenant): Tenant,
-    Path((thread_id, run_id)): Path<(String, String)>,
+    Path((session_id, run_id)): Path<(String, String)>,
     Json(body): Json<ResumeRequest>,
 ) -> Result<StatusCode, ServeError> {
-    on_thread(&state, &tenant, &thread_id, &run_id).await?;
+    on_session(&state, &tenant, &session_id, &run_id).await?;
 
     let parked = state
-        .thread(&tenant, &thread_id)
+        .session(&tenant, &session_id)
         .awaiting()
         .await?
         .is_some_and(|deferral| deferral.call_id == body.call_id);
@@ -159,10 +164,10 @@ pub async fn resume_run(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn on_thread(
+async fn on_session(
     state: &AppState,
     tenant: &str,
-    thread_id: &str,
+    session_id: &str,
     run_id: &str,
 ) -> Result<(), ServeError> {
     let known = state
@@ -170,12 +175,12 @@ async fn on_thread(
         .get(tenant, run_id)
         .await
         .map_err(|error| ServeError::Store(error.to_string()))?
-        .is_some_and(|record| record.session_id == thread_id);
+        .is_some_and(|record| record.session_id.as_deref() == Some(session_id));
     match known {
         true => Ok(()),
         false => Err(ServeError::RunNotFound {
             id: run_id.to_string(),
-            thread: thread_id.to_string(),
+            session: session_id.to_string(),
         }),
     }
 }

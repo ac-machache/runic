@@ -286,7 +286,7 @@ impl Runner {
 
     /// Materialize this conversation's activated tools from state: every
     /// `tool-search/activated/<name>` key resolves against the catalog once,
-    /// so activations follow the thread through rebuilds and compaction.
+    /// so activations follow the session through rebuilds and compaction.
     pub(crate) fn refresh_activated_tools(&mut self) {
         let Some(catalog) = &self.catalog else {
             return;

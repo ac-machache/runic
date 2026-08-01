@@ -126,7 +126,7 @@ impl Summarize {
         _state: &mut AgentState,
         _request: &mut runic_provider::CompletionRequest,
     ) -> HookOutcome {
-        match self.llm.run("summarize the thread").await {
+        match self.llm.run("summarize the session").await {
             Ok(output) => {
                 *self.seen.lock().unwrap() = Some(output.text);
                 HookOutcome::Continue
@@ -159,7 +159,7 @@ fn defaults_fall_back_to_the_type_name_and_zero_priority() {
 #[tokio::test]
 async fn a_hook_can_hold_an_llm_and_call_it_mid_run() {
     let summarizer = Llm::new(
-        ScriptedProvider::new(vec![text("the thread is about testing")]),
+        ScriptedProvider::new(vec![text("the session is about testing")]),
         "summary-model",
     );
     let seen = Arc::new(Mutex::new(None));
@@ -178,7 +178,7 @@ async fn a_hook_can_hold_an_llm_and_call_it_mid_run() {
 
     assert_eq!(
         seen.lock().unwrap().as_deref(),
-        Some("the thread is about testing")
+        Some("the session is about testing")
     );
 }
 

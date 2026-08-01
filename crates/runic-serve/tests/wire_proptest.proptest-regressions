@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 85989d12d5c7f850c04ea87da72b895632e99196efe39129f6c3778217fb91dd # shrinks to e = ToolFinished { run_id: "r", turn: 0, call_id: "a", tool: "_", status: Ok, result: String(""), provenance: [], duration_ms: 0, at: 2023-11-14T22:13:20Z }

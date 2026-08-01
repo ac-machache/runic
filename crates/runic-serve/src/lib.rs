@@ -54,6 +54,9 @@ pub use error::ServeError;
 pub use hosts::{AgentRegistry, HostedAgents};
 pub use sqlx::PgPool;
 pub use store::{RunRecord, RunSpec, RunStatus, Runs};
+#[cfg(feature = "redis")]
+pub use stream::RedisEvents;
+pub use stream::{RunEmitter, RunEvents};
 pub use tenant::Tenant;
 pub use wire::WireEvent;
 pub use worker::Worker;

@@ -3,23 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use super::sink::{Replay, RunEvents};
+use super::sink::{MAX_BYTES, Replay, RunEvents, weight};
 use crate::wire::WireEvent;
 
-const MAX_BYTES: usize = 2 * 1024 * 1024;
 const TRACKED_RUNS: usize = 1024;
-
-fn weight(event: &WireEvent) -> usize {
-    const OVERHEAD: usize = 64;
-    let carried = match event {
-        WireEvent::AssistantTextDelta { text } => text.len(),
-        WireEvent::AssistantThinkingDelta { text } => text.len(),
-        WireEvent::ToolStart { name, input, .. } => name.len() + input.to_string().len(),
-        WireEvent::ToolFinish { name, preview, .. } => name.len() + preview.len(),
-        _ => 0,
-    };
-    OVERHEAD + carried
-}
 
 #[derive(Default)]
 struct Buffer {

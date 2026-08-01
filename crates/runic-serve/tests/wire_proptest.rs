@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use proptest::prelude::*;
 
 use runic_agent::AgentEvent;
+use runic_serve::WireEvent;
 use runic_serve::wire::{from_agent_event, from_session_event};
 use runic_state::{RunEndStatus, RunOutcome, ToolStatus};
 use runic_substrate::SessionEvent;
@@ -147,6 +148,47 @@ proptest! {
                 "None filtered a client-visible kind"
             ),
         }
+    }
+
+    /// A cross-instance sink stores events as JSON and reads them back, so every
+    /// wire event must survive the round trip — a variant that fails to parse
+    /// would silently vanish from a resumed stream.
+    #[test]
+    fn every_wire_event_survives_a_json_round_trip(e in agent_event()) {
+        for w in from_agent_event(e) {
+            let json = serde_json::to_string(&w).unwrap();
+            let back: WireEvent = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("{} did not parse back: {error}\n{json}", w.event_kind()));
+            prop_assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+}
+
+/// Every field that is skipped when empty must also be defaulted on the way
+/// back in: a tool that returns no provenance is the common case, and dropping
+/// those events truncated live streams.
+#[test]
+fn a_skipped_field_still_parses_when_it_was_omitted() {
+    let finished = from_agent_event(AgentEvent::ToolFinished {
+        run_id: "r1".into(),
+        turn: 1,
+        call_id: "c1".into(),
+        tool: "calculator".into(),
+        status: ToolStatus::Ok,
+        result: serde_json::json!(144),
+        provenance: Vec::new(),
+        duration_ms: 3,
+        at: ts(),
+    });
+    for event in finished {
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            !json.contains("provenance"),
+            "empty provenance is meant to be omitted: {json}"
+        );
+        serde_json::from_str::<WireEvent>(&json).unwrap_or_else(|error| {
+            panic!("{} did not parse back: {error}\n{json}", event.event_kind())
+        });
     }
 }
 

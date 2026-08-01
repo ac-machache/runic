@@ -67,6 +67,7 @@ pub struct ServeConfig {
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agents: HashMap<String, HostedAgents>,
     pub identity: Option<Arc<dyn crate::auth::IdentityResolver>>,
+    pub events: Option<Arc<dyn crate::stream::RunEvents>>,
 }
 
 impl ServeConfig {
@@ -78,7 +79,13 @@ impl ServeConfig {
             transcriber: None,
             agents: HashMap::new(),
             identity: None,
+            events: None,
         }
+    }
+
+    pub fn events(mut self, events: Arc<dyn crate::stream::RunEvents>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub fn agent(mut self, name: impl Into<String>, agent: impl Into<HostedAgents>) -> Self {
@@ -122,7 +129,9 @@ fn app_state(config: ServeConfig) -> (AppState, Option<Arc<dyn crate::auth::Iden
         transcriber: config.transcriber,
         agents: Arc::new(AgentRegistry::new(config.agents)),
         completions: crate::completion::Completions::new(),
-        events: crate::stream::LocalEvents::new(),
+        events: config
+            .events
+            .unwrap_or_else(|| crate::stream::LocalEvents::new()),
     };
     (state, config.identity)
 }

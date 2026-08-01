@@ -19,16 +19,16 @@ use utoipa::ToSchema;
 
 /// One Server-Sent Event on a run stream. The `type` field is the discriminator
 /// and also the SSE `event:` name.
-#[derive(Debug, Clone, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireEvent {
     /// A run is starting. `at` is present only on replay (the persisted
     /// `RunStart` carries a timestamp; the live event does not).
     RunStart {
         run_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<DateTime<Utc>>,
     },
 
@@ -54,7 +54,7 @@ pub enum WireEvent {
         name: String,
         is_error: bool,
         preview: String,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[schema(value_type = Vec<Object>)]
         provenance: Vec<runic_types::ProvenanceSource>,
     },
@@ -63,15 +63,15 @@ pub enum WireEvent {
     /// turns carry the durable usage/model/latency instead.
     TurnComplete {
         turn: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         input_tokens: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         output_tokens: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_ms: Option<u64>,
     },
 
@@ -81,7 +81,7 @@ pub enum WireEvent {
         call_id: String,
         agent: String,
         mode: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session: Option<String>,
     },
 
@@ -91,14 +91,14 @@ pub enum WireEvent {
         call_id: String,
         agent: String,
         ok: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         duration_ms: u64,
         input_tokens: u64,
         output_tokens: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         child_session: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         child_persisted: Option<bool>,
     },
 
@@ -115,7 +115,7 @@ pub enum WireEvent {
     RunEnd {
         run_id: String,
         total_turns: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
         at: DateTime<Utc>,
     },
@@ -130,7 +130,7 @@ pub enum WireEvent {
         run_id: String,
         task_id: String,
         status: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<String>,
     },
 
@@ -146,7 +146,7 @@ pub enum WireEvent {
     /// A HITL `escalate_to_human` fired — fire-and-forget, the run continues.
     Escalated {
         reason: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
 
@@ -163,7 +163,7 @@ pub enum WireEvent {
     /// The run failed server-side (provider error, max turns, …). Terminal — a
     /// `Done` follows so EventSource clients close cleanly.
     RunError {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         message: String,
     },
@@ -172,9 +172,9 @@ pub enum WireEvent {
     /// close their EventSource cleanly. `total_turns` is present only when the
     /// run actually completed (a real `RunEnd`); never invented.
     Done {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         total_turns: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_reason: Option<String>,
     },
 
@@ -182,7 +182,7 @@ pub enum WireEvent {
     /// means the agent answered.
     Persisted {
         ok: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
 
@@ -192,7 +192,7 @@ pub enum WireEvent {
         hook_kind: String,
         lifecycle: String,
         outcome: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
     },
 }

@@ -4,6 +4,20 @@ use runic_state::{AgentEvent, Emitter};
 
 use crate::wire::{WireEvent, from_agent_event};
 
+pub const MAX_BYTES: usize = 2 * 1024 * 1024;
+
+pub fn weight(event: &WireEvent) -> usize {
+    const OVERHEAD: usize = 64;
+    let carried = match event {
+        WireEvent::AssistantTextDelta { text } => text.len(),
+        WireEvent::AssistantThinkingDelta { text } => text.len(),
+        WireEvent::ToolStart { name, input, .. } => name.len() + input.to_string().len(),
+        WireEvent::ToolFinish { name, preview, .. } => name.len() + preview.len(),
+        _ => 0,
+    };
+    OVERHEAD + carried
+}
+
 #[derive(Debug, Default)]
 pub struct Replay {
     pub events: Vec<(u64, WireEvent)>,

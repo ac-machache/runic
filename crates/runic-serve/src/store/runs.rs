@@ -52,6 +52,8 @@ const LATEST_ACTIVE: &str = concat!(
 
 const OVERFETCH: i64 = 4;
 
+pub const SIGNAL_CHANNEL: &str = "runic_signal";
+
 #[derive(Clone)]
 pub struct Runs {
     pool: PgPool,
@@ -105,7 +107,16 @@ fn row_to_claim(row: sqlx::postgres::PgRow) -> Result<ClaimedRun, sqlx::Error> {
         context: row.try_get("context")?,
         attempt: row.try_get("attempt")?,
         max_attempts: row.try_get("max_attempts")?,
+        to_cancel: row.try_get("to_cancel")?,
+        steering: steering_texts(row.try_get("steering")?),
+        answer: row.try_get("answer")?,
     })
+}
+
+fn steering_texts(value: Option<serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        .unwrap_or_default()
 }
 
 impl Runs {
@@ -165,7 +176,7 @@ impl Runs {
                              < (due.created_at, due.run_id))
              ),
              winners AS (
-                 SELECT target.run_id
+                 SELECT target.run_id, target.to_cancel, target.steering, target.answer
                  FROM ready
                  JOIN runic.runs target ON target.run_id = ready.run_id
                  WHERE target.status = 'idle'
@@ -176,10 +187,16 @@ impl Runs {
              claimed AS (
                  UPDATE runic.runs
                  SET status = 'running', started_at = now(), updated_at = now(),
-                     alive_at = now(), worker_id = $1, attempt = attempt + 1
-                 WHERE run_id IN (SELECT run_id FROM winners) AND status = 'idle'
-                 RETURNING run_id, tenant, session_id, agent, input, context,
-                           attempt, max_attempts
+                     alive_at = now(), worker_id = $1, attempt = attempt + 1,
+                     steering = NULL
+                 FROM winners
+                 WHERE runic.runs.run_id = winners.run_id
+                   AND runic.runs.status = 'idle'
+                 RETURNING runic.runs.run_id, runic.runs.tenant,
+                           runic.runs.session_id, runic.runs.agent,
+                           runic.runs.input, runic.runs.context,
+                           runic.runs.attempt, runic.runs.max_attempts,
+                           winners.to_cancel, winners.steering, winners.answer
              ),
              sleep_until AS (
                  SELECT min(execute_at) AS next_at
@@ -187,11 +204,13 @@ impl Runs {
                  WHERE status = 'idle' AND execute_at > now()
              )
              SELECT run_id, tenant, session_id, agent, input, context,
-                    attempt, max_attempts, NULL::timestamptz AS next_at
+                    attempt, max_attempts, to_cancel, steering, answer,
+                    NULL::timestamptz AS next_at
              FROM claimed
              UNION ALL
              SELECT NULL::text, NULL::text, NULL::text, NULL::text,
                     NULL::jsonb, NULL::jsonb, NULL::int, NULL::int,
+                    NULL::boolean, NULL::jsonb, NULL::jsonb,
                     sleep_until.next_at
              FROM sleep_until
              WHERE NOT EXISTS (SELECT 1 FROM claimed)",
@@ -375,59 +394,59 @@ impl Runs {
         row.map(row_to_run).transpose()
     }
 
-    pub async fn take_signals(
-        &self,
-        tenant: &str,
-        run_id: &str,
-    ) -> Result<Option<RunSignals>, sqlx::Error> {
+    pub async fn take_signals(&self, run_id: &str) -> Result<Option<RunSignals>, sqlx::Error> {
         let row = sqlx::query(
             "UPDATE runic.runs r
              SET steering = NULL, updated_at = now()
              FROM (SELECT run_id, steering FROM runic.runs
-                   WHERE run_id = $1 AND tenant = $2 FOR UPDATE) old
+                   WHERE run_id = $1 FOR UPDATE) old
              WHERE r.run_id = old.run_id
              RETURNING r.to_cancel, old.steering",
         )
         .bind(run_id)
-        .bind(tenant)
         .fetch_optional(&self.pool)
         .await?;
         let Some(row) = row else {
             return Ok(None);
         };
-        let to_cancel: bool = row.try_get("to_cancel")?;
-        let steering: Option<serde_json::Value> = row.try_get("steering")?;
-        let steering = steering
-            .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
-            .unwrap_or_default();
         Ok(Some(RunSignals {
-            to_cancel,
-            steering,
+            to_cancel: row.try_get("to_cancel")?,
+            steering: steering_texts(row.try_get("steering")?),
         }))
     }
 
     pub async fn request_cancel(&self, tenant: &str, run_id: &str) -> Result<bool, sqlx::Error> {
         let dropped = sqlx::query(
-            "UPDATE runic.runs
-             SET status = 'cancelled', finished_at = now(), updated_at = now()
-             WHERE run_id = $1 AND tenant = $2 AND status IN ('idle', 'waiting')",
+            "WITH dropped AS (
+                 UPDATE runic.runs
+                 SET status = 'cancelled', finished_at = now(), updated_at = now()
+                 WHERE run_id = $1 AND tenant = $2 AND status IN ('idle', 'waiting')
+                 RETURNING run_id
+             )
+             SELECT pg_notify($3, run_id) FROM dropped",
         )
         .bind(run_id)
         .bind(tenant)
-        .execute(&self.pool)
+        .bind(crate::completion::CHANNEL)
+        .fetch_optional(&self.pool)
         .await?;
-        if dropped.rows_affected() > 0 {
+        if dropped.is_some() {
             return Ok(true);
         }
         let flagged = sqlx::query(
-            "UPDATE runic.runs SET to_cancel = TRUE, updated_at = now()
-             WHERE run_id = $1 AND tenant = $2 AND status = 'running'",
+            "WITH flagged AS (
+                 UPDATE runic.runs SET to_cancel = TRUE, updated_at = now()
+                 WHERE run_id = $1 AND tenant = $2 AND status = 'running'
+                 RETURNING run_id
+             )
+             SELECT pg_notify($3, run_id) FROM flagged",
         )
         .bind(run_id)
         .bind(tenant)
-        .execute(&self.pool)
+        .bind(SIGNAL_CHANNEL)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(flagged.rows_affected() > 0)
+        Ok(flagged.is_some())
     }
 
     pub async fn push_steering(
@@ -436,29 +455,41 @@ impl Runs {
         run_id: &str,
         text: &str,
     ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
-            "UPDATE runic.runs
-             SET steering = COALESCE(steering, '[]'::jsonb) || to_jsonb($3::text),
-                 updated_at = now()
-             WHERE run_id = $1 AND tenant = $2
-               AND status IN ('idle', 'running', 'waiting')",
+        let pushed = sqlx::query(
+            "WITH pushed AS (
+                 UPDATE runic.runs
+                 SET steering = COALESCE(steering, '[]'::jsonb) || to_jsonb($3::text),
+                     updated_at = now()
+                 WHERE run_id = $1 AND tenant = $2
+                   AND status IN ('idle', 'running', 'waiting')
+                 RETURNING run_id
+             )
+             SELECT pg_notify($4, run_id) FROM pushed",
         )
         .bind(run_id)
         .bind(tenant)
         .bind(text)
-        .execute(&self.pool)
+        .bind(SIGNAL_CHANNEL)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(pushed.is_some())
     }
 
-    pub async fn resume(&self, tenant: &str, run_id: &str) -> Result<bool, sqlx::Error> {
+    pub async fn resume(
+        &self,
+        tenant: &str,
+        run_id: &str,
+        answer: &serde_json::Value,
+    ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE runic.runs
-             SET status = 'idle', execute_at = now(), updated_at = now()
+             SET status = 'idle', input = NULL, answer = $3,
+                 execute_at = now(), updated_at = now()
              WHERE run_id = $1 AND tenant = $2 AND status = 'waiting'",
         )
         .bind(run_id)
         .bind(tenant)
+        .bind(answer)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)

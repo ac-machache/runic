@@ -80,6 +80,11 @@ impl Input {
         self
     }
 
+    pub fn answer(mut self, answer: serde_json::Value) -> Self {
+        self.ctx.answer = Some(answer);
+        self
+    }
+
     pub fn run_id(mut self, run_id: impl Into<String>) -> Self {
         self.ctx.run_id = Some(run_id.into());
         self

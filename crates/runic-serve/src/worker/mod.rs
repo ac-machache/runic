@@ -2,6 +2,7 @@ mod listener;
 mod liveness;
 mod poller;
 mod runner;
+mod signals;
 mod tracker;
 
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub fn spawn(state: AppState) -> Worker {
     let tracker = Arc::new(Tracker::new(MIN_RUNS, MAX_RUNS));
     let tasks = vec![
         listener::watch(state.pool.clone(), Arc::clone(&tracker)),
+        signals::watch(state.clone(), Arc::clone(&tracker)),
         poller::spawn(state.clone(), Arc::clone(&tracker), id.clone()),
         liveness::spawn_heartbeat(state.clone(), Arc::clone(&tracker), id.clone()),
         liveness::spawn_reclaimer(state.clone(), Arc::clone(&tracker), id.clone()),

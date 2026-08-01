@@ -12,6 +12,7 @@ use crate::completion::Ticket;
 use crate::error::{ErrorBody, ServeError};
 use crate::store::{RunSpec, RunStatus};
 use crate::tenant::Tenant;
+use runic_state::Deferral;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const LOST_SIGNAL_GUARD: Duration = Duration::from_secs(30);
@@ -28,6 +29,26 @@ pub struct WaitRunResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub structured: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting: Option<Awaiting>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct Awaiting {
+    pub call_id: String,
+    pub tool: String,
+    #[schema(value_type = Object)]
+    pub payload: serde_json::Value,
+}
+
+impl From<Deferral> for Awaiting {
+    fn from(deferral: Deferral) -> Self {
+        Self {
+            call_id: deferral.call_id,
+            tool: deferral.tool,
+            payload: deferral.payload,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -125,6 +146,12 @@ pub(crate) async fn collect(
         .read_run_after(tenant, thread_id, run_id, 0)
         .await?;
 
+    let awaiting = state
+        .thread(tenant, thread_id)
+        .awaiting()
+        .await?
+        .map(Awaiting::from);
+
     let mut text = String::new();
     let mut outcome = None;
     for stored in events {
@@ -143,13 +170,18 @@ pub(crate) async fn collect(
     }
 
     let outcome = outcome.unwrap_or_default();
+    let stop_reason = match (&awaiting, outcome.stop_reason) {
+        (Some(_), None) => Some("suspended".to_string()),
+        (_, settled) => settled,
+    };
     Ok(WaitRunResponse {
         run_id: run_id.to_string(),
         text,
-        stop_reason: outcome.stop_reason,
+        stop_reason,
         total_turns: outcome.total_turns,
         input_tokens: outcome.usage.input_tokens,
         output_tokens: outcome.usage.output_tokens,
         structured: outcome.structured,
+        awaiting,
     })
 }

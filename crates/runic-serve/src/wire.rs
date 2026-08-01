@@ -143,15 +143,6 @@ pub enum WireEvent {
         output_tokens: u64,
     },
 
-    /// A HITL `ask_user` is waiting for an operator answer. The run is parked
-    /// until an answer is POSTed to `.../asks/{ask_id}`.
-    AskRequired {
-        ask_id: String,
-        question: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context: Option<String>,
-    },
-
     /// A HITL `escalate_to_human` fired — fire-and-forget, the run continues.
     Escalated {
         reason: String,
@@ -222,7 +213,6 @@ impl WireEvent {
             Self::Message { .. } => "message",
             Self::RunEnd { .. } => "run_end",
             Self::Usage { .. } => "usage",
-            Self::AskRequired { .. } => "ask_required",
             Self::Escalated { .. } => "escalated",
             Self::ToolDeferred { .. } => "tool_deferred",
             Self::Warning { .. } => "warning",

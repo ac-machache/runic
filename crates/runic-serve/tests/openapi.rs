@@ -70,7 +70,9 @@ async fn every_route_and_method_is_documented() {
         ("/threads/{thread_id}/runs/{run_id}", &["get"]),
         ("/threads/{thread_id}/runs/{run_id}/timeline", &["get"]),
         ("/threads/{thread_id}/runs/wait", &["post"]),
-        ("/threads/{thread_id}/asks/{ask_id}", &["post"]),
+        ("/threads/{thread_id}/runs/{run_id}/cancel", &["post"]),
+        ("/threads/{thread_id}/runs/{run_id}/steer", &["post"]),
+        ("/threads/{thread_id}/runs/{run_id}/resume", &["post"]),
     ];
     for (path, methods) in expect {
         let item = &paths[path];
@@ -94,7 +96,7 @@ async fn deleted_endpoints_are_not_documented() {
         "/threads/{thread_id}/runs/cancel",
         "/threads/{thread_id}/runs/steer",
         "/threads/{thread_id}/runs/{run_id}/stream",
-        "/threads/{thread_id}/runs/{run_id}/asks/{ask_id}",
+        "/threads/{thread_id}/asks/{ask_id}",
     ] {
         if let Some(item) = paths.get(path) {
             assert!(
@@ -130,7 +132,9 @@ async fn important_schemas_and_error_body_exist() {
         "RunStatusResponse",
         "RunSummary",
         "RunListResponse",
-        "AnswerRequest",
+        "SteerRequest",
+        "ResumeRequest",
+        "Awaiting",
         "WireEvent",
         "ErrorBody",
     ] {

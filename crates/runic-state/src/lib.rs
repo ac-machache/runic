@@ -19,8 +19,8 @@ pub use event::{
     RunEndStatus, RunOutcome, ToolStatus,
 };
 pub use state::{
-    AgentState, Emitter, InvalidStateKey, MAX_STATE_KEY_BYTES, Reader, RunTimeContext, new_run_id,
-    validate_state_key,
+    AgentState, Deferral, Emitter, InvalidStateKey, MAX_STATE_KEY_BYTES, Reader, RunTimeContext,
+    RunTotals, new_run_id, validate_state_key,
 };
 pub use stats::{MAX_TRACKED_MODELS, MAX_TRACKED_TOOLS, ThreadStats, ToolStat};
 pub use subsession::{SubRun, SubSession};

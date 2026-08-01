@@ -25,7 +25,9 @@ use runic_state::ToolStatus;
 
 use crate::loop_guard::Verdict;
 use crate::turn::hooks::outcome_kind;
-use crate::{AgentError, PendingDeferral, Runner};
+use runic_state::Deferral;
+
+use crate::{AgentError, Runner};
 
 /// What the loop decided to do with one requested tool call.
 enum CallPlan {
@@ -347,7 +349,9 @@ impl Runner {
             errors,
             "tool batch completed"
         );
-        self.push_tool_results(Message::user_with_blocks(blocks), run_id);
+        if !blocks.is_empty() {
+            self.push_tool_results(Message::user_with_blocks(blocks), run_id);
+        }
         match aborted {
             Some(error) => Err(error),
             None => Ok(()),
@@ -355,7 +359,7 @@ impl Runner {
     }
 
     fn defer(&mut self, call: &ToolCall, payload: serde_json::Value) {
-        self.pending_deferral = Some(PendingDeferral {
+        self.state.set_pending(Deferral {
             call_id: call.id.clone(),
             tool: call.name.clone(),
             payload,

@@ -1,0 +1,1 @@
+ALTER TABLE runic.runs ADD COLUMN IF NOT EXISTS answer JSONB;

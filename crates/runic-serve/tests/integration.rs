@@ -325,21 +325,51 @@ async fn tenant_header_isolates_thread_listings() {
 }
 
 #[tokio::test]
-async fn answering_missing_human_ask_returns_bad_request() {
+async fn resuming_an_unknown_run_is_not_found() {
     let Some(h) = common::harness().await else {
         return;
     };
     let app = crud_router(&h);
     let resp = app
         .oneshot(common::post_json(
-            "/threads/t1/asks/missing-ask",
+            "/threads/t1/runs/missing-run/resume",
             &h.tenant,
-            r#"{"answer":"yes"}"#,
+            r#"{"call_id":"c1","answer":"yes"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn resuming_a_run_that_is_not_parked_is_bad_request() {
+    let Some(h) = common::harness().await else {
+        return;
+    };
+    let app = scripted_router(&h);
+    common::create_thread(&app, &h.tenant, "t1").await;
+
+    let resp = app
+        .clone()
+        .oneshot(common::wait_request("t1", &h.tenant, "hello"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let run_id = common::body_json(resp).await["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(common::post_json(
+            &format!("/threads/t1/runs/{run_id}/resume"),
+            &h.tenant,
+            r#"{"call_id":"c1","answer":"yes"}"#,
         ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(common::body_string(resp).await.contains("no deferred call"));
+    assert!(common::body_string(resp).await.contains("not parked"));
 }
 
 #[tokio::test]

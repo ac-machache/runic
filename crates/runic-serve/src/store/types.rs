@@ -126,6 +126,9 @@ pub struct ClaimedRun {
     pub context: Option<serde_json::Value>,
     pub attempt: i32,
     pub max_attempts: i32,
+    pub to_cancel: bool,
+    pub steering: Vec<String>,
+    pub answer: Option<serde_json::Value>,
 }
 
 impl ClaimedRun {

@@ -324,6 +324,166 @@ async fn resume_sends_the_injected_tool_result_to_the_model() {
 }
 
 #[tokio::test]
+async fn resume_closes_the_parked_call_from_the_answer_alone() {
+    let provider = RecordingProvider::new(vec![ask_call(), text("done")]);
+    let mut agent = Runner::builder(provider.clone(), "alice", "s1")
+        .model("m")
+        .tool(Arc::new(AskTool))
+        .build();
+
+    agent
+        .run_with("go", RunContext::new().with_run_id("r1"))
+        .await
+        .unwrap();
+
+    let mut cap = capture_session_events(&mut agent);
+    agent
+        .resume(
+            RunContext::new()
+                .with_run_id("r1")
+                .with_answer(serde_json::json!("human said yes")),
+        )
+        .await
+        .unwrap();
+    let events = drain_session(&mut cap);
+
+    let closed: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Message { msg, .. } => match &msg.content {
+                MessageContent::Blocks(blocks) => blocks.iter().find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        tool_name,
+                        content,
+                        ..
+                    } => Some((tool_use_id.clone(), tool_name.clone(), content.text())),
+                    _ => None,
+                }),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        closed.len(),
+        1,
+        "the answer closes exactly one call, and the caller never built the block"
+    );
+    assert_eq!(closed[0].0, "c1", "paired to the deferred call_id");
+    assert_eq!(closed[0].1, "ask", "carries the tool it answers");
+    assert!(closed[0].2.contains("human said yes"));
+
+    let requests = provider.requests.lock().unwrap();
+    let second = serde_json::to_value(&requests[1].messages).unwrap();
+    assert!(second.to_string().contains("human said yes"));
+}
+
+#[tokio::test]
+async fn answering_a_run_that_is_not_parked_is_an_error() {
+    let provider = ScriptedProvider::new(vec![text("done")]);
+    let mut agent = Runner::builder(provider, "alice", "s1")
+        .model("m")
+        .tool(Arc::new(AskTool))
+        .build();
+
+    agent
+        .run_with("go", RunContext::new().with_run_id("r1"))
+        .await
+        .unwrap();
+
+    let outcome = agent
+        .resume(
+            RunContext::new()
+                .with_run_id("r1")
+                .with_answer(serde_json::json!("too late")),
+        )
+        .await;
+    assert!(
+        matches!(outcome, Err(runic_agent::AgentError::NotParked)),
+        "an answer with nothing to answer must not reach the model"
+    );
+}
+
+#[tokio::test]
+async fn turns_and_usage_accumulate_across_the_pause() {
+    let provider = ScriptedProvider::new(vec![ask_call(), text("done")]);
+    let mut agent = Runner::builder(provider, "alice", "s1")
+        .model("m")
+        .tool(Arc::new(AskTool))
+        .build();
+
+    let mut cap = capture_session_events(&mut agent);
+    let suspended = agent
+        .run_with("go", RunContext::new().with_run_id("r1"))
+        .await
+        .unwrap();
+    assert_eq!(suspended.total_turns, 1);
+    let mut events = drain_session(&mut cap);
+
+    let mut cap = capture_session_events(&mut agent);
+    let finished = agent
+        .resume(
+            RunContext::new()
+                .with_run_id("r1")
+                .with_answer(serde_json::json!("yes")),
+        )
+        .await
+        .unwrap();
+    events.extend(drain_session(&mut cap));
+
+    assert_eq!(
+        finished.total_turns, 2,
+        "a resumed run continues its turn count, it is not a new run"
+    );
+
+    let ended = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::RunEnd { outcome, .. } => Some(outcome.clone()),
+            _ => None,
+        })
+        .expect("the resumed run ends");
+    assert_eq!(ended.total_turns, 2, "the durable RunEnd agrees");
+
+    let turn_numbers: Vec<u32> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TurnEnd { turn, .. } => Some(*turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turn_numbers, vec![1, 2], "turn numbering does not restart");
+}
+
+#[tokio::test]
+async fn a_batch_of_only_deferred_calls_writes_no_empty_message() {
+    let provider = ScriptedProvider::new(vec![ask_call()]);
+    let mut agent = Runner::builder(provider, "alice", "s1")
+        .model("m")
+        .tool(Arc::new(AskTool))
+        .build();
+
+    let mut cap = capture_session_events(&mut agent);
+    agent
+        .run_with("go", RunContext::new().with_run_id("r1"))
+        .await
+        .unwrap();
+
+    let empties = drain_session(&mut cap)
+        .iter()
+        .filter(|e| {
+            matches!(e, AgentEvent::Message { msg, .. }
+                if matches!(&msg.content, MessageContent::Blocks(blocks) if blocks.is_empty()))
+        })
+        .count();
+    assert_eq!(
+        empties, 0,
+        "a deferred-only batch has no results to push, so it must push nothing"
+    );
+}
+
+#[tokio::test]
 async fn a_fresh_run_after_suspension_does_not_re_emit_the_old_deferral() {
     let provider = ScriptedProvider::new(vec![ask_call(), text("fresh done")]);
     let mut agent = Runner::builder(provider, "alice", "s1")

@@ -52,7 +52,13 @@ async fn poll_loop(state: AppState, tracker: Arc<Tracker>, worker_id: String) {
         }
 
         for run in claim.runs {
-            tracker.started(&run.run_id);
+            let (cancel, steering) = tracker.started(&run.run_id);
+            if run.to_cancel {
+                cancel.cancel();
+            }
+            for text in &run.steering {
+                tracker.steer(&run.run_id, text);
+            }
             let slot = Slot {
                 tracker: Arc::clone(&tracker),
                 run_id: run.run_id.clone(),
@@ -60,7 +66,7 @@ async fn poll_loop(state: AppState, tracker: Arc<Tracker>, worker_id: String) {
             let state = state.clone();
             tokio::spawn(async move {
                 let _slot = slot;
-                runner::execute(state, run).await;
+                runner::execute(state, run, cancel, steering).await;
             });
         }
     }

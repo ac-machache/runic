@@ -16,6 +16,12 @@ use tracing::Instrument;
 use crate::turn::Point;
 use crate::{AgentError, CancelToken, RunContext, Runner};
 
+enum Start {
+    Turn(Message),
+    Answer(serde_json::Value),
+    Continue,
+}
+
 impl Runner {
     /// Run one user turn to completion (text in, [`RunOutcome`] out).
     pub async fn run(&mut self, input: impl Into<String>) -> Result<RunOutcome, AgentError> {
@@ -60,7 +66,7 @@ impl Runner {
         mut ctx: RunContext,
     ) -> Result<RunOutcome, AgentError> {
         self.state.config = std::mem::take(&mut ctx.config);
-        self.pending_deferral = None;
+        let answer = ctx.answer.take();
         // Provider override is restored after the run.
         let saved_provider = ctx
             .provider
@@ -88,9 +94,14 @@ impl Runner {
             stop_reason = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
+        let start = match (user_msg, answer) {
+            (Some(user_msg), _) => Start::Turn(user_msg),
+            (None, Some(answer)) => Start::Answer(answer),
+            (None, None) => Start::Continue,
+        };
         let result = self
             .run_loop(
-                user_msg,
+                start,
                 run_id,
                 agent_label,
                 actor,
@@ -123,7 +134,7 @@ impl Runner {
     /// The turn loop proper.
     async fn run_loop(
         &mut self,
-        user_msg: Option<Message>,
+        start: Start,
         run_id: String,
         agent_label: Option<String>,
         actor: Option<String>,
@@ -132,27 +143,52 @@ impl Runner {
     ) -> Result<RunOutcome, AgentError> {
         self.guard.reset();
 
-        let fire_before_agent = user_msg.is_some();
-        if let Some(user_msg) = user_msg {
-            let now = Utc::now();
-            self.emit(crate::AgentEvent::RunStarted {
-                run_id: run_id.clone(),
-                agent: agent_label,
-                audit: Some(runic_state::AuditStamp {
-                    model: Some(self.config.model.clone()),
-                    actor: actor.map(|value| value.chars().take(128).collect()),
-                }),
-                at: now,
-            });
-            self.emit(crate::AgentEvent::Message {
-                run_id: run_id.clone(),
-                msg: user_msg,
-                at: now,
-            });
+        let fire_before_agent = matches!(start, Start::Turn(_));
+        match start {
+            Start::Turn(user_msg) => {
+                self.state.take_pending();
+                let now = Utc::now();
+                self.emit(crate::AgentEvent::RunStarted {
+                    run_id: run_id.clone(),
+                    agent: agent_label,
+                    audit: Some(runic_state::AuditStamp {
+                        model: Some(self.config.model.clone()),
+                        actor: actor.map(|value| value.chars().take(128).collect()),
+                    }),
+                    at: now,
+                });
+                self.emit(crate::AgentEvent::Message {
+                    run_id: run_id.clone(),
+                    msg: user_msg,
+                    at: now,
+                });
+            }
+            Start::Answer(answer) => {
+                let Some(deferral) = self.state.take_pending() else {
+                    return Err(AgentError::NotParked);
+                };
+                tracing::info!(%run_id, call_id = %deferral.call_id, tool = %deferral.tool, "run resumed");
+                self.push_tool_results(
+                    Message::user_with_blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: deferral.call_id,
+                        tool_name: deferral.tool,
+                        content: answer.into(),
+                        is_error: false,
+                        provenance: Vec::new(),
+                    }]),
+                    &run_id,
+                );
+            }
+            Start::Continue => {}
         }
         tracing::info!(%run_id, user_id = %self.state.user_id, session_id = %self.state.session_id, "run started");
 
-        let mut totals = LoopTotals::default();
+        let carried = self.state.run_totals();
+        let mut totals = LoopTotals {
+            turns: carried.turns,
+            usage: carried.usage,
+            structured: None,
+        };
         let result = self
             .run_loop_inner(fire_before_agent, &run_id, cancel, steering, &mut totals)
             .await;
@@ -171,8 +207,9 @@ impl Runner {
         match result {
             Ok(stop_reason) if stop_reason == "suspended" => {
                 let deferral = self
-                    .pending_deferral
-                    .take()
+                    .state
+                    .pending()
+                    .cloned()
                     .expect("a suspended run always carries its deferral");
                 self.emit(crate::AgentEvent::ToolDeferred {
                     run_id: run_id.clone(),
@@ -351,7 +388,7 @@ impl Runner {
             {
                 break Err(e);
             }
-            if self.pending_deferral.is_some() {
+            if self.state.pending().is_some() {
                 break Ok("suspended".to_string());
             }
         };

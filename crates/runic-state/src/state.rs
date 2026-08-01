@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use runic_types::Message;
+use runic_types::{ContentBlock, Message, MessageContent};
 use serde::{Deserialize, Serialize};
 
 use crate::event::AgentEvent;
@@ -114,6 +114,34 @@ pub struct AgentState {
 
     #[serde(skip, default)]
     messages: Vec<Message>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<Deferral>,
+
+    #[serde(default)]
+    run_totals: RunTotals,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunTotals {
+    pub turns: u32,
+    pub usage: runic_types::TokenUsage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deferral {
+    pub call_id: String,
+    pub tool: String,
+    pub payload: serde_json::Value,
+}
+
+fn answers(msg: &Message, open: &Deferral) -> bool {
+    let MessageContent::Blocks(blocks) = &msg.content else {
+        return false;
+    };
+    blocks.iter().any(|block| {
+        matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if *tool_use_id == open.call_id)
+    })
 }
 
 impl AgentState {
@@ -135,7 +163,25 @@ impl AgentState {
             config: serde_json::Map::new(),
             emitters: Vec::new(),
             messages: Vec::new(),
+            pending: None,
+            run_totals: RunTotals::default(),
         }
+    }
+
+    pub fn run_totals(&self) -> RunTotals {
+        self.run_totals
+    }
+
+    pub fn pending(&self) -> Option<&Deferral> {
+        self.pending.as_ref()
+    }
+
+    pub fn set_pending(&mut self, deferral: Deferral) {
+        self.pending = Some(deferral);
+    }
+
+    pub fn take_pending(&mut self) -> Option<Deferral> {
+        self.pending.take()
     }
 
     pub fn config(&self, key: &str) -> Option<&serde_json::Value> {
@@ -174,11 +220,34 @@ impl AgentState {
         match ev {
             AgentEvent::RunStarted { run_id, .. } => {
                 self.current_run_id = Some(run_id.clone());
+                self.run_totals = RunTotals::default();
+            }
+            AgentEvent::TurnEnd { usage, .. } => {
+                self.run_totals.turns += 1;
+                self.run_totals.usage.add(usage);
             }
             AgentEvent::RunEnd { .. } => {
                 self.current_run_id = None;
+                self.pending = None;
             }
-            AgentEvent::Message { msg, .. } => self.messages.push(msg.clone()),
+            AgentEvent::ToolDeferred {
+                call_id,
+                tool,
+                payload,
+                ..
+            } => {
+                self.pending = Some(Deferral {
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    payload: payload.clone(),
+                });
+            }
+            AgentEvent::Message { msg, .. } => {
+                if self.pending.as_ref().is_some_and(|open| answers(msg, open)) {
+                    self.pending = None;
+                }
+                self.messages.push(msg.clone());
+            }
             AgentEvent::TaskSpawned {
                 task_id,
                 agent,

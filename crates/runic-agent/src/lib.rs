@@ -45,12 +45,6 @@ pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 120;
 /// Default max output tokens per model call.
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
-pub(crate) struct PendingDeferral {
-    pub(crate) call_id: String,
-    pub(crate) tool: String,
-    pub(crate) payload: serde_json::Value,
-}
-
 /// A fallback `(provider, model)` the loop tries, in order, when the primary
 /// model call fails with a not-found or persistent-transient error.
 #[derive(Clone)]
@@ -101,6 +95,7 @@ pub struct RunContext {
     /// Optional steering channel: text pushed here is injected into the
     /// conversation as a user message at the start of the next turn.
     pub steering: Option<mpsc::UnboundedReceiver<String>>,
+    pub answer: Option<serde_json::Value>,
     pub events: Vec<Arc<dyn Emitter>>,
     pub sub_session: Option<Arc<dyn SubSession>>,
     /// Optional agent name recorded on the run's `RunStart` event.
@@ -144,6 +139,10 @@ impl RunContext {
     /// Attach a steering receiver.
     pub fn with_steering(mut self, steering: mpsc::UnboundedReceiver<String>) -> Self {
         self.steering = Some(steering);
+        self
+    }
+    pub fn with_answer(mut self, answer: serde_json::Value) -> Self {
+        self.answer = Some(answer);
         self
     }
     pub fn with_events(mut self, events: Arc<dyn Emitter>) -> Self {
@@ -224,6 +223,8 @@ pub enum AgentError {
     Media(String),
     #[error("agent build failed: {0}")]
     Build(String),
+    #[error("this run is not parked on a deferred tool call")]
+    NotParked,
 }
 
 /// What one model turn produced — the orchestrator's per-iteration record.
@@ -255,7 +256,6 @@ pub struct Runner {
     /// activation keys; `activated` below is this agent's materialization.
     pub(crate) catalog: Option<Arc<dyn ToolCatalog>>,
     pub(crate) activated: ActivatedToolSet,
-    pub(crate) pending_deferral: Option<PendingDeferral>,
     pub(crate) fold_tx: mpsc::UnboundedSender<AgentEvent>,
     pub(crate) fold_rx: mpsc::UnboundedReceiver<AgentEvent>,
 }
@@ -472,7 +472,6 @@ impl RunnerBuilder {
             sub_session: None,
             catalog: self.catalog,
             activated: ActivatedToolSet::default(),
-            pending_deferral: None,
             fold_tx: pending_tx,
             fold_rx: pending_rx,
         }

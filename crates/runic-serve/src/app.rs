@@ -184,8 +184,16 @@ fn routes(state: AppState) -> Router {
         )
         .route("/threads/{thread_id}/runs/{run_id}", get(runs::run_status))
         .route(
-            "/threads/{thread_id}/asks/{ask_id}",
-            post(runs::submit_answer),
+            "/threads/{thread_id}/runs/{run_id}/cancel",
+            post(runs::control::cancel_run),
+        )
+        .route(
+            "/threads/{thread_id}/runs/{run_id}/steer",
+            post(runs::control::steer_run),
+        )
+        .route(
+            "/threads/{thread_id}/runs/{run_id}/resume",
+            post(runs::control::resume_run),
         )
         .with_state(state);
 

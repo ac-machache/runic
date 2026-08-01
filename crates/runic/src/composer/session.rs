@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use runic_state::{AgentEvent, PersistenceStatus, ThreadStats};
+use runic_agent::{AgentError, RunContext, Runner};
+use runic_state::{AgentEvent, Deferral, PersistenceStatus, RunOutcome, ThreadStats};
 use runic_substrate::{
     Blobs, SessionMeta, SessionScope, SessionStore, Sessions, StoreSubSession, StoredEvent,
     attach_persister, replay_messages,
@@ -35,6 +36,17 @@ impl Thread {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+}
+
+async fn step(
+    runner: &mut Runner,
+    message: Option<Message>,
+    ctx: RunContext,
+) -> Result<RunOutcome, AgentError> {
+    match message {
+        Some(message) => runner.run_message_with(message, ctx).await,
+        None => runner.resume(ctx).await,
     }
 }
 
@@ -153,6 +165,21 @@ impl Session {
         Ok(stats)
     }
 
+    pub async fn awaiting(&self) -> StoreResult<Option<Deferral>> {
+        let Some(sessions) = &self.sessions else {
+            return Ok(None);
+        };
+        let stored = sessions
+            .store()
+            .read_tail(self.tenant(), self.thread())
+            .await?;
+        let mut state = runic_state::AgentState::new(self.tenant(), self.thread(), "");
+        for entry in stored {
+            state.fold(&entry.event.lift());
+        }
+        Ok(state.take_pending())
+    }
+
     /// This thread and every thread delegated from it, parents before children.
     /// Reverse it to delete: a child outliving its parent is an orphan, the
     /// other way round is just a partial delete.
@@ -208,7 +235,21 @@ impl Session {
     }
 
     pub async fn invoke(&self, agent: &Agent, input: Input) -> anyhow::Result<AgentOutput> {
-        let (message, mut ctx) = input.split();
+        let (message, ctx) = input.split();
+        self.drive(agent, Some(message), ctx).await
+    }
+
+    pub async fn resume(&self, agent: &Agent, input: Input) -> anyhow::Result<AgentOutput> {
+        let (_, ctx) = input.split();
+        self.drive(agent, None, ctx).await
+    }
+
+    async fn drive(
+        &self,
+        agent: &Agent,
+        message: Option<Message>,
+        mut ctx: RunContext,
+    ) -> anyhow::Result<AgentOutput> {
         let span = tracing::info_span!(
             "session_run",
             tenant = %self.tenant(),
@@ -252,8 +293,7 @@ impl Session {
             .await?;
 
             let Some(sessions) = &self.sessions else {
-                let outcome = runner
-                    .run_message_with(message, ctx)
+                let outcome = step(&mut runner, message, ctx)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 return Ok(AgentOutput::from_run(&runner, outcome));
@@ -277,8 +317,7 @@ impl Session {
             let subscribers = ctx.events.clone();
 
             let run_id = ctx.run_id.clone();
-            let outcome = runner
-                .run_message_with(message, ctx)
+            let outcome = step(&mut runner, message, ctx)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 

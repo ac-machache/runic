@@ -82,7 +82,7 @@ impl Tool for LoadAbilityTool {
             output.push_str("\n\n");
         }
         if !entry.parts.skills.is_empty() {
-            output.push_str("Unlocked skills (view with the `skill_view` tool):\n");
+            output.push_str("Unlocked skills (read with the `read_skill` tool):\n");
             output.push_str(&SkillSet::merge(entry.parts.skills.iter().cloned()).prompt_section());
             output.push_str("\n\n");
         }

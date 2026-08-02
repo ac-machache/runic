@@ -7,9 +7,13 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# S3-backed skill sources. Off by default — pulls the AWS SDK. The trait and
-# wiring point exist regardless; this gates the concrete impl.
-s3 = []
+# Object-store skill sources, via OpenDAL. Off by default — `cloud` alone gets
+# the type plus the `Operator` escape hatch; a per-service flag pulls that
+# service's HTTP stack.
+cloud = ["dep:opendal"]
+s3 = ["cloud", "opendal/services-s3"]
+gcs = ["cloud", "opendal/services-gcs"]
+azblob = ["cloud", "opendal/services-azblob"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -21,7 +25,11 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt"] }
 
 runic-tool = { path = "../runic-tool" }
+opendal = { workspace = true, optional = true }
+runic-macros.workspace = true
+schemars.workspace = true
 
 [dev-dependencies]
+opendal = { workspace = true, features = ["services-fs"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

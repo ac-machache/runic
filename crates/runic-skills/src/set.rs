@@ -26,7 +26,7 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Collision-free id used in the index and by `skill_view`: `"namespace:name"`
+    /// Collision-free id used in the index and by `read_skill`: `"namespace:name"`
     /// (or just `"name"` when the namespace is empty).
     pub fn id(&self) -> String {
         if self.namespace.is_empty() {
@@ -85,9 +85,7 @@ fn parse_skill(namespace: &str, entry: &str, src: &str) -> anyhow::Result<Skill>
 }
 
 pub(crate) const DEFAULT_TAG: &str = "available-skills";
-pub(crate) const DEFAULT_TOOL_NAME: &str = "skill_view";
-pub(crate) const DEFAULT_TOOL_DESCRIPTION: &str = "Load a skill's full instructions by `name`, \
-     or a file inside the skill's folder by also passing a relative `path`.";
+pub(crate) const TOOL_NAME: &str = "read_skill";
 
 /// What one agent can see. Build a different one per tenant/agent.
 #[derive(Clone, Default)]
@@ -96,8 +94,6 @@ pub struct SkillSet {
     sources: HashMap<String, Arc<dyn SkillSource>>,
     tag: Option<String>,
     intro: Option<String>,
-    tool_name: Option<String>,
-    tool_description: Option<String>,
 }
 
 impl SkillSet {
@@ -156,28 +152,8 @@ impl SkillSet {
         self
     }
 
-    pub fn tool_name(mut self, name: impl Into<String>) -> Self {
-        self.tool_name = Some(name.into());
-        self
-    }
-
-    pub fn tool_description(mut self, text: impl Into<String>) -> Self {
-        self.tool_description = Some(text.into());
-        self
-    }
-
     pub fn skills(&self) -> &[Skill] {
         &self.skills
-    }
-
-    pub(crate) fn resolved_tool_name(&self) -> &str {
-        self.tool_name.as_deref().unwrap_or(DEFAULT_TOOL_NAME)
-    }
-
-    pub(crate) fn resolved_tool_description(&self) -> &str {
-        self.tool_description
-            .as_deref()
-            .unwrap_or(DEFAULT_TOOL_DESCRIPTION)
     }
 
     /// Single-namespace local convenience.
@@ -208,10 +184,6 @@ impl SkillSet {
             }
             merged.tag = merged.tag.or_else(|| set.tag.clone());
             merged.intro = merged.intro.or_else(|| set.intro.clone());
-            merged.tool_name = merged.tool_name.or_else(|| set.tool_name.clone());
-            merged.tool_description = merged
-                .tool_description
-                .or_else(|| set.tool_description.clone());
         }
         merged.skills = skills;
         merged.sources = sources;
@@ -238,8 +210,6 @@ impl SkillSet {
             sources,
             tag: self.tag.clone(),
             intro: self.intro.clone(),
-            tool_name: self.tool_name.clone(),
-            tool_description: self.tool_description.clone(),
         }
     }
 
@@ -266,8 +236,6 @@ impl SkillSet {
             sources,
             tag: self.tag.clone(),
             intro: self.intro.clone(),
-            tool_name: self.tool_name.clone(),
-            tool_description: self.tool_description.clone(),
         }
     }
 
@@ -280,10 +248,9 @@ impl SkillSet {
         let intro = match &self.intro {
             Some(text) => text.clone(),
             None => format!(
-                "Each skill is a focused workflow. To load a skill's full instructions \
-                 call `{}` with its `name`; for a file inside the skill pass `name` + a \
-                 relative `path`.",
-                self.resolved_tool_name()
+                "Each skill is a focused workflow. To read a skill's full instructions \
+                 call `{TOOL_NAME}` with its `name`; for a file inside the skill pass \
+                 `name` + a relative `path`."
             ),
         };
         let mut out = format!("<{tag}>\n{intro}\n");
@@ -491,42 +458,45 @@ mod tests {
         let set = SkillSet::load(HashMap::from([("core".to_string(), src)])).await;
         let section = set.prompt_section();
         assert!(section.starts_with("<available-skills>"));
-        assert!(section.contains("skill_view"));
+        assert!(section.contains("read_skill"));
         assert!(section.contains("- core:greeter: says hi"));
         assert!(SkillSet::default().prompt_section().is_empty());
     }
 
     #[tokio::test]
-    async fn customized_voice_renders_tag_intro_and_tool() {
+    async fn customized_voice_renders_tag_and_intro() {
         let src = MapSource::arc(&[("deploy/SKILL.md", &skill_md("deploy", "ship it"))]);
         let set = SkillSet::load(HashMap::from([("core".to_string(), src)]))
             .await
             .tag("playbooks")
-            .intro("Consult the relevant playbook before acting:")
-            .tool_name("open_playbook")
-            .tool_description("Open a playbook by id.");
+            .intro("Consult the relevant playbook before acting:");
 
         let section = set.prompt_section();
         assert!(section.starts_with("<playbooks>\n"));
         assert!(section.ends_with("</playbooks>"));
         assert!(section.contains("Consult the relevant playbook before acting:"));
-        assert!(!section.contains("skill_view"));
         assert!(section.contains("- core:deploy: ship it"));
 
-        let tool = Arc::new(set).view_tool().unwrap();
-        assert_eq!(tool.name(), "open_playbook");
-        assert_eq!(tool.description(), "Open a playbook by id.");
+        let tool = Arc::new(set).skill_tool().unwrap();
+        assert_eq!(
+            tool.name(),
+            TOOL_NAME,
+            "the tool's identity is fixed; only the prompt voice is configurable"
+        );
     }
 
     #[tokio::test]
-    async fn default_intro_interpolates_a_renamed_tool() {
+    async fn the_default_intro_names_the_tool_the_model_will_actually_see() {
         let src = MapSource::arc(&[("deploy/SKILL.md", &skill_md("deploy", "ship it"))]);
-        let set = SkillSet::load(HashMap::from([("core".to_string(), src)]))
-            .await
-            .tool_name("open_playbook");
-        let section = set.prompt_section();
-        assert!(section.contains("call `open_playbook` with its `name`"));
-        assert!(!section.contains("skill_view"));
+        let set = Arc::new(SkillSet::load(HashMap::from([("core".to_string(), src)])).await);
+
+        let advertised = set.skill_tool().unwrap().name().to_string();
+        assert_eq!(advertised, TOOL_NAME);
+        assert!(
+            set.prompt_section()
+                .contains(&format!("call `{advertised}` with its `name`")),
+            "the prompt must name the tool that is actually registered"
+        );
     }
 
     #[tokio::test]
@@ -537,16 +507,12 @@ mod tests {
         ]);
         let set = SkillSet::load(HashMap::from([("ns".to_string(), src)]))
             .await
-            .tag("playbooks")
-            .tool_name("open_playbook");
+            .tag("playbooks");
 
         for narrowed in [set.scope(&["ns:a"]), set.scope_glob(&["ns:*"])] {
             let section = narrowed.prompt_section();
             assert!(section.starts_with("<playbooks>"));
-            assert_eq!(
-                Arc::new(narrowed).view_tool().unwrap().name(),
-                "open_playbook"
-            );
+            assert_eq!(Arc::new(narrowed).skill_tool().unwrap().name(), TOOL_NAME);
         }
     }
 
@@ -584,7 +550,7 @@ mod tests {
             ]
         );
 
-        let tool = Arc::new(set).view_tool().unwrap();
+        let tool = Arc::new(set).skill_tool().unwrap();
         let ctx = runic_tool::ToolContext::new("u", "s", "r");
         let body = tool
             .execute(serde_json::json!({ "name": "docs:deploy" }), &ctx)

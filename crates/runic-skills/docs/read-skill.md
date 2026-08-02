@@ -1,18 +1,18 @@
-# The view tool
+# The read_skill tool
 
-`set.view_tool()` returns the tool the model calls to load skill content —
+`set.skill_tool()` returns the tool the model calls to load skill content —
 `Option<Arc<dyn Tool>>`, and `None` when the set is empty (no skills, no
 tool, no section: the feature disappears cleanly).
 
 ## Identity
 
-- **Name**: `skill_view` by default; whatever you set with `.tool_name(...)`.
-- **Description**: ``Load a skill's full instructions by `name`, or a file
-  inside the skill's folder by also passing a relative `path`.`` by default;
-  whatever you set with `.tool_description(...)`.
+- **Name**: `read_skill`.
+- **Description**: ``Read a skill's full instructions by `name`, or a file
+  inside the skill's folder by also passing a relative `path`.``
 
-The tool captures the set's configuration at the moment `view_tool()` is
-called.
+Both are fixed, and deliberately so: the name `prompt_section()` tells the
+model to call is the same constant the tool registers under, so the two
+cannot drift apart.
 
 ## Parameters
 
@@ -36,7 +36,7 @@ called.
 
 ## Errors (returned in-band as tool errors, never panics)
 
-- Missing `name` → `` `<tool name>` requires `name` ``.
+- Missing or mistyped `name` → ``invalid arguments for `read_skill`: ...``.
 - Unknown id → `unknown skill '<name>'` — ids are the *qualified* form from
   the index; a bare `deploy` is unknown if the skill lives at `core:deploy`.
 - Bad `path` → rejected before any I/O when it is absolute, contains `..`,

@@ -181,7 +181,7 @@ async fn registers_enabled_tool_surfaces() {
         "weather",
         "weather_history",
         "Questionnaire",
-        "skill_view",
+        "read_skill",
         "delegate",
     ] {
         assert!(

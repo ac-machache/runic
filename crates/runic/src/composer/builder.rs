@@ -294,7 +294,7 @@ impl Composer {
             let full = Arc::new(SkillSet::merge(
                 composition.skills.iter().cloned().chain(deferred_skills),
             ));
-            if let Some(view) = full.view_tool() {
+            if let Some(view) = full.skill_tool() {
                 skill_tool_name = Some(view.name().to_string());
                 composition.tools.push(Arc::new(GatedTool::new(
                     view,

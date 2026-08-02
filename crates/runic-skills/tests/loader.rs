@@ -1,5 +1,5 @@
 //! End-to-end tests over the real `LocalSource` (tokio::fs): loading, the
-//! safety checks, and the `skill_view` tool incl. sub-file traversal refusal.
+//! safety checks, and the `read_skill` tool incl. sub-file traversal refusal.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -97,7 +97,7 @@ async fn load_merges_multiple_namespaced_sources() {
 }
 
 #[tokio::test]
-async fn skill_view_reads_body_subfile_and_refuses_traversal() {
+async fn read_skill_reads_body_subfile_and_refuses_traversal() {
     let root = tempfile::tempdir().unwrap();
     write(
         root.path(),
@@ -108,7 +108,7 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
     write(root.path(), "alpha/references/note.md", "the note").await;
 
     let set = Arc::new(SkillSet::load_dir("core", root.path()).await);
-    let tool = set.view_tool().expect("non-empty set has a view tool");
+    let tool = set.skill_tool().expect("non-empty set has a skill tool");
     let ctx = ToolContext::new("u", "s", "r");
 
     // body
@@ -147,8 +147,8 @@ async fn skill_view_reads_body_subfile_and_refuses_traversal() {
 }
 
 #[tokio::test]
-async fn empty_set_has_no_view_tool() {
+async fn empty_set_has_no_skill_tool() {
     let empty = tempfile::tempdir().unwrap();
     let set = Arc::new(SkillSet::load_dir("core", empty.path()).await);
-    assert!(set.view_tool().is_none());
+    assert!(set.skill_tool().is_none());
 }

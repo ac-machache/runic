@@ -225,13 +225,13 @@ async fn skill_set(namespace: &str, name: &str) -> Arc<SkillSet> {
 }
 
 #[tokio::test]
-async fn skill_views_are_scoped_by_the_targeted_skill() {
+async fn read_skills_are_scoped_by_the_targeted_skill() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mine = skill_set("", "mine").await;
     let theirs = skill_set("", "theirs").await;
     let provider = ScriptedProvider::new(vec![
-        call("c1", "skill_view", serde_json::json!({ "name": "mine" })),
-        call("c2", "skill_view", serde_json::json!({ "name": "theirs" })),
+        call("c1", "read_skill", serde_json::json!({ "name": "mine" })),
+        call("c2", "read_skill", serde_json::json!({ "name": "theirs" })),
         text("done"),
     ]);
 
@@ -247,7 +247,7 @@ async fn skill_views_are_scoped_by_the_targeted_skill() {
 
     agent.run("go").await.unwrap();
 
-    assert_eq!(*seen.lock().unwrap(), vec!["mine:skill_view"]);
+    assert_eq!(*seen.lock().unwrap(), vec!["mine:read_skill"]);
 }
 
 struct Order {

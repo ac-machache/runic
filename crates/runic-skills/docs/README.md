@@ -9,7 +9,7 @@ This crate produces two values and stops there — what you do with them is
 outside its scope:
 
 - `prompt_section()` → a `String` (the index section)
-- `view_tool()` → an `Option<Arc<dyn Tool>>` (the loader tool)
+- `skill_tool()` → an `Option<Arc<dyn Tool>>` (the loader tool)
 
 ## The whole API in one pass
 
@@ -24,14 +24,14 @@ let set = SkillSet::load(HashMap::from([
 ])).await
     .tag("playbooks")                                        // wrapper tag
     .intro("Consult the relevant playbook before acting:")   // text after the tag
-    .tool_name("open_playbook")                              // rename the view tool
+    .tool_name("open_playbook")                              // rename the read_skill tool
     .tool_description("Open a playbook by id.");             // its description
 
 let narrowed = set.scope_glob(&["core:*"]);                  // voice travels with it
 
 let set = Arc::new(set);
 let section = set.prompt_section();                          // String
-let tool = set.view_tool();                                  // Option<Arc<dyn Tool>>
+let tool = set.skill_tool();                                  // Option<Arc<dyn Tool>>
 ```
 
 What `section` contains:
@@ -59,6 +59,6 @@ and on the tool is configurable; untouched knobs keep their defaults (see
   defaults; the hand-rolled tier via `skills()`.
 - [scoping.md](scoping.md) — `scope`, `scope_glob`, `merge`, and how the
   configured voice propagates.
-- [view-tool.md](view-tool.md) — the view tool: schema, body and sub-file
+- [read-skill.md](read-skill.md) — the read_skill tool: schema, body and sub-file
   reads, path-traversal protection, error cases.
 - [examples/](examples/) — three complete example skills.

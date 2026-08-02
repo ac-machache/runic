@@ -4,7 +4,7 @@
 //! A skill is a `SKILL.md`: YAML frontmatter (`name`, `description`) + a
 //! Markdown body of full instructions. The model sees only a compact **index**
 //! (id + one-line description) — [`SkillSet::prompt_section`] — and calls the
-//! `skill_view` tool ([`SkillSet::view_tool`]) to load a skill's full body, or
+//! `read_skill` tool ([`SkillSet::skill_tool`]) to read a skill's full body, or
 //! a sub-file in its folder, on demand. Cheap context, lazy load.
 //!
 //! Skills are **static, read-only config**. A [`SkillSet`] is loaded from a map
@@ -14,31 +14,31 @@
 //! ```ignore
 //! use runic_skills::{SkillSet, source};
 //! let skills = SkillSet::load(std::collections::HashMap::from([
-//!     ("core".into(), source::local("/srv/skills/core")),     // shared
-//!     ("acme".into(), source::s3("acme-bucket", "skills/")),  // tenant (s3 feature)
+//!     ("core".into(), source::local("/srv/skills/core")),      // shared
+//!     ("acme".into(), source::s3("acme-bucket", "skills/")?),  // tenant (s3 feature)
 //! ])).await;
 //! ```
 
+mod read;
 mod security;
 mod set;
 pub mod source;
-mod view;
 
 use std::sync::Arc;
 
 use runic_tool::Tool;
 
+pub use read::ReadSkillTool;
 pub use set::{Skill, SkillSet};
 pub use source::SkillSource;
-pub use view::SkillViewTool;
 
 impl SkillSet {
-    /// The `skill_view` tool for this set, or `None` if it's empty.
-    pub fn view_tool(self: &Arc<Self>) -> Option<Arc<dyn Tool>> {
+    /// The `read_skill` tool for this set, or `None` if it's empty.
+    pub fn skill_tool(self: &Arc<Self>) -> Option<Arc<dyn Tool>> {
         if self.is_empty() {
             None
         } else {
-            Some(Arc::new(SkillViewTool::new(self.clone())) as Arc<dyn Tool>)
+            Some(Arc::new(ReadSkillTool::new(self.clone())) as Arc<dyn Tool>)
         }
     }
 }

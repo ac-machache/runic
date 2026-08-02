@@ -569,7 +569,7 @@ async fn deferred_skills_are_gated_until_load_then_viewable_in_the_same_run() {
     let provider = ScriptedProvider::new(vec![
         call(
             "c1",
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": "crm:pipeline" }),
         ),
         call(
@@ -579,12 +579,12 @@ async fn deferred_skills_are_gated_until_load_then_viewable_in_the_same_run() {
         ),
         call(
             "c3",
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": "crm:pipeline" }),
         ),
         call(
             "c4",
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": "docs:guide" }),
         ),
         text("done"),
@@ -673,7 +673,7 @@ async fn a_rebuild_with_the_activated_id_ungates_skills_and_subagents() {
     let provider = ScriptedProvider::new(vec![
         call(
             "c1",
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": "crm:pipeline" }),
         ),
         call(

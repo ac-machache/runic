@@ -366,7 +366,7 @@ fn build_live_gate_script(specs: &[GatedSpec]) -> Vec<CompletionResponse> {
     for spec in specs {
         responses.push(call(
             &next_id(),
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": format!("{}:skill", spec.id) }),
         ));
         responses.push(call(
@@ -385,7 +385,7 @@ fn build_live_gate_script(specs: &[GatedSpec]) -> Vec<CompletionResponse> {
     for spec in specs.iter().filter(|spec| !spec.activated) {
         responses.push(call(
             &next_id(),
-            "skill_view",
+            "read_skill",
             serde_json::json!({ "name": format!("{}:skill", spec.id) }),
         ));
         responses.push(call(
@@ -428,7 +428,7 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
 
     for spec in &specs {
         let (skill_name, skill_content, skill_is_error) = &results[index];
-        prop_assert_eq!(skill_name, "skill_view");
+        prop_assert_eq!(skill_name, "read_skill");
         index += 1;
         let (delegate_name, delegate_content, delegate_is_error) = &results[index];
         prop_assert_eq!(delegate_name, "delegate");
@@ -493,7 +493,7 @@ async fn run_live_gate_case(specs: Vec<GatedSpec>) -> Result<(), TestCaseError> 
 
     for spec in specs.iter().filter(|spec| !spec.activated) {
         let (skill_name, skill_content, skill_is_error) = &results[index];
-        prop_assert_eq!(skill_name, "skill_view");
+        prop_assert_eq!(skill_name, "read_skill");
         prop_assert!(
             !skill_is_error,
             "skill still gated after load for {}",

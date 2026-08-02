@@ -8,10 +8,10 @@ use axum::http::StatusCode;
 use tower::ServiceExt;
 
 use runic::subagent::{DelegateTool, Subagent};
+use runic::substrate::SessionEvent;
+use runic::types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 use runic::{Agent, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::SessionEvent;
-use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
     responses: Mutex<VecDeque<CompletionResponse>>,
@@ -118,7 +118,7 @@ async fn a_background_task_is_durable_without_another_run() {
 
     let (status, result) =
         finished.expect("TaskFinished must reach the store with no run in flight");
-    assert_eq!(status, runic_state::TaskStatus::Completed);
+    assert_eq!(status, runic::state::TaskStatus::Completed);
     assert_eq!(result.as_deref(), Some("dug it up"));
 
     let events = h.store().read(&h.tenant, &session).await.unwrap();

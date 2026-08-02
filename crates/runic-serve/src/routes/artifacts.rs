@@ -1,4 +1,4 @@
-//! Artifact upload/list — bytes live in the [`runic_substrate::ArtifactStore`],
+//! Artifact upload/list — bytes live in the [`runic::substrate::ArtifactStore`],
 //! keyed by `(tenant, session)`. A message references one by id (an
 //! `artifact_ref` content block) instead of carrying inline base64, so the
 //! event log stays lean.
@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use chrono::{DateTime, Utc};
-use runic_substrate::{Artifact, ArtifactSource};
+use runic::substrate::{Artifact, ArtifactSource};
 use serde::Serialize;
 use utoipa::ToSchema;
 

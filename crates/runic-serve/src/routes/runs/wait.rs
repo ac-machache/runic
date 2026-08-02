@@ -10,7 +10,7 @@ use crate::completion::Ticket;
 use crate::error::{ErrorBody, ServeError};
 use crate::store::{RunOutput, RunSpec, RunStatus};
 use crate::tenant::Tenant;
-use runic_state::Deferral;
+use runic::state::Deferral;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const LOST_SIGNAL_GUARD: Duration = Duration::from_secs(30);
@@ -75,7 +75,7 @@ pub async fn wait_run(
     let context = req.context.clone();
     let message = req.into_message()?;
 
-    let run_id = runic_state::new_run_id();
+    let run_id = runic::state::new_run_id();
     let payload = serde_json::to_value(&message)
         .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
     let spec = RunSpec::new(&tenant, &run_id, &agent)

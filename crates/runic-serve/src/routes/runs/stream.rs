@@ -65,7 +65,7 @@ pub async fn open_stream(
     let context = req.context.clone();
     let message = req.into_message()?;
 
-    let run_id = runic_state::new_run_id();
+    let run_id = runic::state::new_run_id();
     let payload = serde_json::to_value(&message)
         .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
     let spec = RunSpec::new(&tenant, &run_id, &agent)

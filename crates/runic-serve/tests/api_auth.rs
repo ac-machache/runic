@@ -10,9 +10,9 @@ use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
 
+use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{Identity, IdentityError, IdentityResolver, bare_router, router};
-use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 use common::Harness;
 

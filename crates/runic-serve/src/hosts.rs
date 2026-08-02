@@ -80,8 +80,8 @@ impl AgentRegistry {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use runic::types::{ContentBlock, StopReason, TokenUsage};
     use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-    use runic_types::{ContentBlock, StopReason, TokenUsage};
     use std::sync::Arc;
 
     struct TestProvider;

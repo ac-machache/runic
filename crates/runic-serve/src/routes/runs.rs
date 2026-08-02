@@ -164,7 +164,7 @@ pub async fn run_timeline(
         .store()
         .read_run_after(&tenant, &session_id, &run_id, 0)
         .await?;
-    let trace = runic_substrate::timeline::project(events.iter().map(|entry| &entry.event))
+    let trace = runic::substrate::timeline::project(events.iter().map(|entry| &entry.event))
         .into_iter()
         .next()
         .ok_or(ServeError::RunNotFound {

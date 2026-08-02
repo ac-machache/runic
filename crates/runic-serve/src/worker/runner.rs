@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use runic::types::Message;
 use runic::{CancelToken, Input};
-use runic_types::Message;
 use tokio::sync::mpsc;
 
 use crate::app::AppState;

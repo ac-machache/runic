@@ -13,13 +13,13 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::{ServeConfig, router};
-use runic_substrate::{
+use runic::substrate::{
     ArtifactStore, Blobs, LocalArtifactStore, PostgresArtifactStore, PostgresSessionStore,
     SessionStore, Sessions,
 };
-use runic_types::{ContentBlock, StopReason, TokenUsage};
+use runic::types::{ContentBlock, StopReason, TokenUsage};
+use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_serve::{ServeConfig, router};
 
 struct ScriptedProvider;
 
@@ -216,7 +216,7 @@ async fn wait_run_persists_the_full_lifecycle_on_postgres() {
     wait_for_events(sessions.as_ref(), &tenant, &session, 4).await;
     let events = sessions.read(&tenant, &session).await.unwrap();
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::RunEnd { outcome, .. }
+        matches!(&stored.event, runic::substrate::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))
     }));
 }

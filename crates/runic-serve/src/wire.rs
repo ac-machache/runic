@@ -10,10 +10,10 @@
 //! Clients should handle both shapes.
 
 use chrono::{DateTime, Utc};
-use runic_agent::AgentEvent;
-use runic_state::HookLifecycle;
-use runic_substrate::SessionEvent;
-use runic_types::Message;
+use runic::agent::AgentEvent;
+use runic::state::HookLifecycle;
+use runic::substrate::SessionEvent;
+use runic::types::Message;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -56,7 +56,7 @@ pub enum WireEvent {
         preview: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[schema(value_type = Vec<Object>)]
-        provenance: Vec<runic_types::ProvenanceSource>,
+        provenance: Vec<runic::types::ProvenanceSource>,
     },
 
     /// One model turn just finished. Live runs carry `stop_reason`; replayed
@@ -279,7 +279,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             vec![WireEvent::ToolFinish {
                 id: call_id,
                 name: tool,
-                is_error: !matches!(status, runic_state::ToolStatus::Ok),
+                is_error: !matches!(status, runic::state::ToolStatus::Ok),
                 preview: truncate(&text, 4000),
                 provenance,
             }]
@@ -326,7 +326,7 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
                 input_tokens: outcome.usage.input_tokens,
                 output_tokens: outcome.usage.output_tokens,
             }];
-            if !matches!(status, runic_state::RunEndStatus::Failed(_)) {
+            if !matches!(status, runic::state::RunEndStatus::Failed(_)) {
                 wires.push(WireEvent::Done {
                     total_turns: Some(outcome.total_turns),
                     stop_reason: outcome.stop_reason,
@@ -335,13 +335,13 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             wires
         }
         AgentEvent::Persisted { status, .. } => match status {
-            runic_state::PersistenceStatus::Flushed => {
+            runic::state::PersistenceStatus::Flushed => {
                 vec![WireEvent::Persisted {
                     ok: true,
                     error: None,
                 }]
             }
-            runic_state::PersistenceStatus::FlushFailed(error) => {
+            runic::state::PersistenceStatus::FlushFailed(error) => {
                 vec![WireEvent::Persisted {
                     ok: false,
                     error: Some(error),
@@ -375,9 +375,9 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             call_id,
             agent,
             mode: match mode {
-                runic_state::DelegationMode::Sync => "sync".to_string(),
-                runic_state::DelegationMode::Parallel => "parallel".to_string(),
-                runic_state::DelegationMode::Background => "background".to_string(),
+                runic::state::DelegationMode::Sync => "sync".to_string(),
+                runic::state::DelegationMode::Parallel => "parallel".to_string(),
+                runic::state::DelegationMode::Background => "background".to_string(),
             },
             child_session,
         }],
@@ -396,14 +396,14 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             run_id,
             call_id,
             agent,
-            ok: matches!(status, runic_state::DelegationStatus::Ok),
+            ok: matches!(status, runic::state::DelegationStatus::Ok),
             model,
             duration_ms,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             child_session,
             child_persisted: child_persistence
-                .map(|p| matches!(p, runic_state::PersistenceStatus::Flushed)),
+                .map(|p| matches!(p, runic::state::PersistenceStatus::Flushed)),
         }],
         AgentEvent::StateUpdated { run_id, key, .. } => {
             vec![WireEvent::StateUpdated { run_id, key }]
@@ -428,10 +428,10 @@ pub fn from_agent_event(event: AgentEvent) -> Vec<WireEvent> {
             run_id,
             task_id,
             status: match status {
-                runic_state::TaskStatus::Running => "running".to_string(),
-                runic_state::TaskStatus::Completed => "completed".to_string(),
-                runic_state::TaskStatus::Failed => "failed".to_string(),
-                runic_state::TaskStatus::Cancelled => "cancelled".to_string(),
+                runic::state::TaskStatus::Running => "running".to_string(),
+                runic::state::TaskStatus::Completed => "completed".to_string(),
+                runic::state::TaskStatus::Failed => "failed".to_string(),
+                runic::state::TaskStatus::Cancelled => "cancelled".to_string(),
             },
             preview: result.map(|r| truncate(&r, 300)),
         }],
@@ -498,10 +498,10 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             run_id,
             task_id,
             status: match status {
-                runic_state::TaskStatus::Running => "running".to_string(),
-                runic_state::TaskStatus::Completed => "completed".to_string(),
-                runic_state::TaskStatus::Failed => "failed".to_string(),
-                runic_state::TaskStatus::Cancelled => "cancelled".to_string(),
+                runic::state::TaskStatus::Running => "running".to_string(),
+                runic::state::TaskStatus::Completed => "completed".to_string(),
+                runic::state::TaskStatus::Failed => "failed".to_string(),
+                runic::state::TaskStatus::Cancelled => "cancelled".to_string(),
             },
             preview: result.map(|r| truncate(&r, 300)),
         }),
@@ -544,7 +544,7 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             name: tool,
             is_error: !matches!(
                 status,
-                runic_state::ToolStatus::Ok | runic_state::ToolStatus::Substituted
+                runic::state::ToolStatus::Ok | runic::state::ToolStatus::Substituted
             ),
             preview: String::new(),
             provenance: Vec::new(),
@@ -561,9 +561,9 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             call_id,
             agent,
             mode: match mode {
-                runic_state::DelegationMode::Sync => "sync".to_string(),
-                runic_state::DelegationMode::Parallel => "parallel".to_string(),
-                runic_state::DelegationMode::Background => "background".to_string(),
+                runic::state::DelegationMode::Sync => "sync".to_string(),
+                runic::state::DelegationMode::Parallel => "parallel".to_string(),
+                runic::state::DelegationMode::Background => "background".to_string(),
             },
             child_session,
         }),
@@ -582,14 +582,14 @@ pub fn from_session_event(event: SessionEvent) -> Option<WireEvent> {
             run_id,
             call_id,
             agent,
-            ok: matches!(status, runic_state::DelegationStatus::Ok),
+            ok: matches!(status, runic::state::DelegationStatus::Ok),
             model,
             duration_ms,
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
             child_session,
             child_persisted: child_persistence
-                .map(|p| matches!(p, runic_state::PersistenceStatus::Flushed)),
+                .map(|p| matches!(p, runic::state::PersistenceStatus::Flushed)),
         }),
         SessionEvent::ToolStarted { .. } | SessionEvent::StateSnapshot { .. } => None,
     }
@@ -634,9 +634,9 @@ mod tests {
             turn: 0,
             call_id: "c1".into(),
             tool: "search".into(),
-            status: runic_state::ToolStatus::Ok,
+            status: runic::state::ToolStatus::Ok,
             result: serde_json::json!({ "hits": 3 }),
-            provenance: vec![runic_types::ProvenanceSource::new(
+            provenance: vec![runic::types::ProvenanceSource::new(
                 "s1",
                 "https://example.com",
             )],
@@ -662,7 +662,7 @@ mod tests {
             turn: 0,
             call_id: "c2".into(),
             tool: "calc".into(),
-            status: runic_state::ToolStatus::Ok,
+            status: runic::state::ToolStatus::Ok,
             result: serde_json::json!("2"),
             provenance: Vec::new(),
             duration_ms: 0,
@@ -675,10 +675,10 @@ mod tests {
 
     #[test]
     fn run_completed_fans_into_usage_then_done() {
-        let outcome = runic_state::RunOutcome {
+        let outcome = runic::state::RunOutcome {
             total_turns: 3,
             stop_reason: Some("end_turn".into()),
-            usage: runic_types::TokenUsage {
+            usage: runic::types::TokenUsage {
                 input_tokens: 10,
                 output_tokens: 20,
                 ..Default::default()
@@ -687,7 +687,7 @@ mod tests {
         };
         let wires = from_agent_event(AgentEvent::RunEnd {
             run_id: "r".into(),
-            status: runic_state::RunEndStatus::Completed,
+            status: runic::state::RunEndStatus::Completed,
             outcome,
             at: chrono::Utc::now(),
         });
@@ -728,7 +728,7 @@ mod tests {
             run_id: "r1".into(),
             turn: 3,
             model: "m".into(),
-            usage: runic_types::TokenUsage {
+            usage: runic::types::TokenUsage {
                 input_tokens: 12,
                 output_tokens: 5,
                 ..Default::default()

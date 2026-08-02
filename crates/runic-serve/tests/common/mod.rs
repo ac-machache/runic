@@ -10,13 +10,13 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 
-use runic::{Agent, Llm};
-use runic_provider::Provider;
-use runic_serve::{HostedAgents, PgPool, Runs, ServeConfig, router};
-use runic_substrate::{
+use runic::substrate::{
     ArtifactStore, Blobs, MemoryArtifactStore, MemorySessionStore, PostgresSessionStore,
     SessionStore, Sessions,
 };
+use runic::{Agent, Llm};
+use runic_provider::Provider;
+use runic_serve::{HostedAgents, PgPool, Runs, ServeConfig, router};
 
 pub fn uid(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
@@ -88,6 +88,10 @@ impl Harness {
         Runs::new(self.pool.clone())
     }
 
+    pub fn schedules(&self) -> runic_serve::store::Schedules {
+        runic_serve::store::Schedules::new(self.pool.clone())
+    }
+
     pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
         self.blobs.store()
     }
@@ -109,6 +113,18 @@ pub async fn harness() -> Option<Harness> {
         blobs,
         tenant: uid("tenant"),
     })
+}
+
+pub struct PanicProvider;
+
+#[async_trait::async_trait]
+impl Provider for PanicProvider {
+    async fn complete(
+        &self,
+        _req: runic_provider::CompletionRequest,
+    ) -> Result<runic_provider::CompletionResponse, runic_provider::ProviderError> {
+        panic!("no agent should run in the routine tests");
+    }
 }
 
 pub fn agent(provider: Arc<dyn Provider>) -> Agent {

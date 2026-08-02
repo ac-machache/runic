@@ -49,7 +49,9 @@ pub mod tenant;
 pub mod wire;
 pub mod worker;
 
-pub use app::{AppState, ServeConfig, bare_router, router, serve, single_agent};
+pub mod routines;
+
+pub use app::{AppState, ServeConfig, bare_router, router, serve};
 pub use auth::{Identity, IdentityError, IdentityResolver};
 pub use error::ServeError;
 pub use hosts::{AgentRegistry, HostedAgents};

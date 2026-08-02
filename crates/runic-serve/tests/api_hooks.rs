@@ -5,10 +5,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use axum::http::StatusCode;
+use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::hook::{FinishedRun, RunHook};
 use runic_serve::router;
-use runic_types::{ContentBlock, StopReason, TokenUsage};
 use tower::ServiceExt;
 
 struct ScriptedProvider;

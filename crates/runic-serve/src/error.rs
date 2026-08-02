@@ -66,8 +66,8 @@ pub enum ServeError {
     NotConfigured(String),
 }
 
-impl From<runic_substrate::Error> for ServeError {
-    fn from(err: runic_substrate::Error) -> Self {
+impl From<runic::substrate::Error> for ServeError {
+    fn from(err: runic::substrate::Error) -> Self {
         Self::Store(err.to_string())
     }
 }

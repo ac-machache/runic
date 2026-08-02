@@ -33,6 +33,7 @@ apalis-sql = "1.0.0-rc.9"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+croner = "3"
 dotenvy = "0.15"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eventsource-stream = "0.2"

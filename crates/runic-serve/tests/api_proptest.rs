@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,13 +9,13 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use runic::substrate::{ArtifactSource, SessionEvent};
+use runic::types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
+use runic_serve::ServeError;
 use runic_serve::app::AppState;
 use runic_serve::hosts::AgentRegistry;
 use runic_serve::routes::runs::input::{RunMessageRequest, input_from_message};
-use runic_serve::{ServeError, single_agent};
-use runic_substrate::{ArtifactSource, SessionEvent};
-use runic_types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 
 struct PanicProvider;
 
@@ -62,7 +63,7 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-fn has_inline_bytes(events: &[runic_substrate::StoredEvent]) -> bool {
+fn has_inline_bytes(events: &[runic::substrate::StoredEvent]) -> bool {
     events.iter().any(|s| {
         matches!(&s.event, SessionEvent::Message { msg, .. }
             if matches!(&msg.content, MessageContent::Blocks(b)
@@ -184,12 +185,14 @@ proptest! {
                 pool: h.pool.clone(),
                 events: runic_serve::stream::LocalEvents::new(),
                 transcriber: None,
-                agents: Arc::new(AgentRegistry::new(single_agent(
-                    "main",
-                    common::agent(Arc::new(ScriptedProvider)),
-                ))),
+                agents: Arc::new(AgentRegistry::new(HashMap::from([(
+                    "main".to_string(),
+                    common::agent(Arc::new(ScriptedProvider)).into(),
+                )]))),
                 completions: runic_serve::completion::Completions::new(),
                 hooks: Arc::new(runic_serve::hook::HookRegistry::default()),
+                schedules: runic_serve::store::Schedules::new(h.pool.clone()),
+                routines: Arc::new(runic_serve::routines::RoutineRegistry::default()),
             };
             let ref_body: RunMessageRequest = serde_json::from_value(json!({
                 "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }]

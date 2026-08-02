@@ -12,11 +12,11 @@ use tower::ServiceExt;
 
 use runic::ability::ability;
 use runic::subagent::Subagent;
+use runic::tool::{Tool, ToolContext, ToolResult};
+use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic::{Agent, Llm, agent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{HostedAgents, router};
-use runic_tool::{Tool, ToolContext, ToolResult};
-use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 use common::Harness;
 
@@ -351,7 +351,7 @@ async fn run_start_event_records_the_agent() {
 
     let events = h.store().read(&h.tenant, &session).await.unwrap();
     let agent = events.iter().find_map(|e| match &e.event {
-        runic_substrate::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
+        runic::substrate::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
         _ => None,
     });
     assert_eq!(agent.flatten().as_deref(), Some("coral"));

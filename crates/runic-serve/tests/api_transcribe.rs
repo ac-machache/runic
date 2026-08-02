@@ -9,8 +9,8 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
+use runic::transcriber::{SpeechToText, TranscribeError, Transcript};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_transcriber::{SpeechToText, TranscribeError, Transcript};
 
 struct PanicProvider;
 

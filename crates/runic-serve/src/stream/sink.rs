@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use runic_state::{AgentEvent, Emitter};
+use runic::state::{AgentEvent, Emitter};
 
 use crate::wire::{WireEvent, from_agent_event};
 

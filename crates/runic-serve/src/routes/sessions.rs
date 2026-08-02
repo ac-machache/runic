@@ -1,4 +1,4 @@
-//! SessionKey CRUD — backed by the [`runic_substrate::SessionStore`].
+//! SessionKey CRUD — backed by the [`runic::substrate::SessionStore`].
 //!
 //! A "session" in the HTTP surface == a "session" internally. We expose the
 //! resource with the conventional HTTP name; it routes to the same store.
@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use runic_substrate::SessionMeta;
+use runic::substrate::SessionMeta;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -62,7 +62,7 @@ pub struct SessionStateResponse {
     pub label: Option<String>,
     pub system_prompt: Option<String>,
     #[schema(value_type = Vec<Object>)]
-    pub messages: Vec<runic_types::Message>,
+    pub messages: Vec<runic::types::Message>,
     pub event_count: u64,
     pub stats: ThreadStatsView,
 }
@@ -81,7 +81,7 @@ pub struct ThreadStatsView {
     pub last_prompt_tokens: u64,
     pub total_tool_calls: u64,
     #[schema(value_type = Object)]
-    pub tools: std::collections::HashMap<String, runic_state::ToolStat>,
+    pub tools: std::collections::HashMap<String, runic::state::ToolStat>,
     pub delegations: u64,
     pub delegation_errors: u64,
     pub delegated_input_tokens: u64,
@@ -91,8 +91,8 @@ pub struct ThreadStatsView {
     pub tasks_failed: u64,
 }
 
-impl From<&runic_state::SessionStats> for ThreadStatsView {
-    fn from(s: &runic_state::SessionStats) -> Self {
+impl From<&runic::state::SessionStats> for ThreadStatsView {
+    fn from(s: &runic::state::SessionStats) -> Self {
         Self {
             runs: s.runs,
             errored_runs: s.errored_runs,
@@ -176,7 +176,7 @@ pub struct SessionSummary {
     pub parent_session: Option<String>,
 }
 
-fn summary_from_meta(meta: runic_substrate::SessionMeta) -> SessionSummary {
+fn summary_from_meta(meta: runic::substrate::SessionMeta) -> SessionSummary {
     SessionSummary {
         session_id: meta.session_id,
         label: meta.label,
@@ -304,7 +304,7 @@ pub async fn list_sessions(
             &tenant,
             after,
             limit + 1,
-            runic_substrate::SessionScope::Roots,
+            runic::substrate::SessionScope::Roots,
         )
         .await?;
 
@@ -364,7 +364,7 @@ pub async fn list_session_children(
             &tenant,
             after,
             limit + 1,
-            runic_substrate::SessionScope::ChildrenOf(session_id),
+            runic::substrate::SessionScope::ChildrenOf(session_id),
         )
         .await?;
 

@@ -1,6 +1,6 @@
 use base64::Engine;
 use runic::Input;
-use runic_types::{ContentBlock, Message, MessageContent};
+use runic::types::{ContentBlock, Message, MessageContent};
 use serde::Deserialize;
 
 use crate::app::AppState;

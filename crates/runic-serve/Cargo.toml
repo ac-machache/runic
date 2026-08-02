@@ -13,14 +13,10 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+croner = { workspace = true }
 futures = { workspace = true }
 runic = { workspace = true }
-runic-agent = { path = "../runic-agent" }
-runic-state = { path = "../runic-state" }
-runic-tool = { path = "../runic-tool" }
-runic-types = { path = "../runic-types" }
-runic-substrate = { workspace = true }
-runic-transcriber = { path = "../runic-transcriber" }
 redis = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,7 +34,7 @@ utoipa-swagger-ui = { version = "9", optional = true, features = ["axum"] }
 uuid = { workspace = true }
 
 [features]
-postgres = ["runic-substrate/postgres"]
+postgres = ["runic/postgres"]
 redis = ["dep:redis"]
 docs-ui = ["dep:utoipa-swagger-ui", "utoipa-swagger-ui/vendored"]
 

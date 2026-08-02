@@ -6,12 +6,12 @@
 use chrono::{DateTime, Utc};
 use proptest::prelude::*;
 
-use runic_agent::AgentEvent;
+use runic::agent::AgentEvent;
+use runic::state::{RunEndStatus, RunOutcome, ToolStatus};
+use runic::substrate::SessionEvent;
+use runic::types::{Message, TokenUsage};
 use runic_serve::WireEvent;
 use runic_serve::wire::{from_agent_event, from_session_event};
-use runic_state::{RunEndStatus, RunOutcome, ToolStatus};
-use runic_substrate::SessionEvent;
-use runic_types::{Message, TokenUsage};
 
 fn ts() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()
@@ -89,13 +89,13 @@ fn session_event() -> impl Strategy<Value = SessionEvent> {
             run_id,
             turn: 1,
             model: "m".into(),
-            usage: runic_types::TokenUsage::default(),
+            usage: runic::types::TokenUsage::default(),
             model_ms: 3,
             at,
         }),
         "[a-z0-9-]{1,8}".prop_map(move |run_id| SessionEvent::RunEnd {
             run_id,
-            status: runic_state::RunEndStatus::Completed,
+            status: runic::state::RunEndStatus::Completed,
             outcome: RunOutcome::default(),
             at,
         }),

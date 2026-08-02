@@ -79,7 +79,7 @@ pub async fn wait_run(
     Tenant(tenant): Tenant,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
-    let run_id = runic_state::new_run_id();
+    let run_id = runic::state::new_run_id();
     let done = state.completions.ticket(&run_id);
     let agent = queue(&state, &tenant, &run_id, req).await?;
 
@@ -146,7 +146,7 @@ pub async fn forget_run(
     Tenant(tenant): Tenant,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<(StatusCode, Json<QueuedRun>), ServeError> {
-    let run_id = runic_state::new_run_id();
+    let run_id = runic::state::new_run_id();
     let agent = queue(&state, &tenant, &run_id, req).await?;
 
     tracing::info!(%tenant, %agent, %run_id, "stateless run queued");

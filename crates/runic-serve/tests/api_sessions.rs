@@ -9,10 +9,10 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use runic::substrate::SessionStore;
+use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{RunSpec, RunStatus};
-use runic_substrate::SessionStore;
-use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 use common::Harness;
 
@@ -437,7 +437,7 @@ async fn children_are_listed_separately_and_deleted_with_the_parent() {
             .append(
                 &tenant,
                 child,
-                &runic_substrate::SessionEvent::RunStart {
+                &runic::substrate::SessionEvent::RunStart {
                     run_id: format!("r-{child}"),
                     agent: Some("scout".into()),
                     audit: None,

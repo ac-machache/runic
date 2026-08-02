@@ -9,10 +9,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use runic::substrate::{ArtifactStore, LocalArtifactStore, SessionStore};
+use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{ServeConfig, router};
-use runic_substrate::{ArtifactStore, LocalArtifactStore, SessionStore};
-use runic_types::{ContentBlock, StopReason, TokenUsage};
 
 use common::Harness;
 
@@ -76,7 +76,7 @@ async fn wait_for_stored_events(
     tenant: &str,
     session_id: &str,
     min_events: usize,
-) -> Vec<runic_substrate::StoredEvent> {
+) -> Vec<runic::substrate::StoredEvent> {
     for _ in 0..50 {
         let events = store.read(tenant, session_id).await.unwrap();
         if events.len() >= min_events {
@@ -256,7 +256,7 @@ async fn delete_session_removes_local_artifact_blobs() {
     let app = router(
         ServeConfig::new(
             h.sessions.clone(),
-            runic_substrate::Blobs::from(artifact_store.clone()),
+            runic::substrate::Blobs::from(artifact_store.clone()),
             h.pool.clone(),
         )
         .agent("main", common::agent(Arc::new(PanicProvider))),
@@ -417,15 +417,15 @@ async fn run_persists_events_for_session_history() {
     let events =
         wait_for_stored_events(h.store().as_ref(), &h.tenant, "persisted-session", 4).await;
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic::substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("remember me"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic::substrate::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("pong"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic_substrate::SessionEvent::RunEnd { outcome, .. }
+        matches!(&stored.event, runic::substrate::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))
     }));
 

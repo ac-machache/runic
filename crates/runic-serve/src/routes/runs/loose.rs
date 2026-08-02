@@ -4,10 +4,11 @@ use axum::http::StatusCode;
 use serde::Serialize;
 
 use super::input::RunMessageRequest;
+use super::queue;
 use super::wait::{WaitRunResponse, await_completion, collect};
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
-use crate::store::{RunSpec, RunStatus};
+use crate::store::RunStatus;
 use crate::tenant::Tenant;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -23,40 +24,6 @@ pub struct LooseRunResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<WaitRunResponse>,
-}
-
-async fn queue(
-    state: &AppState,
-    tenant: &str,
-    run_id: &str,
-    req: RunMessageRequest,
-) -> Result<String, ServeError> {
-    let agent = state.agents.resolve_agent(req.agent.as_deref())?;
-    let context = req.context.clone();
-    let hook = req.hook.clone();
-    if let Some(name) = &hook
-        && !state.hooks.knows(name)
-    {
-        return Err(ServeError::BadRequest(format!(
-            "no run hook named {name:?} is registered; known hooks: {:?}",
-            state.hooks.names()
-        )));
-    }
-    let message = req.into_message()?;
-
-    let payload = serde_json::to_value(&message)
-        .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
-    let spec = RunSpec::new(tenant, run_id, &agent)
-        .input(payload)
-        .context(context)
-        .hook(hook);
-
-    state
-        .runs()
-        .enqueue(&spec)
-        .await
-        .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
-    Ok(agent)
 }
 
 #[utoipa::path(
@@ -81,7 +48,7 @@ pub async fn wait_run(
 ) -> Result<Json<WaitRunResponse>, ServeError> {
     let run_id = runic::state::new_run_id();
     let done = state.completions.ticket(&run_id);
-    let agent = queue(&state, &tenant, &run_id, req).await?;
+    let agent = queue::enqueue(&state, &tenant, &run_id, None, req).await?;
 
     tracing::info!(%tenant, %agent, %run_id, "stateless wait run queued");
 
@@ -147,7 +114,7 @@ pub async fn forget_run(
     Json(req): Json<RunMessageRequest>,
 ) -> Result<(StatusCode, Json<QueuedRun>), ServeError> {
     let run_id = runic::state::new_run_id();
-    let agent = queue(&state, &tenant, &run_id, req).await?;
+    let agent = queue::enqueue(&state, &tenant, &run_id, None, req).await?;
 
     tracing::info!(%tenant, %agent, %run_id, "stateless run queued");
 

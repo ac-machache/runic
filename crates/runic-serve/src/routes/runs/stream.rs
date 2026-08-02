@@ -8,10 +8,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 
 use super::input::RunMessageRequest;
+use super::queue;
 use super::wait::collect;
 use crate::app::AppState;
 use crate::error::{ErrorBody, ServeError};
-use crate::store::{RunSpec, RunStatus};
+use crate::store::RunStatus;
 use crate::tenant::Tenant;
 use crate::wire::WireEvent;
 
@@ -61,23 +62,8 @@ pub async fn open_stream(
     Path(session_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Response, ServeError> {
-    let agent = state.agents.resolve_agent(req.agent.as_deref())?;
-    let context = req.context.clone();
-    let message = req.into_message()?;
-
     let run_id = runic::state::new_run_id();
-    let payload = serde_json::to_value(&message)
-        .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
-    let spec = RunSpec::new(&tenant, &run_id, &agent)
-        .session(&session_id)
-        .input(payload)
-        .context(context);
-
-    state
-        .runs()
-        .enqueue(&spec)
-        .await
-        .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
+    let agent = queue::enqueue(&state, &tenant, &run_id, Some(&session_id), req).await?;
 
     tracing::info!(%tenant, %session_id, %agent, %run_id, "stream run queued");
 

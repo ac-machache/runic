@@ -93,6 +93,37 @@ async fn a_named_hook_runs_with_the_answer_once_the_run_settles() {
 }
 
 #[tokio::test]
+async fn a_session_run_fires_its_hook_and_names_the_session() {
+    let Some(harness) = common::harness().await else {
+        return;
+    };
+    let recorder = Recorder::default();
+    let app = router(
+        harness
+            .config()
+            .agent("main", common::agent(Arc::new(ScriptedProvider)))
+            .hook("record", recorder.clone()),
+    );
+
+    let session_id = common::uid("session");
+    let resp = app
+        .oneshot(common::post_json(
+            &format!("/sessions/{session_id}/runs/wait"),
+            &harness.tenant,
+            r#"{"message":"hello","hook":"record"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let fired = settled(&recorder).await.expect("the hook never fired");
+    assert_eq!(fired.output.text, "the answer");
+    assert_eq!(fired.status.as_str(), "successful");
+    assert_eq!(fired.session_id.as_deref(), Some(session_id.as_str()));
+    assert!(!fired.stateless());
+}
+
+#[tokio::test]
 async fn a_run_without_a_hook_fires_nothing() {
     let Some(h) = common::harness().await else {
         return;

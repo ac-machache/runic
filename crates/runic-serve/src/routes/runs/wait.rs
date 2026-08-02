@@ -5,10 +5,11 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 
 use super::input::RunMessageRequest;
+use super::queue;
 use crate::app::AppState;
 use crate::completion::Ticket;
 use crate::error::{ErrorBody, ServeError};
-use crate::store::{RunOutput, RunSpec, RunStatus};
+use crate::store::{RunOutput, RunStatus};
 use crate::tenant::Tenant;
 use runic::state::Deferral;
 
@@ -71,24 +72,9 @@ pub async fn wait_run(
     Path(session_id): Path<String>,
     Json(req): Json<RunMessageRequest>,
 ) -> Result<Json<WaitRunResponse>, ServeError> {
-    let agent = state.agents.resolve_agent(req.agent.as_deref())?;
-    let context = req.context.clone();
-    let message = req.into_message()?;
-
     let run_id = runic::state::new_run_id();
-    let payload = serde_json::to_value(&message)
-        .map_err(|error| ServeError::Internal(format!("could not encode the turn: {error}")))?;
-    let spec = RunSpec::new(&tenant, &run_id, &agent)
-        .session(&session_id)
-        .input(payload)
-        .context(context);
-
     let done = state.completions.ticket(&run_id);
-    state
-        .runs()
-        .enqueue(&spec)
-        .await
-        .map_err(|error| ServeError::Internal(format!("could not queue the run: {error}")))?;
+    let agent = queue::enqueue(&state, &tenant, &run_id, Some(&session_id), req).await?;
 
     tracing::info!(%tenant, %session_id, %agent, %run_id, "wait run queued");
 

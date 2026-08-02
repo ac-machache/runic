@@ -1,6 +1,7 @@
 pub mod control;
 pub mod input;
 pub mod loose;
+pub(crate) mod queue;
 pub mod stream;
 pub mod wait;
 

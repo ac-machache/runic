@@ -7,7 +7,7 @@ use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, Stre
 use async_trait::async_trait;
 use futures::StreamExt;
 use runic_types::ToolCall;
-use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage};
+use runic_types::{ContentBlock, Message, MessageContent, Role, Source, StopReason, TokenUsage};
 
 /// User-Agent sent on Anthropic API requests.
 const USER_AGENT: &str = "runic/0.1.0";
@@ -148,12 +148,38 @@ enum ApiContentBlock {
     RedactedThinking { data: String },
 }
 
+const ANTHROPIC: &str = "anthropic";
+
 #[derive(Debug, Serialize)]
-struct ApiImageSource {
-    #[serde(rename = "type")]
-    source_type: String,
-    media_type: String,
-    data: String,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ApiImageSource {
+    Base64 { media_type: String, data: String },
+    Url { url: String },
+    File { file_id: String },
+}
+
+impl ApiImageSource {
+    fn new(media_type: &str, source: &Source) -> Option<Self> {
+        match source {
+            Source::Inline(bytes) => {
+                use base64::Engine;
+                Some(ApiImageSource::Base64 {
+                    media_type: media_type.to_string(),
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                })
+            }
+            Source::Url(url) => Some(ApiImageSource::Url { url: url.clone() }),
+            Source::Uploaded { file_id, provider } if provider == ANTHROPIC => {
+                Some(ApiImageSource::File {
+                    file_id: file_id.clone(),
+                })
+            }
+            other => {
+                warn!(source = ?other, "Anthropic cannot take this source — dropping");
+                None
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -760,20 +786,14 @@ fn convert_message(msg: &Message) -> ApiMessage {
                     ContentBlock::Text { text, .. } => {
                         Some(ApiContentBlock::Text { text: text.clone() })
                     }
-                    ContentBlock::Image { media_type, data } => Some(ApiContentBlock::Image {
-                        source: ApiImageSource {
-                            source_type: "base64".to_string(),
-                            media_type: media_type.clone(),
-                            data: data.clone(),
-                        },
-                    }),
-                    ContentBlock::File { media_type, data } => Some(ApiContentBlock::Document {
-                        source: ApiImageSource {
-                            source_type: "base64".to_string(),
-                            media_type: media_type.clone(),
-                            data: data.clone(),
-                        },
-                    }),
+                    ContentBlock::Image {
+                        media_type, source, ..
+                    } => ApiImageSource::new(media_type, source)
+                        .map(|source| ApiContentBlock::Image { source }),
+                    ContentBlock::File {
+                        media_type, source, ..
+                    } => ApiImageSource::new(media_type, source)
+                        .map(|source| ApiContentBlock::Document { source }),
                     ContentBlock::ToolUse {
                         id, name, input, ..
                     } => Some(ApiContentBlock::ToolUse {
@@ -822,10 +842,6 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         } else {
                             Some(ApiContentBlock::RedactedThinking { data: data.clone() })
                         }
-                    }
-                    ContentBlock::ArtifactRef { id, .. } => {
-                        tracing::warn!(artifact = %id, "unresolved ArtifactRef reached Anthropic — dropping");
-                        None
                     }
                     ContentBlock::Unknown => None,
                 })
@@ -933,7 +949,8 @@ mod tests {
     fn file_block_maps_to_document() {
         let msg = Message::user_with_blocks(vec![ContentBlock::File {
             media_type: "application/pdf".into(),
-            data: "YWJj".into(),
+            filename: None,
+            source: Source::Inline(b"abc".to_vec()),
         }]);
         let ApiContent::Blocks(blocks) = convert_message(&msg).content else {
             panic!("expected blocks");

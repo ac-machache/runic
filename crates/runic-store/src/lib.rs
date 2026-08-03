@@ -1,4 +1,4 @@
-//! `runic-substrate` — the agent's durable substrate (OpenFang's term).
+//! `runic-store` — the agent's durable store.
 //!
 //! Two persistence concerns that share a database, keyed by
 //! `(tenant, session_id)`:
@@ -12,43 +12,44 @@
 //!
 //! They live together because the Postgres `artifacts` table FKs to
 //! `sessions` (delete a session → its artifacts cascade), and they share one
-//! pool + migration set. Backends are pluggable: ship `Memory`/`Local`
-//! artifact stores; the **`postgres`** feature adds `PostgresSessionStore` +
-//! `PostgresArtifactStore`. This is the durable layer — separate from the
-//! agent's working filesystem (`runic-filesystem`).
+//! pool + migration set. Artifact bytes are held by a single [`ArtifactStore`]
+//! over an OpenDAL operator — memory, local disk, S3, GCS or Azure Blob — and
+//! the **`postgres`** feature adds `PostgresSessionStore` plus an indexed
+//! `PostgresArtifactStore` layered over any of them. This is the durable layer
+//! — separate from the agent's working filesystem.
 
-mod artifacts;
-mod builders;
+pub mod artifacts;
 mod event;
-mod local;
 mod memory;
 mod persister;
 mod replay;
 mod sessions;
+mod store;
 pub mod timeline;
 
 #[cfg(feature = "postgres")]
 mod postgres;
 
-pub use artifacts::{Artifact, ArtifactSource, ArtifactStore};
-pub use builders::{Blobs, Sessions, blobs_local, blobs_memory, sessions_memory};
+#[cfg(feature = "sqlite")]
+mod sqlite;
+
+pub use artifacts::{Artifact, ArtifactFiles, ArtifactSource, ArtifactStore};
 pub use event::{SessionEvent, project};
-pub use local::LocalArtifactStore;
-pub use memory::{MemoryArtifactStore, MemorySessionStore};
+pub use memory::MemorySessionStore;
 pub use persister::{
     PersistDrain, PersistHandle, PersistPipe, RetryPolicy, StoreSubSession,
     attach as attach_persister, persist_channel, spawn_persist,
 };
 pub use replay::{replay_into_state, replay_messages};
 pub use sessions::{ChatHit, SessionMeta, SessionScope, SessionStore, StoredEvent};
+pub use store::{DEFAULT_ARTIFACT_DIR, Store};
 pub use timeline::{DelegationTrace, RunTrace, ToolTrace, TraceStatus, TurnTrace};
 
 #[cfg(feature = "postgres")]
-pub use builders::{
-    blobs_postgres, blobs_postgres_or_local, sessions_postgres, sessions_postgres_or_memory,
-};
-#[cfg(feature = "postgres")]
 pub use postgres::{PostgresArtifactStore, PostgresSessionStore};
+
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteSessionStore;
 
 /// One error type for the whole substrate — sessions and artifacts alike.
 #[derive(Debug, thiserror::Error)]

@@ -1,5 +1,5 @@
 [package]
-name = "runic-substrate"
+name = "runic-store"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -23,14 +23,20 @@ runic-types = { path = "../runic-types" }
 runic-tool = { path = "../runic-tool" }
 runic-hook = { path = "../runic-hook" }
 
+opendal = { workspace = true, features = ["services-memory", "services-fs"] }
+
 # Optional Postgres backends (session store + artifact metadata index). Off by
 # default so memory/local-fs users don't pull sqlx + a Postgres/TLS stack.
 sqlx = { version = "0.9", default-features = false, features = [
-    "runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "migrate", "macros", "sqlx-toml",
+    "runtime-tokio", "tls-rustls", "json", "chrono", "migrate", "macros", "sqlx-toml",
 ], optional = true }
 
 [features]
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "sqlx/postgres"]
+sqlite = ["dep:sqlx", "sqlx/sqlite"]
+s3 = ["opendal/services-s3"]
+gcs = ["opendal/services-gcs"]
+azblob = ["opendal/services-azblob"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

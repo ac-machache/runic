@@ -351,7 +351,7 @@ async fn run_start_event_records_the_agent() {
 
     let events = h.store().read(&h.tenant, &session).await.unwrap();
     let agent = events.iter().find_map(|e| match &e.event {
-        runic::substrate::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
+        runic::store::SessionEvent::RunStart { agent, .. } => Some(agent.clone()),
         _ => None,
     });
     assert_eq!(agent.flatten().as_deref(), Some("coral"));

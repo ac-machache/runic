@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+chrono = { workspace = true }
 runic-types = { path = "../runic-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +25,5 @@ uuid = { workspace = true, optional = true }
 [features]
 # Concrete drivers, opt-in (tree-shaking). The trait/contract always compiles.
 anthropic = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize"]
-openai    = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize"]
-mistral   = ["dep:futures", "dep:reqwest", "dep:tracing", "dep:zeroize"]
-gemini    = ["dep:futures", "dep:reqwest", "dep:tracing", "dep:zeroize", "dep:uuid"]
+mistral   = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize"]
+gemini    = ["dep:futures", "dep:reqwest", "dep:base64", "dep:tracing", "dep:zeroize", "dep:uuid"]

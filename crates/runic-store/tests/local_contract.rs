@@ -1,14 +1,9 @@
-//! Local (filesystem) artifact backend: the full `ArtifactStore` contract plus
-//! path-safety and corruption-handling risks unique to a filesystem store.
-//!
-//! Each suite store gets a fresh, unique root that does NOT pre-exist, so the
-//! whole contract also exercises lazy directory creation.
-
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use runic_substrate::{ArtifactSource, ArtifactStore, Error, LocalArtifactStore};
+use runic_store::artifacts::{self, ArtifactFiles};
+use runic_store::{ArtifactSource, ArtifactStore, Error};
 
 use crate::common::ids::uid;
 
@@ -17,11 +12,15 @@ fn fresh_root() -> PathBuf {
     std::env::temp_dir().join(uid("runic-substrate-local"))
 }
 
-artifact_store_contract_suite!(|| async { Some(LocalArtifactStore::new(fresh_root())) });
-artifact_store_delete_from_list_suite!(|| async { Some(LocalArtifactStore::new(fresh_root())) });
-artifact_store_stress_suite!(|| async { Some(LocalArtifactStore::new(fresh_root())) });
+fn store_at(root: impl AsRef<Path>) -> ArtifactFiles {
+    artifacts::local(root.as_ref().to_string_lossy()).unwrap()
+}
 
-async fn put_text(store: &LocalArtifactStore, t: &str, s: &str, body: &[u8]) -> String {
+artifact_store_contract_suite!(|| async { Some(store_at(fresh_root())) });
+artifact_store_delete_from_list_suite!(|| async { Some(store_at(fresh_root())) });
+artifact_store_stress_suite!(|| async { Some(store_at(fresh_root())) });
+
+async fn put_text(store: &ArtifactFiles, t: &str, s: &str, body: &[u8]) -> String {
     store
         .put(t, s, "text/plain", ArtifactSource::UserUpload, body)
         .await
@@ -33,7 +32,7 @@ async fn put_text(store: &LocalArtifactStore, t: &str, s: &str, body: &[u8]) -> 
 async fn root_and_parents_created_lazily() {
     let root = fresh_root().join("deeply").join("nested");
     assert!(!root.exists());
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     let id = put_text(&store, "t", "s", b"x").await;
     assert!(root.join("blobs").join(&id).exists());
 }
@@ -41,7 +40,7 @@ async fn root_and_parents_created_lazily() {
 #[tokio::test]
 async fn corrupt_metadata_file_is_error_not_panic() {
     let root = fresh_root();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     let id = put_text(&store, "t", "s", b"x").await;
     tokio::fs::write(
         root.join("blobs").join(format!("{id}.json")),
@@ -58,7 +57,7 @@ async fn corrupt_metadata_file_is_error_not_panic() {
 #[tokio::test]
 async fn missing_blob_with_existing_metadata() {
     let root = fresh_root();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     let id = put_text(&store, "t", "s", b"x").await;
     tokio::fs::remove_file(root.join("blobs").join(&id))
         .await
@@ -70,7 +69,7 @@ async fn missing_blob_with_existing_metadata() {
 #[tokio::test]
 async fn existing_blob_with_missing_metadata() {
     let root = fresh_root();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     let id = put_text(&store, "t", "s", b"x").await;
     tokio::fs::remove_file(root.join("blobs").join(format!("{id}.json")))
         .await
@@ -80,24 +79,21 @@ async fn existing_blob_with_missing_metadata() {
 }
 
 #[tokio::test]
-async fn corrupt_jsonl_index_line_is_skipped() {
+async fn unreadable_index_entry_is_skipped() {
     let root = fresh_root();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     put_text(&store, "t", "s", b"good").await;
-    // Append a junk line directly to the index — list must skip it, not fail.
-    let index = root.join("index").join("t").join("s.jsonl");
-    let mut content = tokio::fs::read_to_string(&index).await.unwrap();
-    content.push_str("this is not json\n");
-    tokio::fs::write(&index, content).await.unwrap();
+
+    let marker = root.join("index").join("t").join("s").join("art-ghost");
+    tokio::fs::write(&marker, b"").await.unwrap();
+
     assert_eq!(
         store.list("t", "s").await.unwrap().len(),
         1,
-        "valid entries survive a corrupt line"
+        "valid entries survive an index entry with no metadata behind it"
     );
 }
 
-/// A write into a non-writable store dir surfaces as `Error::Io`, not a panic.
-/// (Skipped when running as root, which ignores the mode bits.)
 #[cfg(unix)]
 #[tokio::test]
 async fn permission_denied_maps_to_io_error() {
@@ -109,7 +105,7 @@ async fn permission_denied_maps_to_io_error() {
         .await
         .unwrap();
 
-    let r = LocalArtifactStore::new(&root)
+    let r = store_at(&root)
         .put("t", "s", "text/plain", ArtifactSource::UserUpload, b"x")
         .await;
     tokio::fs::set_permissions(&blobs, std::fs::Permissions::from_mode(0o755))
@@ -129,7 +125,7 @@ async fn permission_denied_maps_to_io_error() {
 
 #[tokio::test]
 async fn delete_of_missing_file_succeeds() {
-    let store = LocalArtifactStore::new(fresh_root());
+    let store = store_at(fresh_root());
     store.delete(&uid("art-never")).await.unwrap();
 }
 
@@ -142,7 +138,7 @@ async fn artifact_id_whitelist_rejects_path_tricks() {
         .await
         .unwrap();
     tokio::fs::write(&outside, b"do not touch").await.unwrap();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
 
     for evil in [
         "../secret",
@@ -171,35 +167,35 @@ async fn artifact_id_whitelist_rejects_path_tricks() {
     );
 }
 
-/// `list` skips entries whose blob is gone — so a deleted artifact (whose
-/// append-only index line survives) no longer shows up, and an externally
-/// removed blob self-heals out of the listing too.
 #[tokio::test]
-async fn list_skips_entries_with_missing_blob() {
+async fn delete_clears_the_index_entry() {
     let root = fresh_root();
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     let deleted = put_text(&store, "t", "s", b"bye").await;
-    let orphaned = put_text(&store, "t", "s", b"orphan").await;
     let kept = put_text(&store, "t", "s", b"keep").await;
 
     store.delete(&deleted).await.unwrap();
-    tokio::fs::remove_file(root.join("blobs").join(&orphaned))
-        .await
-        .unwrap();
 
     let ids: Vec<String> = store
         .list("t", "s")
         .await
         .unwrap()
         .into_iter()
-        .map(|a| a.id)
+        .map(|artifact| artifact.id)
         .collect();
     assert_eq!(ids, vec![kept]);
+
+    assert!(
+        !root
+            .join("index")
+            .join("t")
+            .join("s")
+            .join(&deleted)
+            .exists(),
+        "the index entry is gone, not merely filtered at read time"
+    );
 }
 
-/// Documents the trusted-root assumption: Local follows a symlink placed inside
-/// its own `blobs/` dir. The store does not defend against an attacker who can
-/// already write files into the store root — that is out of its threat model.
 #[cfg(unix)]
 #[tokio::test]
 async fn symlink_inside_root_is_followed_trusted_root() {
@@ -212,7 +208,7 @@ async fn symlink_inside_root_is_followed_trusted_root() {
         .await
         .unwrap();
 
-    let store = LocalArtifactStore::new(&root);
+    let store = store_at(&root);
     // `linkid` passes the id whitelist and resolves through the symlink.
     assert_eq!(store.get("linkid").await.unwrap(), b"external");
 }

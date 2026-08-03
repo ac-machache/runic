@@ -61,7 +61,7 @@ impl From<Deferral> for Awaiting {
     ),
     responses(
         (status = 200, description = "The completed run", body = WaitRunResponse),
-        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 400, description = "Invalid body or stored artifact", body = ErrorBody),
         (status = 500, description = "The run failed (provider error, max turns, ...)", body = ErrorBody),
         (status = 504, description = "The run did not finish within the wait window", body = ErrorBody)
     )

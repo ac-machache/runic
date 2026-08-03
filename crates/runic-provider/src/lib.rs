@@ -17,9 +17,7 @@ pub mod anthropic;
 #[cfg(feature = "anthropic")]
 pub use anthropic::AnthropicDriver;
 
-#[cfg(feature = "openai")]
-pub mod openai;
-#[cfg(any(feature = "openai", feature = "mistral"))]
+#[cfg(feature = "mistral")]
 mod think_filter;
 
 #[cfg(feature = "mistral")]

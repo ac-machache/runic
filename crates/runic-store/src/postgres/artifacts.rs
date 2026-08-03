@@ -172,6 +172,15 @@ impl ArtifactStore for PostgresArtifactStore {
         self.bytes.url(id).await
     }
 
+    fn reindex(&self, bytes: Arc<dyn ArtifactStore>) -> Option<Arc<dyn ArtifactStore>> {
+        Some(Arc::new(Self {
+            pool: self.pool.clone(),
+            bytes,
+            storage: self.storage.clone(),
+            sweep_margin: self.sweep_margin,
+        }))
+    }
+
     async fn sweep_orphans(
         &self,
         tenant: &str,

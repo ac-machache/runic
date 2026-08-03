@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use axum::http::StatusCode;
 use tower::ServiceExt;
 
+use runic::store::SessionEvent;
 use runic::subagent::{DelegateTool, Subagent};
-use runic::substrate::SessionEvent;
 use runic::types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 use runic::{Agent, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};

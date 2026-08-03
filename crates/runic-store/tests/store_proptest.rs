@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{MemorySessionStore, SessionStore};
+use runic_store::SessionEvent;
+use runic_store::{MemorySessionStore, SessionStore};
 use runic_types::Message;
 
 fn ts() -> DateTime<Utc> {

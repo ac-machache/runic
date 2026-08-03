@@ -10,7 +10,7 @@ use runic::composer::Agent;
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_skills::SkillSet;
 use runic_state::{AgentState, SessionStats};
-use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
+use runic_store::{MemorySessionStore, SessionEvent, SessionStore};
 use runic_types::{ContentBlock, Message, StopReason, TokenUsage};
 
 struct NoopProvider;

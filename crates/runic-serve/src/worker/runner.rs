@@ -100,9 +100,7 @@ async fn turn(
         Some(payload) => {
             let message: Message = serde_json::from_value(payload)
                 .map_err(|error| format!("unreadable turn: {error}"))?;
-            input_from_message(state, &run.tenant, session_id, message)
-                .await
-                .map_err(|error| error.to_string())?
+            input_from_message(message).map_err(|error| error.to_string())?
         }
         None => Input::new().answer(
             run.answer

@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use runic::substrate::{ArtifactStore, LocalArtifactStore, SessionStore};
+use runic::store::{ArtifactStore, SessionStore, artifacts};
 use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::{ServeConfig, router};
@@ -76,7 +76,7 @@ async fn wait_for_stored_events(
     tenant: &str,
     session_id: &str,
     min_events: usize,
-) -> Vec<runic::substrate::StoredEvent> {
+) -> Vec<runic::store::StoredEvent> {
     for _ in 0..50 {
         let events = store.read(tenant, session_id).await.unwrap();
         if events.len() >= min_events {
@@ -252,11 +252,11 @@ async fn delete_session_removes_local_artifact_blobs() {
         return;
     };
     let root = tempfile::tempdir().unwrap();
-    let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root.path()));
+    let artifact_store: Arc<dyn ArtifactStore> =
+        Arc::new(artifacts::local(root.path().to_string_lossy()).expect("local artifacts"));
     let app = router(
         ServeConfig::new(
-            h.sessions.clone(),
-            runic::substrate::Blobs::from(artifact_store.clone()),
+            runic::store::Store::from((h.durable.sessions(), artifact_store.clone())),
             h.pool.clone(),
         )
         .agent("main", common::agent(Arc::new(PanicProvider))),
@@ -417,15 +417,15 @@ async fn run_persists_events_for_session_history() {
     let events =
         wait_for_stored_events(h.store().as_ref(), &h.tenant, "persisted-session", 4).await;
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic::substrate::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic::store::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("remember me"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic::substrate::SessionEvent::Message { msg, .. }
+        matches!(&stored.event, runic::store::SessionEvent::Message { msg, .. }
             if msg.content.text_content().contains("pong"))
     }));
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic::substrate::SessionEvent::RunEnd { outcome, .. }
+        matches!(&stored.event, runic::store::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))
     }));
 

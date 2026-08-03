@@ -1582,6 +1582,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -2774,7 +2775,7 @@ dependencies = [
  "runic-provider",
  "runic-skills",
  "runic-state",
- "runic-substrate",
+ "runic-store",
  "runic-tool",
  "runic-transcriber",
  "runic-types",
@@ -2878,6 +2879,7 @@ version = "0.11.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "futures",
  "reqwest",
  "runic-types",
@@ -2955,13 +2957,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "runic-substrate"
+name = "runic-store"
 version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "opendal",
  "proptest",
  "runic-hook",
  "runic-state",
@@ -3009,6 +3012,7 @@ dependencies = [
 name = "runic-types"
 version = "0.11.0"
 dependencies = [
+ "base64 0.22.1",
  "proptest",
  "rmp-serde",
  "serde",

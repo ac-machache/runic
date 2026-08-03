@@ -64,7 +64,7 @@ impl Runner {
         // No artifact pointer may reach a provider — fail loud, never silently
         // drop a file the model was meant to see. Resolving them into bytes is a
         // `before_model` hook's job; this is the backstop when none did.
-        if let Some(id) = first_artifact_ref(&request) {
+        if let Some(id) = first_stored_artifact(&request) {
             return Err(AgentError::Media(format!(
                 "unresolved artifact reference {id} reached the model call"
             )));
@@ -158,13 +158,15 @@ impl Runner {
     }
 }
 
-fn first_artifact_ref(request: &CompletionRequest) -> Option<&str> {
-    request.messages.iter().find_map(|m| {
-        let MessageContent::Blocks(blocks) = &m.content else {
+fn first_stored_artifact(request: &CompletionRequest) -> Option<&str> {
+    request.messages.iter().find_map(|message| {
+        let MessageContent::Blocks(blocks) = &message.content else {
             return None;
         };
-        blocks.iter().find_map(|b| match b {
-            ContentBlock::ArtifactRef { id, .. } => Some(id.as_str()),
+        blocks.iter().find_map(|block| match block {
+            ContentBlock::Image { source, .. } | ContentBlock::File { source, .. } => {
+                source.stored()
+            }
             _ => None,
         })
     })

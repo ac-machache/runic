@@ -5,10 +5,9 @@
 use proptest::prelude::*;
 use tokio::runtime::Runtime;
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{
-    ArtifactSource, ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
-};
+use runic_store::SessionEvent;
+use runic_store::artifacts;
+use runic_store::{ArtifactSource, ArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::Message;
 
 fn rt() -> Runtime {
@@ -112,7 +111,7 @@ proptest! {
     #[test]
     fn artifact_put_get_head_consistent(bytes in prop::collection::vec(any::<u8>(), 0..4096)) {
         rt().block_on(async {
-            let store = MemoryArtifactStore::new();
+            let store = artifacts::memory().unwrap();
             let a = store.put("t", "s", "application/octet-stream", ArtifactSource::ToolOutput, &bytes).await.unwrap();
             prop_assert_eq!(a.size, bytes.len() as u64);
             prop_assert_eq!(store.get(&a.id).await.unwrap(), bytes);
@@ -129,7 +128,7 @@ proptest! {
     #[test]
     fn artifact_delete_matches_model(count in 0usize..30, drops in prop::collection::vec(any::<bool>(), 0..30)) {
         rt().block_on(async {
-            let store = MemoryArtifactStore::new();
+            let store = artifacts::memory().unwrap();
             let mut ids = Vec::new();
             for i in 0..count {
                 let a = store.put("t", "s", "text/plain", ArtifactSource::UserUpload, format!("n{i}").as_bytes()).await.unwrap();

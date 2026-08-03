@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
-use base64::Engine;
-
 use runic_agent::{CancelToken, RunContext};
 use runic_provider::Provider;
 use runic_state::Emitter;
-use runic_types::{ContentBlock, Message};
+use runic_types::{ContentBlock, Message, Source};
 
 #[derive(Default)]
 pub struct Input {
@@ -26,42 +24,58 @@ impl Input {
         }
     }
 
-    pub fn image(mut self, media_type: impl Into<String>, bytes: impl AsRef<[u8]>) -> Self {
+    pub fn image(mut self, media_type: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
         self.attachments.push(ContentBlock::Image {
             media_type: media_type.into(),
-            data: encode(bytes),
+            filename: None,
+            source: Source::Inline(bytes.into()),
         });
         self
     }
 
-    pub fn file(mut self, media_type: impl Into<String>, bytes: impl AsRef<[u8]>) -> Self {
+    pub fn file(mut self, media_type: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
         self.attachments.push(ContentBlock::File {
             media_type: media_type.into(),
-            data: encode(bytes),
+            filename: None,
+            source: Source::Inline(bytes.into()),
         });
         self
     }
 
-    pub fn artifact(mut self, id: impl Into<String>, media_type: impl Into<String>) -> Self {
-        self.attachments.push(ContentBlock::ArtifactRef {
-            id: id.into(),
-            media_type: media_type.into(),
-            filename: None,
-        });
-        self
+    pub fn artifact(self, id: impl Into<String>, media_type: impl Into<String>) -> Self {
+        self.stored(id, media_type, None)
     }
 
     pub fn named_artifact(
-        mut self,
+        self,
         id: impl Into<String>,
         media_type: impl Into<String>,
         filename: impl Into<String>,
     ) -> Self {
-        self.attachments.push(ContentBlock::ArtifactRef {
-            id: id.into(),
-            media_type: media_type.into(),
-            filename: Some(filename.into()),
-        });
+        self.stored(id, media_type, Some(filename.into()))
+    }
+
+    fn stored(
+        mut self,
+        id: impl Into<String>,
+        media_type: impl Into<String>,
+        filename: Option<String>,
+    ) -> Self {
+        let media_type = media_type.into();
+        let source = Source::Stored(id.into());
+        self.attachments
+            .push(match media_type.starts_with("image/") {
+                true => ContentBlock::Image {
+                    media_type,
+                    filename,
+                    source,
+                },
+                false => ContentBlock::File {
+                    media_type,
+                    filename,
+                    source,
+                },
+            });
         self
     }
 
@@ -141,10 +155,6 @@ impl Input {
     }
 }
 
-fn encode(bytes: impl AsRef<[u8]>) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,8 +177,8 @@ mod tests {
         assert!(matches!(&blocks[0], ContentBlock::Text { text, .. } if text == "what is this"));
         assert!(matches!(
             &blocks[1],
-            ContentBlock::Image { media_type, data }
-                if media_type == "image/png" && data == "iVBORw=="
+            ContentBlock::Image { media_type, source, .. }
+                if media_type == "image/png" && source.inline() == Some(b"\x89PNG".as_slice())
         ));
     }
 
@@ -179,7 +189,25 @@ mod tests {
             panic!("attachments make a blocks message");
         };
         assert_eq!(blocks.len(), 1);
-        assert!(matches!(&blocks[0], ContentBlock::ArtifactRef { id, .. } if id == "art-7f3"));
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::Image { source, .. } if source.stored() == Some("art-7f3")
+        ));
+    }
+
+    #[test]
+    fn a_stored_document_is_a_file_block_not_an_image() {
+        let (msg, _) = Input::new()
+            .named_artifact("art-9", "application/pdf", "invoice.pdf")
+            .split();
+        let MessageContent::Blocks(blocks) = msg.content else {
+            panic!("attachments make a blocks message");
+        };
+        assert!(matches!(
+            &blocks[0],
+            ContentBlock::File { filename, source, .. }
+                if filename.as_deref() == Some("invoice.pdf") && source.stored() == Some("art-9")
+        ));
     }
 
     #[test]

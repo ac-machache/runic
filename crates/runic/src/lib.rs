@@ -49,10 +49,10 @@ pub mod skills {
 pub mod state {
     pub use runic_state::*;
 }
-pub mod subagent;
-pub mod substrate {
-    pub use runic_substrate::*;
+pub mod store {
+    pub use runic_store::*;
 }
+pub mod subagent;
 pub mod tool {
     pub use runic_tool::*;
 }

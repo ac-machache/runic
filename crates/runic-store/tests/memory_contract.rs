@@ -5,18 +5,17 @@ mod common;
 
 use std::sync::Arc;
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{
-    ArtifactSource, ArtifactStore, MemoryArtifactStore, MemorySessionStore, SessionStore,
-};
+use runic_store::SessionEvent;
+use runic_store::artifacts;
+use runic_store::{ArtifactSource, ArtifactStore, MemorySessionStore, SessionStore};
 use runic_types::Message;
 
 session_store_contract_suite!(|| async { Some(MemorySessionStore::new()) });
 session_store_search_suite!(|| async { Some(MemorySessionStore::new()) });
-artifact_store_contract_suite!(|| async { Some(MemoryArtifactStore::new()) });
-artifact_store_delete_from_list_suite!(|| async { Some(MemoryArtifactStore::new()) });
+artifact_store_contract_suite!(|| async { Some(artifacts::memory().unwrap()) });
+artifact_store_delete_from_list_suite!(|| async { Some(artifacts::memory().unwrap()) });
 session_store_stress_suite!(|| async { Some(MemorySessionStore::new()) });
-artifact_store_stress_suite!(|| async { Some(MemoryArtifactStore::new()) });
+artifact_store_stress_suite!(|| async { Some(artifacts::memory().unwrap()) });
 
 fn msg(text: &str) -> SessionEvent {
     SessionEvent::Message {
@@ -66,7 +65,7 @@ async fn returned_events_are_owned_clones() {
 /// reference the caller could mutate underneath the store.
 #[tokio::test]
 async fn artifact_bytes_are_owned_copies() {
-    let store = MemoryArtifactStore::new();
+    let store = artifacts::memory().unwrap();
     let a = store
         .put(
             "t",

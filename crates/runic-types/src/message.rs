@@ -80,6 +80,95 @@ impl Default for Message {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    Inline(#[serde(with = "inline_bytes")] Vec<u8>),
+    Url(String),
+    Stored(String),
+    Uploaded { file_id: String, provider: String },
+}
+
+mod inline_bytes {
+    use base64::Engine;
+    use serde::{Deserializer, Serializer, de};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        match serializer.is_human_readable() {
+            true => {
+                serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
+            false => serializer.serialize_bytes(bytes),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        struct Bytes;
+
+        impl<'de> de::Visitor<'de> for Bytes {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("base64 text or raw bytes")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Vec<u8>, E> {
+                base64::engine::general_purpose::STANDARD
+                    .decode(text)
+                    .map_err(de::Error::custom)
+            }
+
+            fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(bytes.to_vec())
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, bytes: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(bytes)
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or_default());
+                while let Some(byte) = seq.next_element()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_any(Bytes)
+    }
+}
+
+impl Source {
+    pub fn inline(&self) -> Option<&[u8]> {
+        match self {
+            Source::Inline(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    pub fn url(&self) -> Option<&str> {
+        match self {
+            Source::Url(url) => Some(url),
+            _ => None,
+        }
+    }
+
+    pub fn stored(&self) -> Option<&str> {
+        match self {
+            Source::Stored(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn uploaded(&self) -> Option<(&str, &str)> {
+        match self {
+            Source::Uploaded { file_id, provider } => Some((file_id, provider)),
+            _ => None,
+        }
+    }
+}
+
 /// A content block within a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -95,28 +184,21 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<serde_json::Value>,
     },
-    /// An inline base64-encoded image.
     #[serde(rename = "image")]
     Image {
-        /// MIME type (e.g. "image/png", "image/jpeg").
-        media_type: String,
-        /// Base64-encoded image data.
-        data: String,
-    },
-    /// An inline base64-encoded file (e.g. a PDF) for providers that accept
-    /// document input.
-    #[serde(rename = "file")]
-    File { media_type: String, data: String },
-    /// A reference to a stored artifact (filesystem/S3/…). Persisted in the
-    /// event log in place of inline bytes; a media-aware provider resolves it
-    /// to an `Image`/`File` (bytes loaded from the store) just before the model
-    /// call, so the log stays lean.
-    #[serde(rename = "artifact_ref")]
-    ArtifactRef {
-        id: String,
         media_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
+        #[serde(flatten)]
+        source: Source,
+    },
+    #[serde(rename = "file")]
+    File {
+        media_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+        #[serde(flatten)]
+        source: Source,
     },
     /// A tool use request from the assistant.
     #[serde(rename = "tool_use")]
@@ -299,7 +381,6 @@ impl MessageContent {
                     }
                     ContentBlock::Image { .. }
                     | ContentBlock::File { .. }
-                    | ContentBlock::ArtifactRef { .. }
                     | ContentBlock::RedactedThinking { .. }
                     | ContentBlock::Unknown => 0,
                 })
@@ -513,35 +594,107 @@ mod tests {
     fn test_content_block_image_serde() {
         let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
-            data: "base64data".to_string(),
+            filename: None,
+            source: Source::Inline(b"raw bytes".to_vec()),
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "image");
         assert_eq!(json["media_type"], "image/png");
+        assert_eq!(json["inline"], "cmF3IGJ5dGVz");
+        assert!(json.get("filename").is_none());
     }
 
     #[test]
-    fn test_content_block_artifact_ref_roundtrip() {
-        let block = ContentBlock::ArtifactRef {
-            id: "art-abc".to_string(),
-            media_type: "application/pdf".to_string(),
-            filename: Some("invoice.pdf".to_string()),
-        };
-        let json = serde_json::to_value(&block).unwrap();
-        assert_eq!(json["type"], "artifact_ref");
-        assert_eq!(json["id"], "art-abc");
-        assert_eq!(json["filename"], "invoice.pdf");
-        let back: ContentBlock = serde_json::from_value(json).unwrap();
-        assert!(matches!(back, ContentBlock::ArtifactRef { id, .. } if id == "art-abc"));
-
-        // filename is optional and omitted when None
-        let no_name = ContentBlock::ArtifactRef {
-            id: "art-x".to_string(),
+    fn inline_bytes_are_base64_in_json_and_raw_in_msgpack() {
+        let block = ContentBlock::Image {
             media_type: "image/png".to_string(),
             filename: None,
+            source: Source::Inline(b"\x89PNG\r\n\x1a\n".to_vec()),
         };
-        let json = serde_json::to_value(&no_name).unwrap();
-        assert!(json.get("filename").is_none());
+
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("iVBORw0KGgo="), "{json}");
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            source_of(&back).and_then(Source::inline),
+            Some(b"\x89PNG\r\n\x1a\n".as_slice())
+        );
+
+        let packed = rmp_serde::to_vec_named(&block).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&packed).contains("iVBORw"),
+            "msgpack must carry the bytes, not a base64 string"
+        );
+        let back: ContentBlock = rmp_serde::from_slice(&packed).unwrap();
+        assert_eq!(
+            source_of(&back).and_then(Source::inline),
+            Some(b"\x89PNG\r\n\x1a\n".as_slice())
+        );
+        assert!(
+            packed.len() < json.len(),
+            "raw bytes must beat base64: {} packed vs {} json",
+            packed.len(),
+            json.len()
+        );
+    }
+
+    fn source_of(block: &ContentBlock) -> Option<&Source> {
+        match block {
+            ContentBlock::Image { source, .. } | ContentBlock::File { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn each_source_names_a_file_a_different_way() {
+        let cases = [
+            (
+                Source::Inline(b"raw bytes".to_vec()),
+                serde_json::json!({ "inline": "cmF3IGJ5dGVz" }),
+            ),
+            (
+                Source::Stored("art-abc".to_string()),
+                serde_json::json!({ "stored": "art-abc" }),
+            ),
+            (
+                Source::Uploaded {
+                    file_id: "file-xyz".to_string(),
+                    provider: "anthropic".to_string(),
+                },
+                serde_json::json!({ "uploaded": { "file_id": "file-xyz", "provider": "anthropic" } }),
+            ),
+        ];
+
+        for (source, expected) in cases {
+            let block = ContentBlock::File {
+                media_type: "application/pdf".to_string(),
+                filename: Some("invoice.pdf".to_string()),
+                source: source.clone(),
+            };
+            let json = serde_json::to_value(&block).unwrap();
+            assert_eq!(json["type"], "file");
+            assert_eq!(json["filename"], "invoice.pdf");
+            for (key, value) in expected.as_object().unwrap() {
+                assert_eq!(&json[key], value, "{source:?}");
+            }
+
+            let back: ContentBlock = serde_json::from_value(json).unwrap();
+            let ContentBlock::File { source: back, .. } = back else {
+                panic!("expected a File block");
+            };
+            assert_eq!(back, source);
+        }
+    }
+
+    #[test]
+    fn a_provider_handle_says_whose_it_is() {
+        let source = Source::Uploaded {
+            file_id: "file-xyz".to_string(),
+            provider: "anthropic".to_string(),
+        };
+        assert_eq!(source.uploaded(), Some(("file-xyz", "anthropic")));
+        assert!(source.inline().is_none());
+        assert!(source.stored().is_none());
     }
 
     #[test]
@@ -770,7 +923,8 @@ mod tests {
             },
             ContentBlock::Image {
                 media_type: "image/jpeg".to_string(),
-                data: "base64data".to_string(),
+                filename: None,
+                source: Source::Inline(b"raw bytes".to_vec()),
             },
         ];
         let msg = Message::user_with_blocks(blocks);

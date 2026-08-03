@@ -10,10 +10,7 @@ use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 
-use runic::substrate::{
-    ArtifactStore, Blobs, MemoryArtifactStore, MemorySessionStore, PostgresSessionStore,
-    SessionStore, Sessions,
-};
+use runic::store::{ArtifactStore, PostgresSessionStore, SessionStore, Store};
 use runic::{Agent, Llm};
 use runic_provider::Provider;
 use runic_serve::{HostedAgents, PgPool, Runs, ServeConfig, router};
@@ -62,14 +59,13 @@ pub async fn test_pool() -> Option<PgPool> {
 
 pub struct Harness {
     pub pool: PgPool,
-    pub sessions: Sessions,
-    pub blobs: Blobs,
+    pub durable: Store,
     pub tenant: String,
 }
 
 impl Harness {
     pub fn config(&self) -> ServeConfig {
-        ServeConfig::new(self.sessions.clone(), self.blobs.clone(), self.pool.clone())
+        ServeConfig::new(self.durable.clone(), self.pool.clone())
     }
 
     pub fn router_with(&self, name: &str, agent: impl Into<HostedAgents>) -> Router {
@@ -81,7 +77,7 @@ impl Harness {
     }
 
     pub fn store(&self) -> Arc<dyn SessionStore> {
-        self.sessions.store()
+        self.durable.sessions()
     }
 
     pub fn runs(&self) -> Runs {
@@ -93,7 +89,7 @@ impl Harness {
     }
 
     pub fn artifacts(&self) -> Arc<dyn ArtifactStore> {
-        self.blobs.store()
+        self.durable.artifacts()
     }
 }
 
@@ -105,12 +101,9 @@ pub async fn harness() -> Option<Harness> {
     runic_serve::store::migrate(&pool)
         .await
         .expect("serve run schema setup");
-    let sessions = Sessions::from(Arc::new(MemorySessionStore::new()) as Arc<dyn SessionStore>);
-    let blobs = Blobs::from(Arc::new(MemoryArtifactStore::new()) as Arc<dyn ArtifactStore>);
     Some(Harness {
         pool,
-        sessions,
-        blobs,
+        durable: Store::memory().expect("in-memory store"),
         tenant: uid("tenant"),
     })
 }

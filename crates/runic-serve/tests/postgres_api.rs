@@ -13,9 +13,8 @@ use axum::http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use runic::substrate::{
-    ArtifactStore, Blobs, LocalArtifactStore, PostgresArtifactStore, PostgresSessionStore,
-    SessionStore, Sessions,
+use runic::store::{
+    ArtifactStore, PostgresArtifactStore, PostgresSessionStore, SessionStore, Store, artifacts,
 };
 use runic::types::{ContentBlock, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
@@ -50,7 +49,8 @@ async fn pg_router(root: &Path) -> Option<(Router, Arc<dyn SessionStore>, Arc<dy
     runic_serve::store::migrate(&pool)
         .await
         .expect("serve run schema setup");
-    let bytes: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(root));
+    let bytes: Arc<dyn ArtifactStore> =
+        Arc::new(artifacts::local(root.to_string_lossy()).expect("local artifacts"));
     let artifacts = PostgresArtifactStore::from_pool(pool.clone(), bytes, "local")
         .await
         .expect("connect artifact store");
@@ -58,12 +58,8 @@ async fn pg_router(root: &Path) -> Option<(Router, Arc<dyn SessionStore>, Arc<dy
     let sessions: Arc<dyn SessionStore> = Arc::new(sessions);
     let artifacts: Arc<dyn ArtifactStore> = Arc::new(artifacts);
     let app = router(
-        ServeConfig::new(
-            Sessions::from(sessions.clone()),
-            Blobs::from(artifacts.clone()),
-            pool,
-        )
-        .agent("main", common::agent(Arc::new(ScriptedProvider))),
+        ServeConfig::new(Store::from((sessions.clone(), artifacts.clone())), pool)
+            .agent("main", common::agent(Arc::new(ScriptedProvider))),
     );
     Some((app, sessions, artifacts))
 }
@@ -216,7 +212,7 @@ async fn wait_run_persists_the_full_lifecycle_on_postgres() {
     wait_for_events(sessions.as_ref(), &tenant, &session, 4).await;
     let events = sessions.read(&tenant, &session).await.unwrap();
     assert!(events.iter().any(|stored| {
-        matches!(&stored.event, runic::substrate::SessionEvent::RunEnd { outcome, .. }
+        matches!(&stored.event, runic::store::SessionEvent::RunEnd { outcome, .. }
             if outcome.stop_reason.as_deref() == Some("end_turn"))
     }));
 }

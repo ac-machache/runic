@@ -10,10 +10,11 @@
 use async_trait::async_trait;
 use chrono::Utc;
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{
-    ArtifactSource, ArtifactStore, Error, MemoryArtifactStore, MemorySessionStore, Result,
-    SessionMeta, SessionStore, StoredEvent,
+use runic_store::SessionEvent;
+use runic_store::artifacts;
+use runic_store::{
+    ArtifactSource, ArtifactStore, Error, MemorySessionStore, Result, SessionMeta, SessionStore,
+    StoredEvent,
 };
 use runic_types::Message;
 
@@ -29,7 +30,7 @@ async fn unknown_session_reads_empty_not_error() {
 
 #[tokio::test]
 async fn unknown_artifact_is_notfound_with_id_context() {
-    let s = MemoryArtifactStore::new();
+    let s = artifacts::memory().unwrap();
     let err = s.get("art-missing").await.unwrap_err();
     assert!(matches!(err, Error::NotFound(_)));
     // context preserved: the id is safe to surface
@@ -39,7 +40,7 @@ async fn unknown_artifact_is_notfound_with_id_context() {
 #[tokio::test]
 async fn error_display_never_leaks_artifact_bytes() {
     // A secret-looking payload must never appear in any error message.
-    let store = MemoryArtifactStore::new();
+    let store = artifacts::memory().unwrap();
     let secret = b"SUPER_SECRET_TOKEN_abc123";
     let a = store
         .put("t", "s", "text/plain", ArtifactSource::UserUpload, secret)
@@ -169,7 +170,7 @@ async fn default_list_sessions_page_keyset_filters() {
         .unwrap();
     }
     let first = s
-        .list_sessions_page("t", None, 2, runic_substrate::SessionScope::All)
+        .list_sessions_page("t", None, 2, runic_store::SessionScope::All)
         .await
         .unwrap();
     assert_eq!(first.len(), 2);
@@ -179,7 +180,7 @@ async fn default_list_sessions_page_keyset_filters() {
             "t",
             Some((last.last_activity, last.session_id.clone())),
             2,
-            runic_substrate::SessionScope::All,
+            runic_store::SessionScope::All,
         )
         .await
         .unwrap();

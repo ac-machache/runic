@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 runic-provider = { path = "../runic-provider" }
-runic-substrate = { path = "../runic-substrate", features = ["postgres"] }
+runic-store = { path = "../runic-store", features = ["postgres", "sqlite"] }
 runic-tool = { path = "../runic-tool" }
 runic-hook = { path = "../runic-hook" }
 runic-skills = { path = "../runic-skills" }
@@ -42,8 +42,7 @@ tracing-subscriber = { workspace = true }
 
 [features]
 web-extract = ["dep:runic-extract"]
-postgres = ["runic-substrate/postgres"]
+postgres = ["runic-store/postgres"]
 anthropic = ["runic-provider/anthropic"]
-openai = ["runic-provider/openai"]
 mistral = ["runic-provider/mistral"]
 gemini = ["runic-provider/gemini"]

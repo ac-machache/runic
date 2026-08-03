@@ -1,4 +1,4 @@
-//! Resolving an `artifact_ref` into bytes is a `before_model` hook's job. The
+//! Turning a `Source::Stored` into bytes is a `before_model` hook's job. The
 //! loop's only remaining stake in it: a pointer must never reach a provider, so
 //! an unresolved one fails the run instead of quietly dropping the file.
 
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use harness::*;
 use runic_agent::{AgentError, Runner};
-use runic_types::{ContentBlock, Message};
+use runic_types::{ContentBlock, Message, Source};
 
 fn ref_message(id: &str) -> Message {
     Message::user_with_blocks(vec![
@@ -16,16 +16,16 @@ fn ref_message(id: &str) -> Message {
             text: "what is in this image".into(),
             provider_metadata: None,
         },
-        ContentBlock::ArtifactRef {
-            id: id.into(),
+        ContentBlock::Image {
             media_type: "image/png".into(),
             filename: Some("p.png".into()),
+            source: Source::Stored(id.into()),
         },
     ])
 }
 
 #[tokio::test]
-async fn an_unresolved_artifact_ref_fails_the_run_naming_the_id() {
+async fn an_unresolved_stored_artifact_fails_the_run_naming_the_id() {
     let provider = Arc::new(ScriptedProvider::new(vec![text_response("never")]));
     let mut agent = Runner::builder(provider.clone(), "t", "s")
         .model("test")

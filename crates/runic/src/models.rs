@@ -19,12 +19,7 @@ pub(crate) fn infer(spec: &str) -> Result<(Arc<dyn Provider>, String), ComposeEr
     Ok((provider, model.to_string()))
 }
 
-#[cfg(any(
-    feature = "mistral",
-    feature = "anthropic",
-    feature = "openai",
-    feature = "gemini"
-))]
+#[cfg(any(feature = "mistral", feature = "anthropic", feature = "gemini"))]
 fn api_key(provider: &'static str, env_var: &'static str) -> Result<String, ComposeError> {
     std::env::var(env_var)
         .ok()
@@ -42,11 +37,6 @@ pub(crate) fn build_provider(name: &str) -> Result<Arc<dyn Provider>, ComposeErr
         "anthropic" => Ok(Arc::new(runic_provider::anthropic::AnthropicDriver::new(
             api_key("anthropic", "ANTHROPIC_API_KEY")?,
             "https://api.anthropic.com".to_string(),
-        ))),
-        #[cfg(feature = "openai")]
-        "openai" => Ok(Arc::new(runic_provider::openai::OpenAIDriver::new(
-            api_key("openai", "OPENAI_API_KEY")?,
-            "https://api.openai.com/v1".to_string(),
         ))),
         #[cfg(feature = "gemini")]
         "gemini" => Ok(Arc::new(runic_provider::gemini::GeminiDriver::new(

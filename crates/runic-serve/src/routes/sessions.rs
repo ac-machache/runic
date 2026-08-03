@@ -1,4 +1,4 @@
-//! SessionKey CRUD — backed by the [`runic::substrate::SessionStore`].
+//! SessionKey CRUD — backed by the [`runic::store::SessionStore`].
 //!
 //! A "session" in the HTTP surface == a "session" internally. We expose the
 //! resource with the conventional HTTP name; it routes to the same store.
@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use runic::substrate::SessionMeta;
+use runic::store::SessionMeta;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -176,7 +176,7 @@ pub struct SessionSummary {
     pub parent_session: Option<String>,
 }
 
-fn summary_from_meta(meta: runic::substrate::SessionMeta) -> SessionSummary {
+fn summary_from_meta(meta: runic::store::SessionMeta) -> SessionSummary {
     SessionSummary {
         session_id: meta.session_id,
         label: meta.label,
@@ -299,13 +299,8 @@ pub async fn list_sessions(
         None => None,
     };
     let mut metas = state
-        .store()
-        .list_sessions_page(
-            &tenant,
-            after,
-            limit + 1,
-            runic::substrate::SessionScope::Roots,
-        )
+        .sessions()
+        .list_sessions_page(&tenant, after, limit + 1, runic::store::SessionScope::Roots)
         .await?;
 
     let next_cursor = (metas.len() > limit).then(|| {
@@ -359,12 +354,12 @@ pub async fn list_session_children(
         None => None,
     };
     let mut metas = state
-        .store()
+        .sessions()
         .list_sessions_page(
             &tenant,
             after,
             limit + 1,
-            runic::substrate::SessionScope::ChildrenOf(session_id),
+            runic::store::SessionScope::ChildrenOf(session_id),
         )
         .await?;
 
@@ -583,10 +578,10 @@ async fn delete_tree(state: &AppState, tenant: &str, session_id: &str) -> Result
             .artifacts()
             .delete_session_artifacts(tenant, session)
             .await?;
-        state.store().delete_session(tenant, session).await?;
+        state.sessions().delete_session(tenant, session).await?;
     }
 
-    match state.store().delete_orphan_children(tenant).await {
+    match state.sessions().delete_orphan_children(tenant).await {
         Ok(reaped) => {
             for orphan in &reaped {
                 if let Err(e) = state

@@ -1,4 +1,6 @@
+mod artifacts;
 mod calc;
+mod chats;
 mod compaction;
 mod composio;
 mod delegation;
@@ -9,7 +11,9 @@ mod tool_limit;
 mod weather;
 pub mod web;
 
+pub use artifacts::ArtifactResolver;
 pub use calc::CalculatorTool;
+pub use chats::SearchChats;
 pub use compaction::{Compaction, DEFAULT_SUMMARY_GUIDANCE};
 pub use composio::ComposioTool;
 pub use delegation::Delegation;

@@ -7,7 +7,7 @@
 
 use chrono::{Duration, Utc};
 
-use runic_substrate::{ArtifactSource, ArtifactStore, Error};
+use runic_store::{ArtifactSource, ArtifactStore, Error};
 
 use crate::common::ids::{tenant_session, uid};
 

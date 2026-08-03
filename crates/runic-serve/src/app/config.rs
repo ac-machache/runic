@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use runic::substrate::{Blobs, Sessions};
+use runic::store::Store;
 use runic::transcriber::SpeechToText;
 use sqlx::PgPool;
 
@@ -10,8 +10,7 @@ use crate::hosts::{AgentRegistry, HostedAgents};
 use crate::store::{Runs, Schedules};
 
 pub struct ServeConfig {
-    pub sessions: Sessions,
-    pub blobs: Blobs,
+    pub store: Store,
     pub pool: PgPool,
     pub transcriber: Option<Arc<dyn SpeechToText>>,
     pub agents: HashMap<String, HostedAgents>,
@@ -30,10 +29,9 @@ pub struct Declared {
 }
 
 impl ServeConfig {
-    pub fn new(sessions: Sessions, blobs: Blobs, pool: PgPool) -> Self {
+    pub fn new(store: Store, pool: PgPool) -> Self {
         Self {
-            sessions,
-            blobs,
+            store,
             pool,
             transcriber: None,
             agents: HashMap::new(),
@@ -134,8 +132,7 @@ pub(crate) fn app_state(
     config: ServeConfig,
 ) -> (AppState, Option<Arc<dyn crate::auth::IdentityResolver>>) {
     let state = AppState {
-        sessions: config.sessions,
-        blobs: config.blobs,
+        store: config.store,
         runs: Runs::new(config.pool.clone()),
         schedules: Schedules::new(config.pool.clone()),
         pool: config.pool,

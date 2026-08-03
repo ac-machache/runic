@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 
-use runic_types::{ContentBlock, Message, ProvenanceSource, Role, ToolResultPayload};
+use runic_types::{ContentBlock, Message, ProvenanceSource, Role, Source, ToolResultPayload};
 
 fn json_value() -> impl Strategy<Value = serde_json::Value> {
     prop_oneof![
@@ -23,24 +23,47 @@ fn opt_meta() -> impl Strategy<Value = Option<serde_json::Value>> {
     ]
 }
 
+fn source() -> impl Strategy<Value = Source> {
+    prop_oneof![
+        prop::collection::vec(any::<u8>(), 0..64).prop_map(Source::Inline),
+        "art-[a-f0-9]{8}".prop_map(Source::Stored),
+        (
+            "file-[a-z0-9]{6}",
+            prop::sample::select(vec!["mistral", "anthropic", "gemini"])
+        )
+            .prop_map(|(file_id, provider)| Source::Uploaded {
+                file_id,
+                provider: provider.into(),
+            }),
+    ]
+}
+
 fn content_block() -> impl Strategy<Value = ContentBlock> {
     prop_oneof![
         ("[a-z ]{0,40}", opt_meta()).prop_map(|(text, provider_metadata)| ContentBlock::Text {
             text,
             provider_metadata,
         }),
-        prop::sample::select(vec!["image/png", "image/jpeg", "image/webp"]).prop_map(|mt| {
-            ContentBlock::Image {
-                media_type: mt.into(),
-                data: "YWJj".into(),
-            }
-        }),
-        prop::sample::select(vec!["application/pdf", "text/plain"]).prop_map(|mt| {
-            ContentBlock::File {
-                media_type: mt.into(),
-                data: "YWJj".into(),
-            }
-        }),
+        (
+            prop::sample::select(vec!["image/png", "image/jpeg", "image/webp"]),
+            source(),
+            prop::option::of("[a-z]{1,8}\\.png"),
+        )
+            .prop_map(|(media_type, source, filename)| ContentBlock::Image {
+                media_type: media_type.into(),
+                filename,
+                source,
+            }),
+        (
+            prop::sample::select(vec!["application/pdf", "text/plain"]),
+            source(),
+            prop::option::of("[a-z]{1,8}\\.pdf"),
+        )
+            .prop_map(|(media_type, source, filename)| ContentBlock::File {
+                media_type: media_type.into(),
+                filename,
+                source,
+            }),
         ("[a-z]{1,8}", "[a-z_]{1,12}", json_value(), opt_meta()).prop_map(
             |(id, name, input, provider_metadata)| ContentBlock::ToolUse {
                 id,

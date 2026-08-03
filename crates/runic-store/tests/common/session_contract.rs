@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use runic_state::{HookLifecycle, RunOutcome};
-use runic_substrate::SessionEvent;
-use runic_substrate::{SessionStore, StoredEvent, replay_into_state, replay_messages};
-use runic_types::{ContentBlock, Message, TokenUsage};
+use runic_store::SessionEvent;
+use runic_store::{SessionStore, StoredEvent, replay_into_state, replay_messages};
+use runic_types::{ContentBlock, Message, Source, TokenUsage};
 
 use crate::common::ids::{tenant_session, uid};
 
@@ -108,7 +108,7 @@ pub async fn orphaned_children_are_rejected_and_reapable(store: &dyn SessionStor
         .await
         .unwrap_err();
     assert!(
-        matches!(err, runic_substrate::Error::NotFound(_)),
+        matches!(err, runic_store::Error::NotFound(_)),
         "a child cannot be created under a nonexistent parent"
     );
 
@@ -146,7 +146,7 @@ pub async fn strict_appends_never_resurrect_a_deleted_session(store: &dyn Sessio
         .append_batch_strict(&t, &s, &[run_start("r1", 0)])
         .await
         .unwrap_err();
-    assert!(matches!(err, runic_substrate::Error::NotFound(_)));
+    assert!(matches!(err, runic_store::Error::NotFound(_)));
     assert!(store.session_meta(&t, &s).await.unwrap().is_none());
 
     store.append(&t, &s, &run_start("r1", 0)).await.unwrap();
@@ -161,7 +161,7 @@ pub async fn strict_appends_never_resurrect_a_deleted_session(store: &dyn Sessio
         .append_batch_strict(&t, &s, &[run_start("r2", 2)])
         .await
         .unwrap_err();
-    assert!(matches!(err, runic_substrate::Error::NotFound(_)));
+    assert!(matches!(err, runic_store::Error::NotFound(_)));
     assert!(
         store.session_meta(&t, &s).await.unwrap().is_none(),
         "a strict append must not resurrect the deleted session"
@@ -493,18 +493,23 @@ pub async fn event_payload_roundtrip_exact_all_variants(store: &dyn SessionStore
         provenance: Vec::new(),
     }]);
     let media = Message::user_with_blocks(vec![
-        ContentBlock::ArtifactRef {
-            id: "art-1".into(),
+        ContentBlock::File {
             media_type: "application/pdf".into(),
             filename: Some("doc.pdf".into()),
+            source: Source::Stored("art-1".into()),
         },
         ContentBlock::Image {
             media_type: "image/png".into(),
-            data: "aW1n".into(),
+            filename: None,
+            source: Source::Inline(b"img".to_vec()),
         },
         ContentBlock::File {
             media_type: "text/plain".into(),
-            data: "ZmlsZQ==".into(),
+            filename: None,
+            source: Source::Uploaded {
+                file_id: "file-9".into(),
+                provider: "anthropic".into(),
+            },
         },
     ]);
 
@@ -713,7 +718,7 @@ pub async fn list_sessions_page_covers_every_session_once(store: &dyn SessionSto
     let mut cursor: Option<(DateTime<Utc>, String)> = None;
     loop {
         let page = store
-            .list_sessions_page(&t, cursor.clone(), 5, runic_substrate::SessionScope::All)
+            .list_sessions_page(&t, cursor.clone(), 5, runic_store::SessionScope::All)
             .await
             .unwrap();
         if page.is_empty() {
@@ -1163,7 +1168,7 @@ pub async fn child_sessions_carry_hierarchy_and_scope_listings(store: &dyn Sessi
     assert_eq!(meta.parent_session.as_deref(), Some(parent.as_str()));
 
     let roots = store
-        .list_sessions_page(&t, None, 50, runic_substrate::SessionScope::Roots)
+        .list_sessions_page(&t, None, 50, runic_store::SessionScope::Roots)
         .await
         .unwrap();
     assert!(roots.iter().any(|m| m.session_id == parent));
@@ -1180,7 +1185,7 @@ pub async fn child_sessions_carry_hierarchy_and_scope_listings(store: &dyn Sessi
                 &t,
                 cursor.clone(),
                 2,
-                runic_substrate::SessionScope::ChildrenOf(parent.clone()),
+                runic_store::SessionScope::ChildrenOf(parent.clone()),
             )
             .await
             .unwrap();

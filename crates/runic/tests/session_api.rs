@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use runic::tool::{Tool, ToolContext, ToolResult};
 use runic::{Agent, Input, Llm, subagent};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::{MemorySessionStore, SessionEvent, SessionStore};
+use runic_store::{ArtifactStore, SessionEvent, Store};
 use runic_types::{ContentBlock, StopReason, TokenUsage, ToolCall};
 
 struct ScriptedProvider {
@@ -63,7 +63,7 @@ async fn agent_runs_standalone_and_stateless() {
 #[tokio::test]
 async fn session_persists_and_hydrates_across_runs() {
     let provider = ScriptedProvider::new(vec![text("my name is Ada"), text("you are Ada")]);
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let store = Store::memory().unwrap();
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
 
     let first = runic::session(("tenant", "session-1"))
@@ -73,7 +73,7 @@ async fn session_persists_and_hydrates_across_runs() {
         .unwrap();
     assert_eq!(first.text, "my name is Ada");
 
-    let stored = store.read("tenant", "session-1").await.unwrap();
+    let stored = store.sessions().read("tenant", "session-1").await.unwrap();
     assert!(
         !stored.is_empty(),
         "the run's events are appended to the store"
@@ -127,6 +127,32 @@ impl Tool for Probe {
     }
 }
 
+struct ArtifactCounter(Arc<dyn ArtifactStore>);
+
+#[async_trait]
+impl Tool for ArtifactCounter {
+    fn name(&self) -> &str {
+        "count_artifacts"
+    }
+
+    fn description(&self) -> &str {
+        "count the artifacts the store travels with"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn execute(
+        &self,
+        _args: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> anyhow::Result<ToolResult> {
+        let held = self.0.list(&ctx.user_id, &ctx.session_id).await?.len();
+        Ok(ToolResult::ok(held.to_string()))
+    }
+}
+
 fn call(call_id: &str, name: &str, input: serde_json::Value) -> CompletionResponse {
     CompletionResponse {
         content: vec![ContentBlock::ToolUse {
@@ -166,7 +192,7 @@ impl Researcher {
 async fn session_persists_a_delegated_run_to_its_own_child_session() {
     let parent = ScriptedProvider::new(vec![delegate_to("researcher"), text("parent done")]);
     let child = ScriptedProvider::new(vec![text("child found it")]);
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let store = Store::memory().unwrap();
 
     let agent = Agent::new(Llm::new(parent, "main-model")).with(Researcher(child));
 
@@ -177,7 +203,7 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
         .unwrap();
     assert_eq!(out.text, "parent done");
 
-    let parent_log = store.read("tenant", "t1").await.unwrap();
+    let parent_log = store.sessions().read("tenant", "t1").await.unwrap();
     let child_session = parent_log
         .iter()
         .find_map(|e| match &e.event {
@@ -186,7 +212,11 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
         })
         .expect("a DelegationFinished carrying the child session id");
 
-    let child_log = store.read("tenant", &child_session).await.unwrap();
+    let child_log = store
+        .sessions()
+        .read("tenant", &child_session)
+        .await
+        .unwrap();
     let child_texts: Vec<String> = child_log
         .iter()
         .filter_map(|e| match &e.event {
@@ -202,7 +232,7 @@ async fn session_persists_a_delegated_run_to_its_own_child_session() {
 
 #[tokio::test]
 async fn one_session_can_be_answered_by_different_agents() {
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let store = Store::memory().unwrap();
 
     let first_provider = ScriptedProvider::new(vec![text("noted")]);
     let support = Agent::new(Llm::new(first_provider, "m").instructions("you are support"));
@@ -249,7 +279,7 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
 
     // Plain store: no tools travel with it.
-    let bare = runic::substrate::sessions_memory();
+    let bare = Store::memory().unwrap();
     runic::session(("tenant", "t1"))
         .store(bare)
         .invoke(&agent, Input::text("go"))
@@ -261,7 +291,7 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
     // Same store, a tool handed to it.
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let searchable = runic::substrate::sessions_memory().tool(Probe("search_chats"));
+    let searchable = Store::memory().unwrap().tool(Probe("search_chats"));
     runic::session(("tenant", "t1"))
         .store(searchable)
         .invoke(&agent, Input::text("go"))
@@ -280,29 +310,27 @@ async fn a_store_contributes_only_the_tools_it_was_given() {
 }
 
 #[tokio::test]
-async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
+async fn a_store_tool_can_read_the_artifacts_it_travels_with() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let blobs = runic::substrate::blobs_memory();
 
-    runic::session(("tenant", "t1"))
-        .store(runic::substrate::sessions_memory())
-        .artifacts(blobs.clone())
-        .invoke(&agent, Input::text("go"))
+    let store = Store::memory()
+        .unwrap()
+        .tool_with(|store| ArtifactCounter(store.artifacts()));
+    store
+        .artifacts()
+        .put(
+            "tenant",
+            "t1",
+            "text/plain",
+            runic::store::ArtifactSource::UserUpload,
+            b"one",
+        )
         .await
         .unwrap();
-    assert!(
-        provider.requests().last().unwrap().tools.is_empty(),
-        "a store is wired for media resolution, but grants no tool on its own"
-    );
-
-    let provider = ScriptedProvider::new(vec![text("done")]);
-    let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
-    let readable = blobs.clone().tool(Probe("read_session_artifact"));
 
     runic::session(("tenant", "t1"))
-        .store(runic::substrate::sessions_memory())
-        .artifacts(readable)
+        .store(store)
         .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
@@ -315,7 +343,7 @@ async fn an_artifact_store_contributes_nothing_until_given_a_tool() {
         .iter()
         .map(|spec| spec.name.clone())
         .collect();
-    assert_eq!(names, vec!["read_session_artifact".to_string()]);
+    assert_eq!(names, vec!["count_artifacts".to_string()]);
 }
 
 struct Stamp(&'static str);
@@ -343,12 +371,13 @@ async fn a_store_contributes_the_hooks_it_was_given() {
     let provider = ScriptedProvider::new(vec![text("done")]);
     let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
 
-    let sessions = runic::substrate::sessions_memory().hook(Stamp("from-sessions"));
-    let blobs = runic::substrate::blobs_memory().hook(Stamp("from-blobs"));
+    let store = Store::memory()
+        .unwrap()
+        .hook(Stamp("from-first"))
+        .hook(Stamp("from-second"));
 
     runic::session(("tenant", "t1"))
-        .store(sessions)
-        .artifacts(blobs)
+        .store(store)
         .invoke(&agent, Input::text("go"))
         .await
         .unwrap();
@@ -368,8 +397,8 @@ async fn a_store_contributes_the_hooks_it_was_given() {
         .collect();
     assert_eq!(
         stamps,
-        vec!["from-blobs".to_string(), "from-sessions".to_string()],
-        "both stores' hooks must reach the loop"
+        vec!["from-first".to_string(), "from-second".to_string()],
+        "every hook the store carries reaches the loop, in order"
     );
 }
 
@@ -377,9 +406,7 @@ async fn a_store_contributes_the_hooks_it_was_given() {
 async fn a_session_answers_for_its_own_session_without_reaching_for_the_store() {
     let provider = ScriptedProvider::new(vec![text("noted")]);
     let agent = Agent::new(Llm::new(provider, "test-model"));
-    let sessions = runic::substrate::sessions_memory();
-
-    let chat = runic::session(("tenant", "t1")).store(sessions);
+    let chat = runic::session(("tenant", "t1")).store(Store::memory().unwrap());
     chat.invoke(&agent, Input::text("my order is 4417"))
         .await
         .unwrap();
@@ -446,7 +473,7 @@ async fn persisted_lands_after_the_run_ended_because_done_is_not_durable() {
     let seen = Arc::new(Mutex::new(Vec::new()));
 
     runic::session(("tenant", "t1"))
-        .store(runic::substrate::sessions_memory())
+        .store(Store::memory().unwrap())
         .invoke(
             &agent,
             Input::text("go").events(Arc::new(Collect(seen.clone()))),
@@ -476,4 +503,90 @@ async fn a_storeless_run_never_claims_to_have_persisted() {
         .unwrap();
 
     assert_eq!(*seen.lock().unwrap(), vec!["RunEnd".to_string()]);
+}
+
+#[tokio::test]
+async fn inline_bytes_are_stored_once_and_the_log_keeps_only_the_pointer() {
+    let provider = ScriptedProvider::new(vec![text("seen")]);
+    let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
+    let store = Store::memory().unwrap();
+    let chat = runic::session(("tenant", "t1")).store(store.clone());
+
+    chat.invoke(
+        &agent,
+        Input::text("what is this").image("image/png", b"\x89PNG"),
+    )
+    .await
+    .unwrap();
+
+    let held = store.artifacts().list("tenant", "t1").await.unwrap();
+    assert_eq!(held.len(), 1, "the bytes went to the artifact store");
+    assert_eq!(held[0].mime_type, "image/png");
+    assert_eq!(held[0].size, 4);
+
+    let logged = chat.messages().await.unwrap();
+    let blocks = match &logged[0].content {
+        runic_types::MessageContent::Blocks(blocks) => blocks,
+        other => panic!("expected blocks, got {other:?}"),
+    };
+    assert!(
+        matches!(&blocks[1], ContentBlock::Image { source, .. } if source.stored() == Some(held[0].id.as_str())),
+        "the log carries a pointer, never the bytes: {:?}",
+        blocks[1]
+    );
+}
+
+#[tokio::test]
+async fn a_stored_pointer_from_another_session_is_refused() {
+    let provider = ScriptedProvider::new(vec![text("never")]);
+    let agent = Agent::new(Llm::new(provider, "test-model"));
+    let store = Store::memory().unwrap();
+    let theirs = store
+        .artifacts()
+        .put(
+            "tenant",
+            "someone-else",
+            "image/png",
+            runic_store::artifacts::ArtifactSource::UserUpload,
+            b"\x89PNG",
+        )
+        .await
+        .unwrap();
+
+    let outcome = runic::session(("tenant", "mine"))
+        .store(store)
+        .invoke(&agent, Input::new().artifact(&theirs.id, "image/png"))
+        .await;
+
+    let Err(error) = outcome else {
+        panic!("an artifact from another session must not be readable");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not belong to this session"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_storeless_run_keeps_its_bytes_inline() {
+    let provider = ScriptedProvider::new(vec![text("ok")]);
+    let agent = Agent::new(Llm::new(provider.clone(), "test-model"));
+
+    runic::session(("tenant", "t1"))
+        .invoke(&agent, Input::text("look").image("image/png", b"\x89PNG"))
+        .await
+        .unwrap();
+
+    let sent = provider.requests();
+    let blocks = match &sent[0].messages[0].content {
+        runic_types::MessageContent::Blocks(blocks) => blocks,
+        other => panic!("expected blocks, got {other:?}"),
+    };
+    assert!(
+        matches!(&blocks[1], ContentBlock::Image { source, .. } if source.inline().is_some()),
+        "with no store there is nowhere to put bytes, so they ride along: {:?}",
+        blocks[1]
+    );
 }

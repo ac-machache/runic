@@ -2,7 +2,7 @@
 //!
 //! Each enum variant is one SSE event. The `type` discriminator goes both in
 //! the JSON body and in the SSE `event:` field, so clients can switch on
-//! either. Event ids on the wire are the [`runic_substrate`] store-assigned
+//! either. Event ids on the wire are the [`runic_store`] store-assigned
 //! seq numbers, used for `Last-Event-ID` resume.
 //!
 //! Live runs emit deltas (`assistant_text_delta`, …) that don't show up in
@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use runic::agent::AgentEvent;
 use runic::state::HookLifecycle;
-use runic::substrate::SessionEvent;
+use runic::store::SessionEvent;
 use runic::types::Message;
 use serde::Serialize;
 use utoipa::ToSchema;

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use runic_substrate::{
+use runic_store::{
     Error, MemorySessionStore, Result, SessionEvent, SessionMeta, SessionStore, StoredEvent,
     attach_persister,
 };

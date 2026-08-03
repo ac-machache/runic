@@ -8,7 +8,7 @@ use proptest::prelude::*;
 
 use runic::agent::AgentEvent;
 use runic::state::{RunEndStatus, RunOutcome, ToolStatus};
-use runic::substrate::SessionEvent;
+use runic::store::SessionEvent;
 use runic::types::{Message, TokenUsage};
 use runic_serve::WireEvent;
 use runic_serve::wire::{from_agent_event, from_session_event};

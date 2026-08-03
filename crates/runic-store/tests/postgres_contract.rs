@@ -20,10 +20,10 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{
-    ArtifactStore, Error, MemoryArtifactStore, PostgresArtifactStore, PostgresSessionStore,
-    SessionStore,
+use runic_store::SessionEvent;
+use runic_store::artifacts;
+use runic_store::{
+    ArtifactStore, Error, PostgresArtifactStore, PostgresSessionStore, SessionStore,
 };
 use runic_types::Message;
 
@@ -61,7 +61,7 @@ async fn pg_sessions() -> Option<PostgresSessionStore> {
 
 async fn pg_artifacts() -> Option<PostgresArtifactStore> {
     let pool = test_pool().await?;
-    let bytes: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
+    let bytes: Arc<dyn ArtifactStore> = Arc::new(artifacts::memory().unwrap());
     Some(
         PostgresArtifactStore::from_pool(pool, bytes, "memory")
             .await
@@ -87,17 +87,9 @@ fn msg(text: &str, at: DateTime<Utc>) -> SessionEvent {
     }
 }
 
-/// The production builders must fail closed on a bad URL — never silently fall
-/// back to a different backend. (Runs without a test DB: the URL is bogus.)
 #[tokio::test]
-async fn production_builders_fail_closed_on_bad_url() {
-    let bad = "postgres://";
-    assert!(runic_substrate::sessions_postgres(bad).await.is_err());
-    assert!(
-        runic_substrate::blobs_postgres(bad, std::env::temp_dir().join("runic-fail-closed"))
-            .await
-            .is_err()
-    );
+async fn a_postgres_store_fails_closed_on_a_bad_url() {
+    assert!(runic_store::Store::postgres("postgres://").await.is_err());
 }
 
 #[tokio::test]
@@ -446,7 +438,7 @@ async fn sweep_orphans_removes_unindexed_bytes_idempotently() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    let bytes: Arc<dyn ArtifactStore> = Arc::new(MemoryArtifactStore::new());
+    let bytes: Arc<dyn ArtifactStore> = Arc::new(artifacts::memory().unwrap());
     let store = PostgresArtifactStore::from_pool(pool, bytes.clone(), "memory")
         .await
         .unwrap();
@@ -457,7 +449,7 @@ async fn sweep_orphans_removes_unindexed_bytes_idempotently() {
             &t,
             &s,
             "text/plain",
-            runic_substrate::ArtifactSource::ToolOutput,
+            runic_store::ArtifactSource::ToolOutput,
             b"keep me",
         )
         .await
@@ -467,7 +459,7 @@ async fn sweep_orphans_removes_unindexed_bytes_idempotently() {
             &t,
             &s,
             "text/plain",
-            runic_substrate::ArtifactSource::ToolOutput,
+            runic_store::ArtifactSource::ToolOutput,
             b"crashed before the row landed",
         )
         .await

@@ -1,9 +1,7 @@
-use base64::Engine;
 use runic::Input;
 use runic::types::{ContentBlock, Message, MessageContent};
 use serde::Deserialize;
 
-use crate::app::AppState;
 use crate::error::ServeError;
 use crate::routes::artifacts::MAX_ARTIFACT_BYTES;
 
@@ -36,78 +34,71 @@ impl RunMessageRequest {
     }
 }
 
-fn decode(data: &str) -> Result<Vec<u8>, ServeError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data.as_bytes())
-        .map_err(|_| ServeError::BadRequest("invalid base64 in content block".into()))?;
-    if bytes.len() > MAX_ARTIFACT_BYTES {
-        return Err(ServeError::BadRequest(
-            "inline media exceeds size limit".into(),
-        ));
-    }
-    Ok(bytes)
+enum Incoming {
+    Bytes(Vec<u8>),
+    Stored(String),
 }
 
-pub async fn input_from_message(
-    state: &AppState,
-    tenant: &str,
-    session_id: &str,
-    msg: Message,
-) -> Result<Input, ServeError> {
+fn incoming(source: &runic::types::Source) -> Result<Incoming, ServeError> {
+    match source {
+        runic::types::Source::Inline(bytes) if bytes.len() > MAX_ARTIFACT_BYTES => Err(
+            ServeError::BadRequest("inline media exceeds size limit".into()),
+        ),
+        runic::types::Source::Inline(bytes) => Ok(Incoming::Bytes(bytes.clone())),
+        runic::types::Source::Stored(id) => Ok(Incoming::Stored(id.clone())),
+        _ => Err(ServeError::BadRequest(
+            "a run turn carries inline media or a stored artifact id, not a provider reference"
+                .into(),
+        )),
+    }
+}
+
+pub fn input_from_message(msg: Message) -> Result<Input, ServeError> {
     let blocks = match msg.content {
         MessageContent::Text(text) => return Ok(Input::text(text)),
         MessageContent::Blocks(blocks) => blocks,
     };
 
-    let has_ref = blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::ArtifactRef { .. }));
-    let owned = match has_ref {
-        true => state.artifacts().list(tenant, session_id).await?,
-        false => Vec::new(),
-    };
-
     let mut text: Option<String> = None;
     let mut attachments = Vec::new();
     for block in blocks {
-        match block {
-            ContentBlock::Text { text: part, .. } => match &mut text {
-                Some(joined) => {
-                    joined.push('\n');
-                    joined.push_str(&part);
+        let (media_type, filename, source, is_image) = match block {
+            ContentBlock::Text { text: part, .. } => {
+                match &mut text {
+                    Some(joined) => {
+                        joined.push('\n');
+                        joined.push_str(&part);
+                    }
+                    None => text = Some(part),
                 }
-                None => text = Some(part),
-            },
-            ContentBlock::Image { media_type, data } => {
-                attachments.push(Attachment::Image {
-                    media_type,
-                    bytes: decode(&data)?,
-                });
+                continue;
             }
-            ContentBlock::File { media_type, data } => {
-                attachments.push(Attachment::File {
-                    media_type,
-                    bytes: decode(&data)?,
-                });
-            }
-            ContentBlock::ArtifactRef { id, filename, .. } => {
-                let Some(artifact) = owned.iter().find(|owned| owned.id == id) else {
-                    return Err(ServeError::BadRequest(
-                        "artifact_ref does not belong to this session".into(),
-                    ));
-                };
-                attachments.push(Attachment::Stored {
-                    id,
-                    media_type: artifact.mime_type.clone(),
-                    filename,
-                });
-            }
+            ContentBlock::Image {
+                media_type,
+                filename,
+                source,
+            } => (media_type, filename, source, true),
+            ContentBlock::File {
+                media_type,
+                filename,
+                source,
+            } => (media_type, filename, source, false),
             _ => {
                 return Err(ServeError::BadRequest(
-                    "a run turn carries text, inline media and artifact references only".into(),
+                    "a run turn carries text, inline media and stored artifacts only".into(),
                 ));
             }
-        }
+        };
+
+        attachments.push(match incoming(&source)? {
+            Incoming::Bytes(bytes) if is_image => Attachment::Image { media_type, bytes },
+            Incoming::Bytes(bytes) => Attachment::File { media_type, bytes },
+            Incoming::Stored(id) => Attachment::Stored {
+                id,
+                media_type,
+                filename,
+            },
+        });
     }
 
     let mut input = match text {

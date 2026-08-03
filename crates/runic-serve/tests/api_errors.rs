@@ -9,7 +9,7 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic::substrate::{SessionEvent, SessionMeta, SessionStore, StoredEvent};
+use runic::store::{SessionEvent, SessionMeta, SessionStore, StoredEvent};
 use runic::transcriber::{SpeechToText, TranscribeError, Transcript};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
 use runic_serve::router;
@@ -36,8 +36,8 @@ impl Provider for FailingProvider {
     }
 }
 
-fn boom() -> runic::substrate::Error {
-    runic::substrate::Error::Database("injected store failure".into())
+fn boom() -> runic::store::Error {
+    runic::store::Error::Database("injected store failure".into())
 }
 
 struct FailingSessionStore;
@@ -49,7 +49,7 @@ impl SessionStore for FailingSessionStore {
         _tenant: &str,
         _session_id: &str,
         _event: &SessionEvent,
-    ) -> runic::substrate::Result<u64> {
+    ) -> runic::store::Result<u64> {
         Err(boom())
     }
     async fn append_batch(
@@ -57,14 +57,14 @@ impl SessionStore for FailingSessionStore {
         _tenant: &str,
         _session_id: &str,
         _events: &[SessionEvent],
-    ) -> runic::substrate::Result<()> {
+    ) -> runic::store::Result<()> {
         Err(boom())
     }
     async fn read(
         &self,
         _tenant: &str,
         _session_id: &str,
-    ) -> runic::substrate::Result<Vec<StoredEvent>> {
+    ) -> runic::store::Result<Vec<StoredEvent>> {
         Err(boom())
     }
     async fn read_after(
@@ -72,17 +72,17 @@ impl SessionStore for FailingSessionStore {
         _tenant: &str,
         _session_id: &str,
         _after_seq: u64,
-    ) -> runic::substrate::Result<Vec<StoredEvent>> {
+    ) -> runic::store::Result<Vec<StoredEvent>> {
         Err(boom())
     }
-    async fn list_sessions(&self, _tenant: &str) -> runic::substrate::Result<Vec<SessionMeta>> {
+    async fn list_sessions(&self, _tenant: &str) -> runic::store::Result<Vec<SessionMeta>> {
         Err(boom())
     }
     async fn session_meta(
         &self,
         _tenant: &str,
         _session_id: &str,
-    ) -> runic::substrate::Result<Option<SessionMeta>> {
+    ) -> runic::store::Result<Option<SessionMeta>> {
         Err(boom())
     }
     async fn set_label(
@@ -90,14 +90,10 @@ impl SessionStore for FailingSessionStore {
         _tenant: &str,
         _session_id: &str,
         _label: Option<&str>,
-    ) -> runic::substrate::Result<()> {
+    ) -> runic::store::Result<()> {
         Err(boom())
     }
-    async fn delete_session(
-        &self,
-        _tenant: &str,
-        _session_id: &str,
-    ) -> runic::substrate::Result<()> {
+    async fn delete_session(&self, _tenant: &str, _session_id: &str) -> runic::store::Result<()> {
         Err(boom())
     }
 }
@@ -116,10 +112,12 @@ fn crud_router(h: &Harness) -> Router {
 }
 
 fn failing_store_router(h: &Harness) -> Router {
-    let sessions =
-        runic::substrate::Sessions::from(Arc::new(FailingSessionStore) as Arc<dyn SessionStore>);
+    let failing = runic::store::Store::from((
+        Arc::new(FailingSessionStore) as Arc<dyn SessionStore>,
+        h.durable.artifacts(),
+    ));
     router(
-        runic_serve::ServeConfig::new(sessions, h.blobs.clone(), h.pool.clone())
+        runic_serve::ServeConfig::new(failing, h.pool.clone())
             .agent("main", common::agent(Arc::new(PanicProvider))),
     )
 }

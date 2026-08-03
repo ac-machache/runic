@@ -1,11 +1,4 @@
-//! The media [`ArtifactStore`] trait + its value types.
-//!
-//! Media bytes (a user's PDF/audio, a tool's screenshot) live here, *not* in
-//! the event log. A message references an [`Artifact`] by `id`; the log stays
-//! lean. Backends: [`MemoryArtifactStore`](crate::MemoryArtifactStore),
-//! [`LocalArtifactStore`](crate::LocalArtifactStore), and (with `postgres`)
-//! [`PostgresArtifactStore`](crate::PostgresArtifactStore) — metadata indexed
-//! in the same DB as sessions, bytes delegated to an inner byte store.
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -32,8 +25,9 @@ impl ArtifactSource {
             ArtifactSource::Other => "other",
         }
     }
-    pub fn parse(s: &str) -> ArtifactSource {
-        match s {
+
+    pub fn parse(raw: &str) -> ArtifactSource {
+        match raw {
             "user_upload" => ArtifactSource::UserUpload,
             "tool_output" => ArtifactSource::ToolOutput,
             "model_output" => ArtifactSource::ModelOutput,
@@ -54,8 +48,8 @@ pub struct Artifact {
     pub created_at: DateTime<Utc>,
 }
 
-/// The media storage interface. One trait; many backends (memory, local fs,
-/// S3, a Postgres-indexed composition, …).
+/// The media storage interface. One trait; many backends (an OpenDAL operator
+/// over memory/disk/S3/GCS/Azure, or a Postgres-indexed composition).
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
     /// Store `bytes` for `(tenant, session_id)`; return the artifact metadata.
@@ -86,6 +80,10 @@ pub trait ArtifactStore: Send + Sync {
         Ok(None)
     }
 
+    fn reindex(&self, _bytes: Arc<dyn ArtifactStore>) -> Option<Arc<dyn ArtifactStore>> {
+        None
+    }
+
     /// Drop every artifact belonging to one session; returns how many were
     /// deleted. Default: `list` then `delete` one at a time. Backends that can
     /// batch the metadata cleanup (e.g. a single indexed `DELETE`) should
@@ -112,7 +110,6 @@ pub trait ArtifactStore: Send + Sync {
     }
 }
 
-/// Generate a fresh artifact id.
 pub(crate) fn new_artifact_id() -> String {
     format!("art-{}", uuid::Uuid::new_v4().simple())
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the runic-substrate Postgres contract against a throwaway Dockerized DB.
+# Run the runic-store Postgres contract against a throwaway Dockerized DB.
 #
 # Spins up postgres in Docker, waits for readiness, runs the postgres-feature
 # tests (optionally `--ignored` stress too), then tears the container down.
@@ -32,5 +32,5 @@ for _ in $(seq 1 30); do
   echo -n "."; sleep 1
 done
 
-cargo nextest run -p runic-substrate --features postgres --test postgres_contract --profile full -- "$@"
+cargo nextest run -p runic-store --features postgres --test postgres_contract --profile full -- "$@"
 echo "postgres contract: OK"

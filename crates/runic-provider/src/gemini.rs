@@ -12,7 +12,7 @@ use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, Stre
 use async_trait::async_trait;
 use futures::StreamExt;
 use runic_types::ToolCall;
-use runic_types::{ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage};
+use runic_types::{ContentBlock, Message, MessageContent, Role, Source, StopReason, TokenUsage};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -101,6 +101,10 @@ enum GeminiPart {
         #[serde(rename = "inlineData")]
         inline_data: GeminiInlineData,
     },
+    FileData {
+        #[serde(rename = "fileData")]
+        file_data: GeminiFileData,
+    },
     /// Function call part with an optional part-level thought signature.
     FunctionCall {
         #[serde(rename = "functionCall")]
@@ -124,6 +128,42 @@ struct GeminiInlineData {
     #[serde(rename = "mimeType")]
     mime_type: String,
     data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GeminiFileData {
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    #[serde(rename = "fileUri")]
+    file_uri: String,
+}
+
+const GEMINI: &str = "gemini";
+
+fn gemini_part(media_type: &str, source: &Source) -> Option<GeminiPart> {
+    let file_uri = match source {
+        Source::Inline(bytes) => {
+            use base64::Engine;
+            return Some(GeminiPart::InlineData {
+                inline_data: GeminiInlineData {
+                    mime_type: media_type.to_string(),
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                },
+            });
+        }
+        Source::Url(url) => url.clone(),
+        Source::Uploaded { file_id, provider } if provider == GEMINI => file_id.clone(),
+        _ => return None,
+    };
+
+    let accepted = file_uri.starts_with("gs://")
+        || file_uri.starts_with("https://generativelanguage.googleapis.com/");
+    accepted.then(|| GeminiPart::FileData {
+        file_data: GeminiFileData {
+            mime_type: media_type.to_string(),
+            file_uri,
+        },
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -299,15 +339,17 @@ fn convert_messages(
                                 thought_signature,
                             });
                         }
-                        ContentBlock::Image { media_type, data }
-                        | ContentBlock::File { media_type, data } => {
-                            parts.push(GeminiPart::InlineData {
-                                inline_data: GeminiInlineData {
-                                    mime_type: media_type.clone(),
-                                    data: data.clone(),
-                                },
-                            });
+                        ContentBlock::Image {
+                            media_type, source, ..
                         }
+                        | ContentBlock::File {
+                            media_type, source, ..
+                        } => match gemini_part(media_type, source) {
+                            Some(part) => parts.push(part),
+                            None => {
+                                warn!(source = ?source, "Gemini cannot take this source — dropping")
+                            }
+                        },
                         ContentBlock::ToolResult {
                             content,
                             tool_name,
@@ -371,9 +413,6 @@ fn convert_messages(
                                     thought_signature: sig,
                                 });
                             }
-                        }
-                        ContentBlock::ArtifactRef { id, .. } => {
-                            tracing::warn!(artifact = %id, "unresolved ArtifactRef reached Gemini — dropping");
                         }
                         _ => {}
                     }
@@ -638,7 +677,9 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, Provider
                             });
                         }
                     }
-                    GeminiPart::InlineData { .. } | GeminiPart::FunctionResponse { .. } => {
+                    GeminiPart::InlineData { .. }
+                    | GeminiPart::FileData { .. }
+                    | GeminiPart::FunctionResponse { .. } => {
                         // Shouldn't normally appear in responses, ignore
                     }
                 }
@@ -999,6 +1040,7 @@ impl Provider for GeminiDriver {
                                         }
                                     }
                                     GeminiPart::InlineData { .. }
+                                    | GeminiPart::FileData { .. }
                                     | GeminiPart::FunctionResponse { .. } => {}
                                 }
                             }

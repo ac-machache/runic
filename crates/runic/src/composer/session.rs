@@ -2,19 +2,33 @@ use std::sync::Arc;
 
 use runic_agent::{AgentError, RunContext, Runner};
 use runic_state::{AgentEvent, Deferral, PersistenceStatus, RunOutcome, SessionStats};
-use runic_substrate::{
-    Blobs, SessionMeta, SessionScope, SessionStore, Sessions, StoreSubSession, StoredEvent,
-    attach_persister, replay_messages,
+use runic_store::{
+    SessionMeta, SessionScope, SessionStore, Store, StoreSubSession, StoredEvent, attach_persister,
+    replay_messages,
 };
 
-use runic_substrate::Result as StoreResult;
+use runic_store::Result as StoreResult;
 
 const CHILD_PAGE: usize = 500;
-use runic_types::Message;
+use runic_store::artifacts::ArtifactSource;
+use runic_types::{ContentBlock, Message, MessageContent, Source};
 use tracing::Instrument;
 
 use super::{Agent, AgentOutput};
 use crate::Input;
+use crate::builtin::ArtifactResolver;
+
+fn attachment_mut(block: &mut ContentBlock) -> Option<(&str, &mut Source)> {
+    match block {
+        ContentBlock::Image {
+            media_type, source, ..
+        }
+        | ContentBlock::File {
+            media_type, source, ..
+        } => Some((media_type, source)),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionKey {
@@ -58,8 +72,7 @@ impl<T: Into<String>, I: Into<String>> From<(T, I)> for SessionKey {
 
 pub struct Session {
     session: SessionKey,
-    sessions: Option<Sessions>,
-    blobs: Option<Blobs>,
+    store: Option<Store>,
 }
 
 pub fn session(session: impl Into<SessionKey>) -> Session {
@@ -70,18 +83,14 @@ impl Session {
     pub fn new(session: impl Into<SessionKey>) -> Self {
         Self {
             session: session.into(),
-            sessions: None,
-            blobs: None,
+            store: None,
         }
     }
 
-    pub fn store(mut self, sessions: impl Into<Sessions>) -> Self {
-        self.sessions = Some(sessions.into());
-        self
-    }
-
-    pub fn artifacts(mut self, blobs: impl Into<Blobs>) -> Self {
-        self.blobs = Some(blobs.into());
+    /// Attach durable storage. Without it the session is stateless: no event
+    /// log, no artifacts, no store-registered tools or hooks.
+    pub fn store(mut self, store: impl Into<Store>) -> Self {
+        self.store = Some(store.into());
         self
     }
 
@@ -94,20 +103,20 @@ impl Session {
     }
 
     fn require_store(&self) -> StoreResult<Arc<dyn SessionStore>> {
-        match &self.sessions {
-            Some(sessions) => Ok(sessions.store()),
-            None => Err(runic_substrate::Error::Unsupported(
-                "this session has no store: call .store(sessions)".into(),
+        match &self.store {
+            Some(store) => Ok(store.sessions()),
+            None => Err(runic_store::Error::Unsupported(
+                "this session has no store: call .store(store)".into(),
             )),
         }
     }
 
     pub async fn meta(&self) -> StoreResult<Option<SessionMeta>> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok(None);
         };
-        sessions
-            .store()
+        store
+            .sessions()
             .session_meta(self.tenant(), self.session())
             .await
     }
@@ -124,10 +133,10 @@ impl Session {
     }
 
     pub async fn events(&self) -> StoreResult<Vec<StoredEvent>> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok(Vec::new());
         };
-        sessions.store().read(self.tenant(), self.session()).await
+        store.sessions().read(self.tenant(), self.session()).await
     }
 
     /// A page of the log after `after_seq`, plus whether more remain.
@@ -136,11 +145,11 @@ impl Session {
         after_seq: u64,
         limit: usize,
     ) -> StoreResult<(Vec<StoredEvent>, bool)> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok((Vec::new(), false));
         };
-        let mut page = sessions
-            .store()
+        let mut page = store
+            .sessions()
             .read_after_limited(self.tenant(), self.session(), after_seq, limit + 1)
             .await?;
         let has_more = page.len() > limit;
@@ -151,11 +160,11 @@ impl Session {
     /// Folded from the tail: a `StateSnapshot` carries the rolled-up totals and
     /// replaces rather than accumulates, so reading past one changes nothing.
     pub async fn stats(&self) -> StoreResult<SessionStats> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok(SessionStats::default());
         };
-        let stored = sessions
-            .store()
+        let stored = store
+            .sessions()
             .read_tail(self.tenant(), self.session())
             .await?;
         let mut stats = SessionStats::default();
@@ -166,11 +175,11 @@ impl Session {
     }
 
     pub async fn awaiting(&self) -> StoreResult<Option<Deferral>> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok(None);
         };
-        let stored = sessions
-            .store()
+        let stored = store
+            .sessions()
             .read_tail(self.tenant(), self.session())
             .await?;
         let mut state = runic_state::AgentState::new(self.tenant(), self.session(), "");
@@ -221,10 +230,10 @@ impl Session {
     }
 
     pub async fn messages(&self) -> StoreResult<Vec<Message>> {
-        let Some(sessions) = &self.sessions else {
+        let Some(store) = &self.store else {
             return Ok(Vec::new());
         };
-        replay_messages(sessions.store().as_ref(), self.tenant(), self.session()).await
+        replay_messages(store.sessions().as_ref(), self.tenant(), self.session()).await
     }
 
     pub async fn delete(&self) -> StoreResult<()> {
@@ -235,8 +244,58 @@ impl Session {
     }
 
     pub async fn invoke(&self, agent: &Agent, input: Input) -> anyhow::Result<AgentOutput> {
-        let (message, ctx) = input.split();
+        let (mut message, ctx) = input.split();
+        self.admit(&mut message).await?;
         self.drive(agent, Some(message), ctx).await
+    }
+
+    async fn admit(&self, message: &mut Message) -> anyhow::Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let MessageContent::Blocks(blocks) = &mut message.content else {
+            return Ok(());
+        };
+
+        let artifacts = store.artifacts();
+        let mut owned: Option<Vec<String>> = None;
+        for block in blocks.iter_mut() {
+            let Some((media_type, source)) = attachment_mut(block) else {
+                continue;
+            };
+            match source {
+                Source::Inline(bytes) => {
+                    let artifact = artifacts
+                        .put(
+                            self.tenant(),
+                            self.session(),
+                            media_type,
+                            ArtifactSource::UserUpload,
+                            bytes,
+                        )
+                        .await?;
+                    *source = Source::Stored(artifact.id);
+                }
+                Source::Stored(id) => {
+                    let owned = match &owned {
+                        Some(owned) => owned,
+                        None => owned.insert(
+                            artifacts
+                                .list(self.tenant(), self.session())
+                                .await?
+                                .into_iter()
+                                .map(|artifact| artifact.id)
+                                .collect(),
+                        ),
+                    };
+                    if !owned.iter().any(|held| held == id) {
+                        anyhow::bail!("artifact {id} does not belong to this session");
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub async fn resume(&self, agent: &Agent, input: Input) -> anyhow::Result<AgentOutput> {
@@ -254,7 +313,7 @@ impl Session {
             "session_run",
             tenant = %self.tenant(),
             session = %self.session(),
-            persisted = self.sessions.is_some(),
+            persisted = self.store.is_some(),
             persist_backlog_at_flush = tracing::field::Empty,
             flush_ms = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
@@ -268,18 +327,15 @@ impl Session {
             );
             let mut runner = async {
                 let mut bound = agent.clone();
-                if let Some(blobs) = &self.blobs {
-                    bound = bound.tools(blobs.tools().iter().cloned());
-                    bound = bound.hooks(blobs.hooks().iter().cloned());
-                }
-                if let Some(sessions) = &self.sessions {
-                    bound = bound.tools(sessions.tools().iter().cloned());
-                    bound = bound.hooks(sessions.hooks().iter().cloned());
+                if let Some(store) = &self.store {
+                    bound = bound.tools(store.tools());
+                    bound = bound.hooks(store.hooks());
+                    bound = bound.hook(ArtifactResolver::new(store.artifacts()));
                 }
                 let mut runner = bound.build(self.tenant(), self.session()).await?;
-                if let Some(sessions) = &self.sessions {
-                    let entries = sessions
-                        .store()
+                if let Some(store) = &self.store {
+                    let entries = store
+                        .sessions()
                         .read_tail(self.tenant(), self.session())
                         .await?;
                     tracing::Span::current().record("events", entries.len());
@@ -292,7 +348,7 @@ impl Session {
             .instrument(hydrate_span)
             .await?;
 
-            let Some(sessions) = &self.sessions else {
+            let Some(store) = &self.store else {
                 let outcome = step(&mut runner, message, ctx)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -300,14 +356,14 @@ impl Session {
             };
 
             let (emitter, handle) = attach_persister(
-                sessions.store(),
+                store.sessions(),
                 self.tenant().to_string(),
                 self.session().to_string(),
             );
             ctx.events.push(emitter);
             if ctx.sub_session.is_none() {
                 ctx.sub_session = Some(Arc::new(StoreSubSession::new(
-                    sessions.store(),
+                    store.sessions(),
                     self.tenant().to_string(),
                     self.session().to_string(),
                 )));

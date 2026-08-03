@@ -9,8 +9,8 @@ use runic::mcp::McpClient;
 use runic::provider::Provider;
 use runic::skills::SkillSet;
 use runic::state::AgentState;
+use runic::store::SessionStore;
 use runic::subagent::Subagent;
-use runic::substrate::SessionStore;
 use runic::tool::{Tool, ToolContext, ToolResult};
 use runic::types::Message;
 
@@ -39,8 +39,6 @@ fn umbrella_surface_compiles() {
 
 #[cfg(feature = "anthropic")]
 fn _anthropic_reachable(_: runic::provider::AnthropicDriver) {}
-#[cfg(feature = "openai")]
-fn _openai_reachable(_: runic::provider::openai::OpenAIDriver) {}
 #[cfg(feature = "mistral")]
 fn _mistral_reachable(_: runic::provider::MistralDriver) {}
 #[cfg(feature = "gemini")]

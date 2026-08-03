@@ -1,6 +1,5 @@
 mod common;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,13 +8,9 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use runic::substrate::{ArtifactSource, SessionEvent};
+use runic::store::{ArtifactSource, SessionEvent};
 use runic::types::{ContentBlock, MessageContent, StopReason, TokenUsage};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_serve::ServeError;
-use runic_serve::app::AppState;
-use runic_serve::hosts::AgentRegistry;
-use runic_serve::routes::runs::input::{RunMessageRequest, input_from_message};
 
 struct PanicProvider;
 
@@ -63,11 +58,13 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-fn has_inline_bytes(events: &[runic::substrate::StoredEvent]) -> bool {
-    events.iter().any(|s| {
-        matches!(&s.event, SessionEvent::Message { msg, .. }
-            if matches!(&msg.content, MessageContent::Blocks(b)
-                if b.iter().any(|c| matches!(c, ContentBlock::Image { .. } | ContentBlock::File { .. }))))
+fn has_inline_bytes(events: &[runic::store::StoredEvent]) -> bool {
+    events.iter().any(|stored| {
+        matches!(&stored.event, SessionEvent::Message { msg, .. }
+            if matches!(&msg.content, MessageContent::Blocks(blocks)
+                if blocks.iter().any(|block| matches!(block,
+                    ContentBlock::Image { source, .. } | ContentBlock::File { source, .. }
+                        if source.inline().is_some()))))
     })
 }
 
@@ -78,7 +75,7 @@ fn name() -> impl Strategy<Value = String> {
 fn valid_block_strategy() -> impl Strategy<Value = Value> {
     prop_oneof![
         "[a-z ]{1,12}".prop_map(|t| json!({ "type": "text", "text": t })),
-        Just(json!({ "type": "image", "media_type": "image/png", "data": "aGVsbG8=" })),
+        Just(json!({ "type": "image", "media_type": "image/png", "inline": "aGVsbG8=" })),
     ]
 }
 
@@ -166,7 +163,7 @@ proptest! {
     }
 
     #[test]
-    fn artifact_refs_never_cross_ownership(owner in name(), attacker in name()) {
+    fn stored_artifacts_never_cross_ownership(owner in name(), attacker in name()) {
         prop_assume!(owner != attacker);
         rt().block_on(async {
             let Some(h) = common::harness().await else { return Ok(()) };
@@ -178,35 +175,32 @@ proptest! {
                 .await
                 .unwrap();
 
-            let state = AppState {
-                sessions: h.sessions.clone(),
-                blobs: h.blobs.clone(),
-                runs: h.runs(),
-                pool: h.pool.clone(),
-                events: runic_serve::stream::LocalEvents::new(),
-                transcriber: None,
-                agents: Arc::new(AgentRegistry::new(HashMap::from([(
-                    "main".to_string(),
-                    common::agent(Arc::new(ScriptedProvider)).into(),
-                )]))),
-                completions: runic_serve::completion::Completions::new(),
-                hooks: Arc::new(runic_serve::hook::HookRegistry::default()),
-                schedules: runic_serve::store::Schedules::new(h.pool.clone()),
-                routines: Arc::new(runic_serve::routines::RoutineRegistry::default()),
-            };
-            let ref_body: RunMessageRequest = serde_json::from_value(json!({
-                "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }]
-            }))
-            .unwrap();
-            let stolen = input_from_message(&state, &attacker, "vault", ref_body.into_message().unwrap()).await;
-            prop_assert!(matches!(stolen, Err(ServeError::BadRequest(_))));
+            common::create_session(&app, &attacker, "vault").await;
+            let stolen = h
+                .durable
+                .clone()
+                .hook_with(|store| runic::builtin::ArtifactResolver::new(store.artifacts()));
+            let error = runic::session((attacker.as_str(), "vault"))
+                .store(stolen)
+                .invoke(
+                    &common::agent(Arc::new(ScriptedProvider)),
+                    runic::Input::new().artifact(&art.id, "text/plain"),
+                )
+                .await
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            prop_assert!(
+                error.contains("does not belong to this session"),
+                "another tenant reached the artifact: {error:?}"
+            );
 
             let resp = app
                 .clone()
                 .oneshot(common::post_json(
                     "/sessions/vault/runs/wait",
                     &owner,
-                    json!({ "content": [{ "type": "artifact_ref", "id": art.id, "media_type": "image/png" }] })
+                    json!({ "content": [{ "type": "file", "media_type": "text/plain", "stored": art.id }] })
                         .to_string(),
                 ))
                 .await

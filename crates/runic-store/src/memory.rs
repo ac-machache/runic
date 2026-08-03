@@ -1,6 +1,5 @@
-//! In-RAM backends (tests / ephemeral, no-persistence mode):
-//! [`MemoryArtifactStore`] for media bytes and [`MemorySessionStore`] for the
-//! session event log. Nothing here survives a restart.
+//! In-RAM session event log (tests / ephemeral, no-persistence mode).
+//! Nothing here survives a restart.
 
 use std::collections::HashMap;
 
@@ -12,89 +11,8 @@ use runic_types::Role;
 
 use tokio::sync::RwLock;
 
-use crate::artifacts::{Artifact, ArtifactSource, ArtifactStore, new_artifact_id};
 use crate::sessions::event_at;
 use crate::{ChatHit, Error, Result, SessionMeta, SessionStore, StoredEvent};
-
-/// Bytes live in a map; nothing persists.
-#[derive(Default)]
-pub struct MemoryArtifactStore {
-    blobs: RwLock<HashMap<String, (Artifact, Vec<u8>)>>,
-    index: RwLock<HashMap<(String, String), Vec<String>>>,
-}
-
-impl MemoryArtifactStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-#[async_trait]
-impl ArtifactStore for MemoryArtifactStore {
-    async fn put(
-        &self,
-        tenant: &str,
-        session_id: &str,
-        mime_type: &str,
-        source: ArtifactSource,
-        bytes: &[u8],
-    ) -> Result<Artifact> {
-        let artifact = Artifact {
-            id: new_artifact_id(),
-            mime_type: mime_type.to_string(),
-            size: bytes.len() as u64,
-            source,
-            created_at: Utc::now(),
-        };
-        self.blobs
-            .write()
-            .await
-            .insert(artifact.id.clone(), (artifact.clone(), bytes.to_vec()));
-        self.index
-            .write()
-            .await
-            .entry((tenant.to_string(), session_id.to_string()))
-            .or_default()
-            .push(artifact.id.clone());
-        Ok(artifact)
-    }
-
-    async fn get(&self, id: &str) -> Result<Vec<u8>> {
-        self.blobs
-            .read()
-            .await
-            .get(id)
-            .map(|(_, b)| b.clone())
-            .ok_or_else(|| Error::NotFound(id.to_string()))
-    }
-
-    async fn head(&self, id: &str) -> Result<Artifact> {
-        self.blobs
-            .read()
-            .await
-            .get(id)
-            .map(|(m, _)| m.clone())
-            .ok_or_else(|| Error::NotFound(id.to_string()))
-    }
-
-    async fn list(&self, tenant: &str, session_id: &str) -> Result<Vec<Artifact>> {
-        let index = self.index.read().await;
-        let blobs = self.blobs.read().await;
-        let ids = index
-            .get(&(tenant.to_string(), session_id.to_string()))
-            .cloned()
-            .unwrap_or_default();
-        Ok(ids
-            .iter()
-            .filter_map(|id| blobs.get(id).map(|(m, _)| m.clone()))
-            .collect())
-    }
-
-    async fn delete(&self, id: &str) -> Result<()> {
-        self.blobs.write().await.remove(id);
-        Ok(())
-    }
-}
 
 // ─── MemorySessionStore ──────────────────────────────────────────────────────
 
@@ -401,27 +319,6 @@ impl SessionStore for MemorySessionStore {
 mod tests {
     use super::*;
     use crate::SessionScope;
-
-    #[tokio::test]
-    async fn memory_artifact_roundtrip() {
-        let s = MemoryArtifactStore::new();
-        let a = s
-            .put(
-                "t",
-                "sess",
-                "application/pdf",
-                ArtifactSource::UserUpload,
-                b"%PDF",
-            )
-            .await
-            .unwrap();
-        assert_eq!(s.get(&a.id).await.unwrap(), b"%PDF");
-        assert_eq!(s.head(&a.id).await.unwrap().mime_type, "application/pdf");
-        assert_eq!(s.list("t", "sess").await.unwrap().len(), 1);
-        assert!(s.list("t", "other").await.unwrap().is_empty());
-        s.delete(&a.id).await.unwrap();
-        assert!(matches!(s.get(&a.id).await, Err(Error::NotFound(_))));
-    }
 
     // ── MemorySessionStore ──────────────────────────────────────────────────
 

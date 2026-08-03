@@ -4,8 +4,8 @@
 
 use chrono::{DateTime, Utc};
 
-use runic_substrate::SessionEvent;
-use runic_substrate::{ArtifactSource, ArtifactStore, SessionStore, StoredEvent, replay_messages};
+use runic_store::SessionEvent;
+use runic_store::{ArtifactSource, ArtifactStore, SessionStore, StoredEvent, replay_messages};
 use runic_types::Message;
 
 use crate::common::ids::{tenant_session, uid};
@@ -78,7 +78,7 @@ pub async fn one_thousand_sessions_one_tenant(store: &dyn SessionStore) {
     let mut cursor: Option<(DateTime<Utc>, String)> = None;
     loop {
         let page = store
-            .list_sessions_page(&t, cursor.clone(), 50, runic_substrate::SessionScope::All)
+            .list_sessions_page(&t, cursor.clone(), 50, runic_store::SessionScope::All)
             .await
             .unwrap();
         if page.is_empty() {

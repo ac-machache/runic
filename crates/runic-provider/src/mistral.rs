@@ -2,7 +2,7 @@ use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use crate::{CompletionRequest, CompletionResponse, Provider, ProviderError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
-use runic_types::{ContentBlock, MessageContent, Role, StopReason, TokenUsage, ToolCall};
+use runic_types::{ContentBlock, MessageContent, Role, Source, StopReason, TokenUsage, ToolCall};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -75,8 +75,12 @@ fn http_error(status: u16, retry_after: Option<u64>, message: String) -> Provide
     }
 }
 
-fn base64_len_bytes(data: &str) -> usize {
-    data.len() / 4 * 3
+fn data_uri(media_type: &str, bytes: &[u8]) -> String {
+    use base64::Engine;
+    format!(
+        "data:{media_type};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
 }
 
 fn validate_media(request: &CompletionRequest) -> Result<(), ProviderError> {
@@ -87,9 +91,12 @@ fn validate_media(request: &CompletionRequest) -> Result<(), ProviderError> {
         };
         for block in blocks {
             match block {
-                ContentBlock::Image { data, .. } => {
+                ContentBlock::Image { source, .. } => {
                     images += 1;
-                    if base64_len_bytes(data) > MAX_IMAGE_BYTES {
+                    if source
+                        .inline()
+                        .is_some_and(|bytes| bytes.len() > MAX_IMAGE_BYTES)
+                    {
                         return Err(ProviderError::Api {
                             status: 413,
                             message: format!(
@@ -99,7 +106,11 @@ fn validate_media(request: &CompletionRequest) -> Result<(), ProviderError> {
                         });
                     }
                 }
-                ContentBlock::File { data, .. } if base64_len_bytes(data) > MAX_DOCUMENT_BYTES => {
+                ContentBlock::File { source, .. }
+                    if source
+                        .inline()
+                        .is_some_and(|bytes| bytes.len() > MAX_DOCUMENT_BYTES) =>
+                {
                     return Err(ProviderError::Api {
                         status: 413,
                         message: format!(
@@ -441,20 +452,36 @@ fn build_messages(request: &CompletionRequest) -> Vec<MistralMessage> {
                         ContentBlock::Text { text, .. } => {
                             parts.push(MistralChunk::Text { text: text.clone() });
                         }
-                        ContentBlock::Image { media_type, data } => {
-                            parts.push(MistralChunk::ImageUrl {
-                                image_url: format!("data:{media_type};base64,{data}"),
-                            });
-                        }
-                        ContentBlock::File { media_type, data } => {
-                            parts.push(MistralChunk::DocumentUrl {
-                                document_url: format!("data:{media_type};base64,{data}"),
-                                document_name: None,
-                            });
-                        }
-                        ContentBlock::ArtifactRef { id, .. } => {
-                            warn!(artifact = %id, "unresolved ArtifactRef reached Mistral — dropping");
-                        }
+                        ContentBlock::Image {
+                            media_type, source, ..
+                        } => match source {
+                            Source::Inline(bytes) => parts.push(MistralChunk::ImageUrl {
+                                image_url: data_uri(media_type, bytes),
+                            }),
+                            Source::Url(url) => parts.push(MistralChunk::ImageUrl {
+                                image_url: url.clone(),
+                            }),
+                            other => {
+                                warn!(source = ?other, "Mistral cannot take this image source — dropping")
+                            }
+                        },
+                        ContentBlock::File {
+                            media_type,
+                            filename,
+                            source,
+                        } => match source {
+                            Source::Inline(bytes) => parts.push(MistralChunk::DocumentUrl {
+                                document_url: data_uri(media_type, bytes),
+                                document_name: filename.clone(),
+                            }),
+                            Source::Url(url) => parts.push(MistralChunk::DocumentUrl {
+                                document_url: url.clone(),
+                                document_name: filename.clone(),
+                            }),
+                            other => {
+                                warn!(source = ?other, "Mistral cannot take this file source — dropping")
+                            }
+                        },
                         _ => {}
                     }
                 }
@@ -1030,7 +1057,8 @@ mod tests {
             },
             ContentBlock::File {
                 media_type: "application/pdf".into(),
-                data: "JVBERi0x".into(),
+                filename: Some("report.pdf".into()),
+                source: Source::Inline(b"%PDF-1".to_vec()),
             },
         ])]);
         let messages = build_messages(&req);
@@ -1048,7 +1076,8 @@ mod tests {
     fn an_image_becomes_an_image_url_data_uri() {
         let req = request_with(vec![user_blocks(vec![ContentBlock::Image {
             media_type: "image/png".into(),
-            data: "aWc=".into(),
+            filename: None,
+            source: Source::Inline(b"ig".to_vec()),
         }])]);
         let messages = build_messages(&req);
         let v = serde_json::to_value(&messages[1]).unwrap();
@@ -1468,20 +1497,22 @@ mod tests {
 
     #[test]
     fn media_preflight_enforces_mistral_limits() {
-        let big_image = "A".repeat((MAX_IMAGE_BYTES + 1024) * 4 / 3);
+        let big_image = vec![0u8; MAX_IMAGE_BYTES + 1];
         let req = request_with(vec![user_blocks(vec![ContentBlock::Image {
             media_type: "image/png".into(),
-            data: big_image,
+            filename: None,
+            source: Source::Inline(big_image),
         }])]);
         assert!(matches!(
             validate_media(&req),
             Err(ProviderError::Api { status: 413, .. })
         ));
 
-        let big_doc = "A".repeat((MAX_DOCUMENT_BYTES + 1024) * 4 / 3);
+        let big_doc = vec![0u8; MAX_DOCUMENT_BYTES + 1];
         let req = request_with(vec![user_blocks(vec![ContentBlock::File {
             media_type: "application/pdf".into(),
-            data: big_doc,
+            filename: None,
+            source: Source::Inline(big_doc),
         }])]);
         assert!(matches!(
             validate_media(&req),
@@ -1491,7 +1522,8 @@ mod tests {
         let nine_images: Vec<ContentBlock> = (0..9)
             .map(|_| ContentBlock::Image {
                 media_type: "image/png".into(),
-                data: "AAAA".into(),
+                filename: None,
+                source: Source::Inline(b"\x00\x00\x00".to_vec()),
             })
             .collect();
         let req = request_with(vec![user_blocks(nine_images)]);
@@ -1502,7 +1534,8 @@ mod tests {
 
         let req = request_with(vec![user_blocks(vec![ContentBlock::Image {
             media_type: "image/png".into(),
-            data: "AAAA".into(),
+            filename: None,
+            source: Source::Inline(b"\x00\x00\x00".to_vec()),
         }])]);
         assert!(validate_media(&req).is_ok());
     }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use runic::{Agent, Input, Llm};
 use runic_provider::{CompletionRequest, CompletionResponse, Provider, ProviderError};
-use runic_substrate::{MemorySessionStore, SessionStore};
+use runic_store::Store;
 use runic_types::{ContentBlock, StopReason, TokenUsage};
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -67,7 +67,7 @@ async fn session_run_carries_session_and_hydrate_spans() {
         .finish();
 
     let provider = ScriptedProvider::new(vec![text("first"), text("second")]);
-    let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
+    let store = Store::memory().unwrap();
     let agent = Agent::new(Llm::new(provider, "test-model"));
 
     let _guard = tracing::subscriber::set_default(subscriber);

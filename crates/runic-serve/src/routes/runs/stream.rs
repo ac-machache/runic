@@ -52,7 +52,7 @@ fn resume_from(headers: &HeaderMap, run_id: &str) -> Result<u64, Ended> {
     ),
     responses(
         (status = 200, description = "SSE stream; the first event carries the run id", body = String),
-        (status = 400, description = "Invalid body or artifact reference", body = ErrorBody),
+        (status = 400, description = "Invalid body or stored artifact", body = ErrorBody),
         (status = 404, description = "Unknown agent", body = ErrorBody)
     )
 )]
